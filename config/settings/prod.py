@@ -30,3 +30,12 @@ CACHES = {
         }
     }
 }
+
+CSRF_TRUSTED_ORIGINS = ['http://3.147.66.56']
+
+# 2. Disable SSL requirements (Since we don't have a domain/cert yet)
+SECURE_SSL_REDIRECT = False
+
+# 3. Allow Cookies over HTTP (Fixes the "Login Loop")
+SESSION_COOKIE_SECURE = False
+CSRF_COOKIE_SECURE = False
