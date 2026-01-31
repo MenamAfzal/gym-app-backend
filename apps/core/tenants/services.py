@@ -103,7 +103,7 @@ class TenantEntitlementService:
         return entitlements
     
     @classmethod
-    def _get_entitlements(cls, tenant):
+    def get_entitlements(cls, tenant):
         """
         Get entitlements for a tenant (cached or fresh).
         
@@ -142,7 +142,7 @@ class TenantEntitlementService:
         if not isinstance(tenant, Tenant):
             tenant = Tenant.objects.get(id=tenant)
         
-        entitlements = cls._get_entitlements(tenant)
+        entitlements = cls.get_entitlements(tenant)
         
         # Get value, default to False for boolean features
         value = entitlements.get(feature_key, False)
@@ -179,7 +179,7 @@ class TenantEntitlementService:
         if not isinstance(tenant, Tenant):
             tenant = Tenant.objects.get(id=tenant)
         
-        entitlements = cls._get_entitlements(tenant)
+        entitlements = cls.get_entitlements(tenant)
         
         if feature_key not in entitlements:
             raise ValueError(f"Feature '{feature_key}' not found for tenant {tenant.name}")
