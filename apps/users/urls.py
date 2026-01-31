@@ -2,9 +2,11 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView, TokenVerifyView
 from apps.users.views import (
+    RegistrationInitView,
     UserViewSet, 
     CustomTokenObtainPairView, 
-    UserRegistrationView
+    UserRegistrationView,
+    VerifyOTPAndRegisterView
 )
 
 router = DefaultRouter()
@@ -12,7 +14,9 @@ router.register(r'profiles', UserViewSet, basename='users')
 
 urlpatterns = [
     # Custom Auth Routes
+    path('auth/register/init/', RegistrationInitView.as_view(), name='register_init'),
     path('auth/register/', UserRegistrationView.as_view(), name='auth_register'),
+    path('auth/register/verify/', VerifyOTPAndRegisterView.as_view(), name='register_verify'),
     path('auth/login/', CustomTokenObtainPairView.as_view(), name='auth_login'),
     
     # Standard JWT Helper Routes (Refresh/Verify)

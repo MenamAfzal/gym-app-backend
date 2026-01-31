@@ -24,7 +24,8 @@ urlpatterns = [
 
     # API Version 1
     path('api/v1/platform/', include('apps.core.urls')), 
-    path('api/v1/users/', include('apps.users.urls')),  
+    path('api/v1/users/', include('apps.users.urls')),
+    path('api/v1/scheduling/', include('apps.scheduling.urls')),  
 ]
 
 if settings.DEBUG:
