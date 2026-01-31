@@ -3,6 +3,7 @@ from apps.core.tenants.models import (
     Tenant, Plan, Feature, PlanEntitlement, 
     TenantSubscription, TenantEntitlementOverride
 )
+from apps.core.tenants.services import TenantEntitlementService
 
 class FeatureSerializer(serializers.ModelSerializer):
     class Meta:
@@ -53,12 +54,42 @@ class TenantSerializer(serializers.ModelSerializer):
         return None
 
 class OnboardTenantSerializer(serializers.Serializer):
-    """
-    Composite serializer for onboarding a new gym + owner.
-    """
     gym_name = serializers.CharField(max_length=255)
     subdomain = serializers.SlugField(max_length=100)
     owner_email = serializers.EmailField()
     owner_password = serializers.CharField(write_only=True, min_length=8)
     initial_plan_id = serializers.UUIDField(required=False)
+    branding = serializers.JSONField(required=False, default=dict)
+
+class TenantSerializer(serializers.ModelSerializer):
+    current_subscription = serializers.SerializerMethodField()
+    entitlements = serializers.SerializerMethodField() # New Requirement
+    
+    class Meta:
+        model = Tenant
+        fields = [
+            'id', 'name', 'subdomain', 'branding', 
+            'is_active', 'created_at', 
+            'current_subscription', 'entitlements'
+        ]
+        read_only_fields = ['id', 'created_at']
+
+    def get_current_subscription(self, obj):
+        # OPTIMIZATION: Use Python-side filtering if prefetch_related was used.
+        # This prevents 1 query per tenant in the list view.
+        if hasattr(obj, '_prefetched_objects_cache') and 'subscriptions' in obj._prefetched_objects_cache:
+            # Find the active one in memory
+            active_sub = next(
+                (s for s in obj.subscriptions.all() if s.status == 'active'), 
+                None
+            )
+            return TenantSubscriptionSerializer(active_sub).data if active_sub else None
+        
+        # Fallback for single instance retrieval
+        sub = obj.subscriptions.filter(status='active').first()
+        return TenantSubscriptionSerializer(sub).data if sub else None
+
+    def get_entitlements(self, obj):
+        # Returns the resolved list of features this tenant has access to
+        return TenantEntitlementService.get_entitlements(obj)
     

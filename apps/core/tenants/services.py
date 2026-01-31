@@ -216,18 +216,22 @@ class TenantAdministrationService:
 
     @staticmethod
     @transaction.atomic
-    def onboard_tenant(gym_name, subdomain, owner_email, owner_password, initial_plan_id=None):
+    def onboard_tenant(gym_name, subdomain, owner_email, owner_password, initial_plan_id=None, branding=None):
         """
-        Creates a Tenant, assigns a Plan, and creates the Owner User.
+        Creates Tenant (with branding), Plan, and Owner.
         """
-        # 1. Validation
         if Tenant.objects.filter(subdomain=subdomain).exists():
             raise ValidationError(f"Subdomain '{subdomain}' is already taken.")
 
-        # 2. Create Tenant
-        tenant = Tenant.objects.create(name=gym_name, subdomain=subdomain)
+        # Fix: Default to empty dict if None to prevent null errors if DB enforces it
+        branding_data = branding if branding else {}
 
-        # 3. Assign Plan (if provided)
+        tenant = Tenant.objects.create(
+            name=gym_name, 
+            subdomain=subdomain,
+            branding=branding_data
+        )
+
         if initial_plan_id:
             try:
                 plan = Plan.objects.get(id=initial_plan_id)
@@ -235,7 +239,6 @@ class TenantAdministrationService:
             except Plan.DoesNotExist:
                 raise ValidationError("Invalid Plan ID provided.")
 
-        # 4. Create Owner User (Delegating to User Service)
         UserService.create_user_with_profile(
             email=owner_email,
             password=owner_password,

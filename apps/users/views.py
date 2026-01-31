@@ -8,16 +8,18 @@ from django.core.exceptions import ValidationError
 
 from apps.users.serializers import (
     CustomTokenObtainPairSerializer,
+    RegistrationInitSerializer,
     UserSerializer, 
     CreateUserSerializer, 
-    UserProfileSerializer
+    UserProfileSerializer,
+    VerifyOTPSerializer
 )
-from apps.users.services import UserService
-from apps.users.models import UserRole
+from apps.users.services import AuthService, UserService
+from apps.users.models import OTPPurpose, UserRole
 from apps.core.permissions import TenantFeaturePermission
 from rest_framework_simplejwt.views import TokenObtainPairView 
 from rest_framework.views import APIView 
-
+from rest_framework import parsers
 class UserViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing users within a tenant.
@@ -82,9 +84,6 @@ class CustomTokenObtainPairView(TokenObtainPairView):
 
 
 class UserRegistrationView(APIView):
-    """
-    Public Registration Endpoint.
-    """
     permission_classes = [permissions.AllowAny]
     serializer_class = CreateUserSerializer
 
@@ -93,37 +92,46 @@ class UserRegistrationView(APIView):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
-        # Security: Public registration usually implies 'Client' or 'Gym Owner' (via specific flow).
-        # We must block 'Platform Admin' creation here.
         if data['role'] == UserRole.PLATFORM_ADMIN:
             return Response(
                 {"detail": "Platform Admins cannot register publicly."}, 
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        try:
-            # Note: For public registration, we might need to handle 'tenant' lookup 
-            # if a user registers via a gym's subdomain.
-            # For now, we assume the middleware has set request.tenant if applicable,
-            # OR the payload must include a tenant_id if it's an invite flow.
-            
-            # Logic: If request.tenant exists (subdomain), register user to that tenant.
-            target_tenant = getattr(request, 'tenant', None)
-            
-            # If no subdomain, and they try to register as Client/Trainer, fail.
-            if not target_tenant and data['role'] != UserRole.GYM_OWNER:
-                 return Response(
-                     {"detail": "Must register via a Gym Subdomain."}, 
-                     status=status.HTTP_400_BAD_REQUEST
-                 )
+        # 1. Resolve Tenant
+        target_tenant = None
+        
+        # Priority A: Explicit ID (Mobile Apps / Central Frontend)
+        if 'tenant_id' in data:
+            from apps.core.tenants.models import Tenant
+            try:
+                target_tenant = Tenant.objects.get(id=data['tenant_id'])
+            except Tenant.DoesNotExist:
+                return Response(
+                    {"detail": "Invalid tenant_id provided."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        # Priority B: Subdomain (Web Tenant)
+        elif hasattr(request, 'tenant') and request.tenant:
+            target_tenant = request.tenant
 
+        # Validation: Regular users must belong to a tenant
+        if not target_tenant and data['role'] != UserRole.GYM_OWNER:
+             return Response(
+                 {"detail": "Registration requires a valid Tenant Context (via subdomain or tenant_id)."}, 
+                 status=status.HTTP_400_BAD_REQUEST
+             )
+
+        try:
             user = UserService.create_user_with_profile(
                 email=data['email'],
                 password=data['password'],
                 role=data['role'],
                 tenant=target_tenant,
                 nickname=data.get('nickname'),
-                bio=data.get('bio')
+                bio=data.get('bio'),
+                profile_image=data.get('profile_image')
             )
             
             return Response(
@@ -133,4 +141,68 @@ class UserRegistrationView(APIView):
             
         except Exception as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+class RegistrationInitView(APIView):
+    """
+    Step 1: Init Registration.
+    Accepts: Multipart/Form-Data (Email, Password, Tenant, Image).
+    Action: Saves to Pending -> Sends OTP.
+    """
+    permission_classes = [permissions.AllowAny]
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser] # Required for Image
+    serializer_class = RegistrationInitSerializer
+
+    def post(self, request):
+        serializer = self.serializer_class(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        
+        # 1. Create Pending Record (Handles Image Save)
+        AuthService.create_pending_registration(
+            validated_data=serializer.validated_data,
+            files=request.FILES
+        )
+
+        # 2. Generate & Send OTP
+        email = serializer.validated_data['email']
+        code = AuthService.create_email_otp(email, OTPPurpose.REGISTRATION)
+        AuthService.send_email_otp(email, code, OTPPurpose.REGISTRATION)
+
+        return Response(
+            {"detail": "OTP sent to email. Verify to complete registration."},
+            status=status.HTTP_200_OK
+        )
+
+
+class VerifyOTPAndRegisterView(APIView):
+    """
+    Step 2: Finalize Registration.
+    Accepts: JSON (Email, Code).
+    Action: Verifies OTP -> Creates User -> Returns Token/User.
+    """
+    permission_classes = [permissions.AllowAny]
+    serializer_class = VerifyOTPSerializer
+
+    def post(self, request):
+        serializer = self.serializer_class(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        data = serializer.validated_data
+        
+        # 1. Verify
+        AuthService.verify_email_otp(
+            email=data['email'], 
+            code=data['code'], 
+            purpose=OTPPurpose.REGISTRATION
+        )
+        
+        # 2. Finalize (Move Pending -> Real User)
+        user = AuthService.finalize_registration(email=data['email'])
+
+        return Response(
+            {
+                "detail": "Registration successful.",
+                "user": UserSerializer(user).data
+            },
+            status=status.HTTP_201_CREATED
+        )
             

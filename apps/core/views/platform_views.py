@@ -30,7 +30,7 @@ class PlatformTenantViewSet(viewsets.ModelViewSet):
     API for Managing Gyms (Tenants).
     Only accessible by Platform Admins.
     """
-    queryset = Tenant.objects.all().order_by('-created_at')
+    queryset = Tenant.objects.all().prefetch_related('subscriptions').order_by('-created_at')
     serializer_class = TenantSerializer
     permission_classes = [IsPlatformAdmin]
     

@@ -17,12 +17,14 @@ DJANGO_APPS = [
 
 THIRD_PARTY_APPS = [
     'rest_framework',
+    'django_filters',
 ]
 
 LOCAL_APPS = [
     'apps.core',
     'apps.core.tenants',
     'apps.users',
+    "apps.scheduling",
 ]
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
@@ -124,6 +126,10 @@ REST_FRAMEWORK = {
     ),
     # Optional: Better error formatting
     'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
+
+    'DEFAULT_FILTER_BACKENDS': [
+        'django_filters.rest_framework.DjangoFilterBackend',
+    ],
 }
 
 from datetime import timedelta
