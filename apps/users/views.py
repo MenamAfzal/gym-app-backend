@@ -5,6 +5,7 @@ from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.core.exceptions import ValidationError
+from apps.scheduling.permissions import IsOwnerOrManager
 
 from apps.users.serializers import (
     CustomTokenObtainPairSerializer,
@@ -32,7 +33,7 @@ class UserViewSet(viewsets.ModelViewSet):
         # Or explicitly filter if using standard objects manager
         return self.request.user.tenant.users.select_related('profile').all()
 
-    @action(detail=False, methods=['post'], permission_classes=[permissions.IsAdminUser])
+    @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrManager])
     def create_staff(self, request):
         """
         Endpoint to create a Trainer or Manager.
