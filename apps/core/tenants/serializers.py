@@ -18,11 +18,21 @@ class PlanEntitlementSerializer(serializers.ModelSerializer):
         fields = ['id', 'feature', 'feature_key', 'value']
 
 class PlanSerializer(serializers.ModelSerializer):
-    entitlements = PlanEntitlementSerializer(many=True, read_only=True)
-    
+    # Change from read_only=True to allow receiving feature data
+    entitlements = PlanEntitlementSerializer(many=True) 
+
     class Meta:
         model = Plan
         fields = ['id', 'name', 'price', 'billing_cycle', 'is_public', 'entitlements']
+
+    def create(self, validated_data):
+        entitlements_data = validated_data.pop('entitlements')
+        plan = Plan.objects.create(**validated_data)
+        
+        # Link Features to this Plan via PlanEntitlement model
+        for item in entitlements_data:
+            PlanEntitlement.objects.create(plan=plan, **item)
+        return plan
 
 class TenantSubscriptionSerializer(serializers.ModelSerializer):
     plan_name = serializers.ReadOnlyField(source='plan.name')
