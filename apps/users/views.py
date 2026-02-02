@@ -8,6 +8,7 @@ from django.core.exceptions import ValidationError
 from apps.scheduling.permissions import IsOwnerOrManager
 
 from apps.users.serializers import (
+    ChangePasswordSerializer,
     CustomTokenObtainPairSerializer,
     RegistrationInitSerializer,
     UserSerializer, 
@@ -206,4 +207,55 @@ class VerifyOTPAndRegisterView(APIView):
             },
             status=status.HTTP_201_CREATED
         )
-            
+
+class ChangePasswordView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        
+        AuthService.change_password(
+            user=request.user, 
+            new_password=serializer.validated_data['new_password']
+        )
+        
+        return Response({"detail": "Password updated successfully."}, status=status.HTTP_200_OK)
+
+
+class UserViewSet(viewsets.ModelViewSet):
+    # Enforce tenant isolation via queryset
+    def get_queryset(self):
+        return self.request.user.tenant.users.select_related('profile').all()
+
+    @action(detail=False, methods=['get', 'patch'], permission_classes=[permissions.IsAuthenticated])
+    def me(self, request):
+        """
+        GET: Retrieve current profile.
+        PATCH: Optimized partial update for current profile.
+        """
+        user = request.user
+        
+        if request.method == 'PATCH':
+            # Use partial=True to allow only updating specific fields (e.g., just bio)
+            serializer = self.get_serializer(user, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return Response(serializer.data)
+
+        serializer = self.get_serializer(user)
+        return Response(serializer.data)
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Standard DELETE /api/profiles/{id}/
+        Restricted to Owners/Managers via permission_classes.
+        """
+        user_to_delete = self.get_object()
+        
+        try:
+            UserService.delete_user(user_to_delete)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        

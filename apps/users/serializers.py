@@ -5,6 +5,7 @@ from rest_framework import serializers
 from apps.users.models import User, UserProfile, UserRole, OTPPurpose
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from apps.core.tenants.models import Tenant
+from apps.users.services import UserService
 
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
@@ -124,3 +125,41 @@ class VerifyOTPSerializer(serializers.Serializer):
     """
     email = serializers.EmailField()
     code = serializers.CharField(max_length=6, min_length=6)
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    old_password = serializers.CharField(required=True)
+    new_password = serializers.CharField(required=True, min_length=8)
+    confirm_password = serializers.CharField(required=True)
+
+    def validate(self, attrs):
+        if attrs['new_password'] != attrs['confirm_password']:
+            raise serializers.ValidationError({"confirm_password": "Passwords do not match."})
+        return attrs
+
+    def validate_old_password(self, value):
+        user = self.context['request'].user
+        if not user.check_password(value):
+            raise serializers.ValidationError("Old password is incorrect.")
+        return value
+    
+
+class UserSerializer(serializers.ModelSerializer):
+    profile = UserProfileSerializer()
+
+    class Meta:
+        model = User
+        fields = ['id', 'email', 'role', 'profile', 'date_joined']
+        read_only_fields = ['id', 'email', 'role', 'date_joined']
+
+    def update(self, instance, validated_data):
+        # Extract nested profile data
+        profile_data = validated_data.pop('profile', {})
+        
+        # Delegate to Service Layer
+        return UserService.update_user_profile(
+            user=instance, 
+            user_data=validated_data, 
+            profile_data=profile_data
+        )
+    

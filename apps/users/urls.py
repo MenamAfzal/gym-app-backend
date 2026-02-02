@@ -2,6 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView, TokenVerifyView
 from apps.users.views import (
+    ChangePasswordView,
     RegistrationInitView,
     UserViewSet, 
     CustomTokenObtainPairView, 
@@ -22,6 +23,9 @@ urlpatterns = [
     # Standard JWT Helper Routes (Refresh/Verify)
     path('auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('auth/verify/', TokenVerifyView.as_view(), name='token_verify'),
+
+    # Change Password Route
+    path('auth/change-password/', ChangePasswordView.as_view(), name='change_password'),
     
     # ViewSets
     path('', include(router.urls)),

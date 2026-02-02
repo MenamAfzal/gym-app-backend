@@ -86,6 +86,50 @@ class UserService:
         """
         return User.objects.select_related('profile').get(id=user_id)
     
+    @staticmethod
+    @transaction.atomic
+    def update_user_profile(user, user_data=None, profile_data=None):
+        """
+        Optimized atomic update for User and UserProfile.
+        """
+        # 1. Update User fields if provided (e.g., email or name)
+        if user_data:
+            for attr, value in user_data.items():
+                setattr(user, attr, value)
+            user.save()
+
+        # 2. Update Profile fields
+        if profile_data:
+            profile, _ = UserProfile.objects.get_or_create(user=user)
+            
+            # Special handling for images to prevent clearing if not provided in partial update
+            profile_image = profile_data.pop('profile_image', None)
+            if profile_image:
+                profile.profile_image = profile_image
+            
+            for attr, value in profile_data.items():
+                setattr(profile, attr, value)
+            profile.save()
+        
+        return user
+
+    @staticmethod
+    @transaction.atomic
+    def delete_user(user):
+        """
+        Handles user deletion with safety checks.
+        In SaaS, often better to 'deactivate' rather than hard-delete.
+        """
+        # Safety: Ensure we don't accidentally delete the last Gym Owner
+        if user.role == UserRole.GYM_OWNER:
+            owner_count = User.objects.filter(tenant=user.tenant, role=UserRole.GYM_OWNER).count()
+            if owner_count <= 1:
+                raise ValidationError("Cannot delete the last Gym Owner. Transfer ownership first.")
+        
+        # Hard delete cascades to UserProfile and PendingRegistrations
+        user.delete()
+        return True
+    
 
 class AuthService:
     """
@@ -231,5 +275,19 @@ class AuthService:
         # 3. Cleanup
         pending.delete()
 
+        return user
+    
+    @staticmethod
+    @transaction.atomic
+    def change_password(user, new_password):
+        """
+        Updates the user's password and handles security side effects.
+        """
+        user.set_password(new_password)
+        user.save()
+        
+        # Optional: Invalidate tokens if rotation/blacklisting is enabled
+        # Optional: AuthService.send_security_notification(user.email, "password_change")
+        
         return user
         
