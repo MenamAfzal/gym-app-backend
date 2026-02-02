@@ -224,6 +224,9 @@ class ChangePasswordView(APIView):
 
 
 class UserViewSet(viewsets.ModelViewSet):
+    
+    serializer_class = UserSerializer 
+    permission_classes = [permissions.IsAuthenticated]
     # Enforce tenant isolation via queryset
     def get_queryset(self):
         return self.request.user.tenant.users.select_related('profile').all()
