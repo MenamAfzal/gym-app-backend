@@ -3,6 +3,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.exceptions import ValidationError, PermissionDenied
 from django.db.models import Q
 
 from .models import Session, Booking, StaffClientAssignment, PricingOption, ClientPass
