@@ -27,8 +27,14 @@ class SessionSerializer(serializers.ModelSerializer):
         ]
 
     def validate(self, data):
-        if data['start_time'] >= data['end_time']:
+        # PATCH support: Use new value if provided, else fallback to existing instance value
+        start_time = data.get('start_time', self.instance.start_time if self.instance else None)
+        end_time = data.get('end_time', self.instance.end_time if self.instance else None)
+
+        # Safety check: ensure we actually have both times before comparing
+        if start_time and end_time and start_time >= end_time:
             raise serializers.ValidationError("End time must be after start time.")
+            
         return data
 
 class BookingCreateSerializer(serializers.ModelSerializer):

@@ -32,7 +32,14 @@ class PlatformTenantViewSet(viewsets.ModelViewSet):
     """
     queryset = Tenant.objects.all().prefetch_related('subscriptions').order_by('-created_at')
     serializer_class = TenantSerializer
-    permission_classes = [IsPlatformAdmin]
+    def get_permissions(self):
+        """
+        Allow anyone to list tenants (e.g. for a directory),
+        but restrict creation/management to Platform Admins.
+        """
+        if self.action == 'list':
+            return [permissions.AllowAny()]
+        return [IsPlatformAdmin()]
     
     def create(self, request, *args, **kwargs):
         """
