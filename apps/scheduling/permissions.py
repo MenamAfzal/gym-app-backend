@@ -42,4 +42,10 @@ class IsAssignedClient(permissions.BasePermission):
             
         # Check Assignment
         return user.assigned_staff_relations.filter(staff=session.staff).exists()
-    
+
+class IsAuthenticated(permissions.BasePermission):
+    """
+    Allows access only to authenticated users.
+    """
+    def has_permission(self, request, view):
+        return request.user and request.user.is_authenticated
