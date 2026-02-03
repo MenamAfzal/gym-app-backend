@@ -4,9 +4,13 @@ from .models import Session, Booking, PricingOption, ClientPass, StaffClientAssi
 from apps.users.models import User
 
 class StaffAssignClientSerializer(serializers.ModelSerializer):
+    staff_name = serializers.CharField(source='staff.profile.nickname', read_only=True)
+    client_name = serializers.CharField(source='client.profile.nickname', read_only=True)
+    client_email = serializers.EmailField(source='client.email', read_only=True)
+
     class Meta:
         model = StaffClientAssignment
-        fields = ['id', 'staff', 'client']
+        fields = ['id', 'staff', 'client', 'staff_name', 'client_name', 'client_email']
         read_only_fields = ['id']
 
     def validate(self, data):
