@@ -32,6 +32,7 @@ class UserViewSet(viewsets.ModelViewSet):
     
     serializer_class = UserSerializer
     permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
 
     def get_queryset(self):
         # Enforce Tenant Isolation via Manager
@@ -64,7 +65,8 @@ class UserViewSet(viewsets.ModelViewSet):
                 role=data['role'],
                 tenant=request.tenant, # Injected by TenantMiddleware
                 nickname=data.get('nickname'),
-                bio=data.get('bio')
+                bio=data.get('bio'),
+                profile_image=data.get('profile_image')
             )
             
             # Serialize Output
@@ -74,13 +76,36 @@ class UserViewSet(viewsets.ModelViewSet):
         except ValidationError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get', 'patch'])
     def me(self, request):
         """
-        Get current logged-in user's profile.
+        GET: Retrieve current profile.
+        PATCH: Optimized partial update for current profile.
         """
-        serializer = UserSerializer(request.user)
+        user = request.user
+        
+        if request.method == 'PATCH':
+            # Use partial=True to allow only updating specific fields (e.g., just bio)
+            serializer = self.get_serializer(user, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+            return Response(serializer.data)
+
+        serializer = self.get_serializer(user)
         return Response(serializer.data)
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Standard DELETE /api/profiles/{id}/
+        Restricted to Owners/Managers via permission_classes.
+        """
+        user_to_delete = self.get_object()
+        
+        try:
+            UserService.delete_user(user_to_delete)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     """
@@ -225,44 +250,3 @@ class ChangePasswordView(APIView):
         )
         
         return Response({"detail": "Password updated successfully."}, status=status.HTTP_200_OK)
-
-
-class UserViewSet(viewsets.ModelViewSet):
-    
-    serializer_class = UserSerializer 
-    permission_classes = [permissions.IsAuthenticated]
-    # Enforce tenant isolation via queryset
-    def get_queryset(self):
-        return self.request.user.tenant.users.select_related('profile').all()
-
-    @action(detail=False, methods=['get', 'patch'], permission_classes=[permissions.IsAuthenticated])
-    def me(self, request):
-        """
-        GET: Retrieve current profile.
-        PATCH: Optimized partial update for current profile.
-        """
-        user = request.user
-        
-        if request.method == 'PATCH':
-            # Use partial=True to allow only updating specific fields (e.g., just bio)
-            serializer = self.get_serializer(user, data=request.data, partial=True)
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
-            return Response(serializer.data)
-
-        serializer = self.get_serializer(user)
-        return Response(serializer.data)
-
-    def destroy(self, request, *args, **kwargs):
-        """
-        Standard DELETE /api/profiles/{id}/
-        Restricted to Owners/Managers via permission_classes.
-        """
-        user_to_delete = self.get_object()
-        
-        try:
-            UserService.delete_user(user_to_delete)
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        except ValidationError as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-        
