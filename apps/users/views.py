@@ -22,10 +22,14 @@ from apps.core.permissions import TenantFeaturePermission
 from rest_framework_simplejwt.views import TokenObtainPairView 
 from rest_framework.views import APIView 
 from rest_framework import parsers
+from .models import User
 class UserViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing users within a tenant.
     """
+
+    queryset = User.objects.all()
+    
     serializer_class = UserSerializer
     permission_classes = [permissions.IsAuthenticated]
 
