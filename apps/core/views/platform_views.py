@@ -55,7 +55,9 @@ class PlatformTenantViewSet(viewsets.ModelViewSet):
                 subdomain=data['subdomain'],
                 owner_email=data['owner_email'],
                 owner_password=data['owner_password'],
-                initial_plan_id=data.get('initial_plan_id')
+                initial_plan_id=data.get('initial_plan_id'),
+                branding=data.get('branding')
+                
             )
             return Response(
                 TenantSerializer(tenant).data, 
