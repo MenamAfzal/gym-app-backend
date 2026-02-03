@@ -5,6 +5,8 @@ from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.exceptions import ValidationError, PermissionDenied
 from django.db.models import Q
+from django.shortcuts import get_object_or_404
+
 
 from .models import Session, Booking, StaffClientAssignment, PricingOption, ClientPass
 from .serializers import (
