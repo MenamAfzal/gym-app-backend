@@ -31,12 +31,40 @@ class StaffAssignmentViewSet(viewsets.ModelViewSet):
     """
     queryset = StaffClientAssignment.objects.all()
     serializer_class = StaffAssignClientSerializer
-    permission_classes = [IsOwnerOrManager]
+    permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination
     
     def get_queryset(self):
-        # Optimized fetch
-        return super().get_queryset().select_related('staff', 'client', 'staff__profile', 'client__profile')
+        user = self.request.user
+        # Start with the optimized select_related to prevent N+1 queries
+        queryset = StaffClientAssignment.objects.all().select_related(
+            'staff__profile', 
+            'client__profile'
+        )
+
+        # 1. If the user is a Trainer, filter to show only their assignments
+        if user.role == UserRole.TRAINER:
+            return queryset.filter(staff=user)
+        
+        # 2. If the user is an Admin or Manager, return the full tenant-scoped list
+        elif user.role in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER]:
+            return queryset
+
+        # 3. Fallback: Return nothing for roles that shouldn't access this (like standard clients)
+        return queryset.none()
+    
+    @action(detail=False, methods=['post'], url_path='bulk-assign')
+    def bulk_assign(self, request):
+        staff_id = request.data.get('staff')
+        client_ids = request.data.get('clients', []) # Expects a list of UUIDs
+
+        assignments = []
+        for c_id in client_ids:
+            assignments.append(StaffClientAssignment(staff_id=staff_id, client_id=c_id, tenant=request.tenant))
+        
+        # Use ignore_conflicts to skip clients already assigned to this trainer
+        StaffClientAssignment.objects.bulk_create(assignments, ignore_conflicts=True)
+        return Response({"detail": f"Successfully assigned {len(assignments)} clients."}, status=201)
 
 class SessionViewSet(viewsets.ModelViewSet):
     """
