@@ -10,7 +10,7 @@ from .serializers import (
     ClientPassSerializer, PricingOptionSerializer, SessionSerializer, BookingCreateSerializer, BookingReadSerializer, 
     BookingEditSerializer, StaffAssignClientSerializer
 )
-from .permissions import IsGymStaffOrOwner, IsOwnerOrManager, IsAssignedClient
+from .permissions import IsAuthenticated, IsGymStaffOrOwner, IsOwnerOrManager, IsAssignedClient
 from apps.users.models import User, UserRole
 
 from apps.scheduling import permissions
@@ -53,7 +53,7 @@ class SessionViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsOwnerOrManager()] # Only Admin creates sessions
-        return [permissions.IsAuthenticated()] # Clients/Staff can view
+        return [IsAuthenticated()] # Clients/Staff can view
 
 class BookingViewSet(viewsets.ModelViewSet):
     """
