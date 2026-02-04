@@ -287,5 +287,15 @@ class ClientPassViewSet(viewsets.ModelViewSet):
         Ensures the pass is explicitly linked to the current tenant.
         """
         serializer.save(tenant=self.request.tenant)
+
+    @action(detail=False, methods=['get'], url_path='my-active-passes')
+    def my_active_passes(self, request):
+        passes = ClientPass.objects.filter(
+            client=request.user, 
+            is_active=True, 
+            credits_remaining__gt=0
+        ).select_related('pricing_option')
+        serializer = self.get_serializer(passes, many=True)
+        return Response(serializer.data)    
         
         
