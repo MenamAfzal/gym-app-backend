@@ -35,9 +35,10 @@ class PlatformTenantViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         """
         Allow anyone to list tenants (e.g. for a directory),
+        allow public retrieval of a single tenant (e.g. public directory/profile),
         but restrict creation/management to Platform Admins.
         """
-        if self.action == 'list':
+        if self.action in ('list', 'retrieve'):
             return [permissions.AllowAny()]
         return [IsPlatformAdmin()]
     
