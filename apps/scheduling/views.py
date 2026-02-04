@@ -56,15 +56,42 @@ class StaffAssignmentViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='bulk-assign')
     def bulk_assign(self, request):
         staff_id = request.data.get('staff')
-        client_ids = request.data.get('clients', []) # Expects a list of UUIDs
+        client_ids = request.data.get('clients', [])
 
-        assignments = []
-        for c_id in client_ids:
-            assignments.append(StaffClientAssignment(staff_id=staff_id, client_id=c_id, tenant=request.tenant))
+        # 1. Validate Staff Exists and is a Trainer
+        staff = get_object_or_404(User, id=staff_id, role='trainer', tenant=request.tenant)
+
+        # 2. Validate all Client IDs exist and belong to this gym 
+        valid_clients = User.objects.filter(
+            id__in=client_ids, 
+            role='client', 
+            tenant=request.tenant
+        ).values_list('id', flat=True)
+
+        # Check if any IDs were invalid
+        invalid_ids = set(client_ids) - set([str(cid) for cid in valid_clients])
+        if invalid_ids:
+            return Response(
+                {"detail": f"The following Client IDs are invalid or belong to another gym: {list(invalid_ids)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 3. Create Assignment Objects
+        assignments = [
+            StaffClientAssignment(
+                staff=staff, 
+                client_id=c_id, 
+                tenant=request.tenant
+            ) for c_id in valid_clients
+        ]
         
-        # Use ignore_conflicts to skip clients already assigned to this trainer
+        # 4. Perform Bulk Create
+        # ignore_conflicts=True handles cases where the link already exists
         StaffClientAssignment.objects.bulk_create(assignments, ignore_conflicts=True)
-        return Response({"detail": f"Successfully assigned {len(assignments)} clients."}, status=201)
+        
+        return Response({
+            "detail": f"Successfully processed {len(valid_clients)} assignments."
+        }, status=status.HTTP_201_CREATED)
 
 class SessionViewSet(viewsets.ModelViewSet):
     """
