@@ -41,6 +41,7 @@ class TenantMixin(models.Model):
     )
 
     objects = TenantAwareManager()
+    all_objects = models.Manager()
 
     class Meta:
         abstract = True
