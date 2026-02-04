@@ -271,4 +271,21 @@ class ClientPassViewSet(viewsets.ModelViewSet):
     queryset = ClientPass.objects.all()
     serializer_class = ClientPassSerializer # (Assume standard ModelSerializer)
     permission_classes = [IsOwnerOrManager] # Admin manually assigns passes for now
+
+    def get_queryset(self):
+        """
+        1. Filters by the current tenant (Ali Gym).
+        2. Joins profiles to prevent N+1 queries for 'client_name' and 'pricing_option_name'.
+        """
+        return ClientPass.objects.filter(tenant=self.request.tenant).select_related(
+            'client__profile', 
+            'pricing_option'
+        )
+
+    def perform_create(self, serializer):
+        """
+        Ensures the pass is explicitly linked to the current tenant.
+        """
+        serializer.save(tenant=self.request.tenant)
+        
         
