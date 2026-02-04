@@ -1,4 +1,5 @@
-from datetime import timedelta, timezone
+from datetime import timedelta
+from django.utils import timezone
 from rest_framework import serializers
 from django.db import transaction
 from .models import Session, Booking, PricingOption, ClientPass, StaffClientAssignment
