@@ -281,6 +281,11 @@ class ClientPassViewSet(viewsets.ModelViewSet):
             'client__profile', 
             'pricing_option'
         )
+    
+    def get_permissions(self):
+        if self.action == 'my_active_passes':
+            return [IsAuthenticated()]
+        return super().get_permissions()
 
     def perform_create(self, serializer):
         """
