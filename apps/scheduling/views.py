@@ -254,6 +254,19 @@ class PricingOptionViewSet(viewsets.ModelViewSet):
     serializer_class = PricingOptionSerializer # (Assume standard ModelSerializer)
     permission_classes = [IsOwnerOrManager]
 
+    def perform_create(self, serializer):
+        """
+        Force the pricing option to belong to the current user's tenant.
+        """
+        # Ensure the tenant is pulled from the request (set by Middleware)
+        serializer.save(tenant=self.request.tenant)
+
+    def get_queryset(self):
+        """
+        Explicitly filter by the current tenant to be safe.
+        """
+        return PricingOption.objects.filter(tenant=self.request.tenant)    
+
 class ClientPassViewSet(viewsets.ModelViewSet):
     queryset = ClientPass.objects.all()
     serializer_class = ClientPassSerializer # (Assume standard ModelSerializer)
