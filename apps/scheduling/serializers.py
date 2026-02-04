@@ -1,3 +1,4 @@
+from datetime import timedelta, timezone
 from rest_framework import serializers
 from django.db import transaction
 from .models import Session, Booking, PricingOption, ClientPass, StaffClientAssignment
@@ -162,4 +163,27 @@ class ClientPassSerializer(serializers.ModelSerializer):
             if data['client'].tenant_id != data['pricing_option'].tenant_id:
                raise serializers.ValidationError("Client and Pricing Option must belong to the same gym.")
         return data
+    
+    def create(self, validated_data):
+        pricing_option = validated_data['pricing_option']
+        today = timezone.now().date()
+
+        # 1. Calculate Start Date
+        if not validated_data.get('start_date'):
+            validated_data['start_date'] = pricing_option.fixed_start_date or today
+
+        # 2. Calculate Expiry Date
+        if not validated_data.get('expiry_date'):
+            if pricing_option.fixed_expiry_date:
+                validated_data['expiry_date'] = pricing_option.fixed_expiry_date
+            elif pricing_option.duration_days:
+                validated_data['expiry_date'] = validated_data['start_date'] + timedelta(days=pricing_option.duration_days)
+            else:
+                validated_data['expiry_date'] = validated_data['start_date'] + timedelta(days=365)
+
+        # 3. Calculate Credits
+        if not validated_data.get('credits_remaining'):
+            validated_data['credits_remaining'] = pricing_option.session_credits
+
+        return super().create(validated_data)
     
