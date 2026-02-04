@@ -3,6 +3,7 @@ from apps.core.tenants.models import (
     Tenant, Plan, Feature, PlanEntitlement, 
     TenantSubscription, TenantEntitlementOverride
 )
+from django.db import transaction
 from apps.core.tenants.services import TenantEntitlementService
 
 class FeatureSerializer(serializers.ModelSerializer):
@@ -33,6 +34,29 @@ class PlanSerializer(serializers.ModelSerializer):
         for item in entitlements_data:
             PlanEntitlement.objects.create(plan=plan, **item)
         return plan
+    
+    @transaction.atomic
+    def update(self, instance, validated_data):
+        # 1. Extract entitlements data
+        entitlements_data = validated_data.pop('entitlements', None)
+        
+        # 2. Update basic Plan fields (name, price, etc.)
+        instance = super().update(instance, validated_data)
+
+        # 3. Handle Nested Entitlements Sync
+        if entitlements_data is not None:
+            #  Clear existing entitlements and recreate
+            instance.entitlements.all().delete()
+            for item in entitlements_data:
+                PlanEntitlement.objects.create(plan=instance, **item)
+
+            # 4. CACHE INVALIDATION (Crucial for "Fully Managed")
+
+            affected_tenants = instance.subscriptions.filter(status='active').values_list('tenant_id', flat=True)
+            for tenant_id in affected_tenants:
+                TenantEntitlementService.invalidate_tenant_cache(tenant_id)
+        
+        return instance
 
 class TenantSubscriptionSerializer(serializers.ModelSerializer):
     plan_name = serializers.ReadOnlyField(source='plan.name')
