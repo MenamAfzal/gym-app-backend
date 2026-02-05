@@ -80,6 +80,14 @@ class User(UUIDMixin, AbstractUser):
         return f"{self.email} ({self.role})"
 
 
+class GenderChoices(models.TextChoices):
+    """Gender options for user profiles."""
+    MALE = 'male', _('Male')
+    FEMALE = 'female', _('Female')
+    OTHER = 'other', _('Other')
+    PREFER_NOT_TO_SAY = 'prefer_not_to_say', _('Prefer not to say')
+
+
 class UserProfile(UUIDMixin, TimestampMixin):
     """
     Extended user profile data.
@@ -91,18 +99,46 @@ class UserProfile(UUIDMixin, TimestampMixin):
         related_name='profile'
     )
     
+    # Basic Info
     nickname = models.CharField(max_length=50, blank=True)
     bio = models.TextField(blank=True, max_length=500)
     
-    # Requires Pillow installed (which you have in requirements.txt)
+    # Profile Image
     profile_image = models.ImageField(
         upload_to='profile_images/%Y/%m/',
         null=True,
         blank=True
     )
     
-    # We can add custom fields here
-    # e.g., trainer_specialties = models.JSONField(default=list)
+    # Personal Information
+    first_name = models.CharField(max_length=100, blank=True, help_text="User's first name")
+    last_name = models.CharField(max_length=100, blank=True, help_text="User's last name")
+    phone_number = models.CharField(max_length=20, blank=True, help_text="Contact phone number")
+    date_of_birth = models.DateField(null=True, blank=True, help_text="Date of birth")
+    gender = models.CharField(
+        max_length=20,
+        choices=GenderChoices.choices,
+        blank=True,
+        help_text="Gender"
+    )
+    
+    # Address Information
+    address = models.CharField(max_length=255, blank=True, help_text="Street address")
+    city = models.CharField(max_length=100, blank=True, help_text="City")
+    country = models.CharField(max_length=100, blank=True, help_text="Country")
+    postal_code = models.CharField(max_length=20, blank=True, help_text="Postal/ZIP code")
+    
+    # Emergency Contact
+    emergency_contact_name = models.CharField(
+        max_length=100, 
+        blank=True, 
+        help_text="Emergency contact full name"
+    )
+    emergency_contact_phone = models.CharField(
+        max_length=20, 
+        blank=True, 
+        help_text="Emergency contact phone number"
+    )
 
     def __str__(self):
         return f"Profile for {self.user.email}"
@@ -155,15 +191,32 @@ class PendingRegistration(models.Model):
     # Tenant Context (Critical for your SaaS)
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name='pending_registrations')
 
-    # Profile Fields
+    # Basic Profile Fields
     nickname = models.CharField(max_length=50, blank=True)
     bio = models.TextField(max_length=500, blank=True)
     
     # Temporary Image Storage
-    # We store it here, then move it to UserProfile upon finalization
     profile_image = models.ImageField(upload_to='pending_uploads/', null=True, blank=True)
+    
+    # Personal Information (mirrors UserProfile)
+    first_name = models.CharField(max_length=100, blank=True)
+    last_name = models.CharField(max_length=100, blank=True)
+    phone_number = models.CharField(max_length=20, blank=True)
+    date_of_birth = models.DateField(null=True, blank=True)
+    gender = models.CharField(max_length=20, choices=GenderChoices.choices, blank=True)
+    
+    # Address Information
+    address = models.CharField(max_length=255, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    country = models.CharField(max_length=100, blank=True)
+    postal_code = models.CharField(max_length=20, blank=True)
+    
+    # Emergency Contact
+    emergency_contact_name = models.CharField(max_length=100, blank=True)
+    emergency_contact_phone = models.CharField(max_length=20, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return f"Pending: {self.email} for {self.tenant.subdomain}"
+    

@@ -58,15 +58,30 @@ class UserViewSet(viewsets.ModelViewSet):
              )
 
         try:
-            # Delegate to Service
+            # Delegate to Service - pass all profile fields
             new_user = UserService.create_user_with_profile(
                 email=data['email'],
                 password=data['password'],
                 role=data['role'],
                 tenant=request.tenant, # Injected by TenantMiddleware
+                # Basic Profile
                 nickname=data.get('nickname'),
                 bio=data.get('bio'),
-                profile_image=data.get('profile_image')
+                profile_image=data.get('profile_image'),
+                # Personal Information
+                first_name=data.get('first_name'),
+                last_name=data.get('last_name'),
+                phone_number=data.get('phone_number'),
+                date_of_birth=data.get('date_of_birth'),
+                gender=data.get('gender'),
+                # Address Information
+                address=data.get('address'),
+                city=data.get('city'),
+                country=data.get('country'),
+                postal_code=data.get('postal_code'),
+                # Emergency Contact
+                emergency_contact_name=data.get('emergency_contact_name'),
+                emergency_contact_phone=data.get('emergency_contact_phone'),
             )
             
             # Serialize Output
@@ -160,9 +175,24 @@ class UserRegistrationView(APIView):
                 password=data['password'],
                 role=data['role'],
                 tenant=target_tenant,
+                # Basic Profile
                 nickname=data.get('nickname'),
                 bio=data.get('bio'),
-                profile_image=data.get('profile_image')
+                profile_image=data.get('profile_image'),
+                # Personal Information
+                first_name=data.get('first_name'),
+                last_name=data.get('last_name'),
+                phone_number=data.get('phone_number'),
+                date_of_birth=data.get('date_of_birth'),
+                gender=data.get('gender'),
+                # Address Information
+                address=data.get('address'),
+                city=data.get('city'),
+                country=data.get('country'),
+                postal_code=data.get('postal_code'),
+                # Emergency Contact
+                emergency_contact_name=data.get('emergency_contact_name'),
+                emergency_contact_phone=data.get('emergency_contact_phone'),
             )
             
             return Response(
