@@ -6,6 +6,8 @@ class DisableCSRFOnAPI(MiddlewareMixin):
     This is safe because we use JWT (Stateless) for these endpoints.
     """
     def process_request(self, request):
+        
+        print(f"DEBUG: Processing path: {request.path}")
         if request.path.startswith('/api/'):
             setattr(request, '_dont_enforce_csrf_checks', True)
             
