@@ -2,15 +2,25 @@
 User Serializers
 """
 from rest_framework import serializers
-from apps.users.models import User, UserProfile, UserRole, OTPPurpose
+from apps.users.models import User, UserProfile, UserRole, OTPPurpose, GenderChoices
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from apps.core.tenants.models import Tenant
 from apps.users.services import UserService
 
 class UserProfileSerializer(serializers.ModelSerializer):
+    """Serializer for user profile data with all extended fields."""
+    
     class Meta:
         model = UserProfile
-        fields = ['nickname', 'bio', 'profile_image']
+        fields = [
+            'nickname', 'bio', 'profile_image',
+            # Personal Information
+            'first_name', 'last_name', 'phone_number', 'date_of_birth', 'gender',
+            # Address Information
+            'address', 'city', 'country', 'postal_code',
+            # Emergency Contact
+            'emergency_contact_name', 'emergency_contact_phone',
+        ]
         read_only_fields = ['id', 'created_at']
 
 class UserSerializer(serializers.ModelSerializer):
@@ -24,14 +34,35 @@ class UserSerializer(serializers.ModelSerializer):
 class CreateUserSerializer(serializers.Serializer):
     """
     Input serializer for creating a new user.
+    All profile fields are optional for backward compatibility.
     """
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True, min_length=8)
     role = serializers.ChoiceField(choices=UserRole.choices)
+    tenant_id = serializers.UUIDField(required=False)
+    
+    # Basic Profile Fields
     nickname = serializers.CharField(required=False, allow_blank=True)
     bio = serializers.CharField(required=False, allow_blank=True)
-    profile_image = serializers.ImageField(required=False, allow_null=True) 
-    tenant_id = serializers.UUIDField(required=False)
+    profile_image = serializers.ImageField(required=False, allow_null=True)
+    
+    # Personal Information (all optional)
+    first_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    last_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    phone_number = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    date_of_birth = serializers.DateField(required=False, allow_null=True)
+    gender = serializers.ChoiceField(choices=GenderChoices.choices, required=False, allow_blank=True)
+    
+    # Address Information (all optional)
+    address = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    city = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    country = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    postal_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    
+    # Emergency Contact (all optional)
+    emergency_contact_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    emergency_contact_phone = serializers.CharField(required=False, allow_blank=True, max_length=20)
+
     def validate(self, attrs):
         """
         Cross-field validation if necessary.
@@ -79,6 +110,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 class RegistrationInitSerializer(serializers.Serializer):
     """
     Step 1 Payload: Email, Pass, Tenant info, Profile Data.
+    All profile fields are optional for flexible registration flows.
     """
     email = serializers.EmailField()
     password = serializers.CharField(write_only=True, min_length=8)
@@ -87,10 +119,27 @@ class RegistrationInitSerializer(serializers.Serializer):
     # Tenant Resolution
     tenant_id = serializers.UUIDField(required=False)
     
-    # Profile Data (Collected upfront)
+    # Basic Profile Data (Collected upfront)
     nickname = serializers.CharField(required=False, allow_blank=True)
     bio = serializers.CharField(required=False, allow_blank=True)
     profile_image = serializers.ImageField(required=False)
+    
+    # Personal Information (all optional)
+    first_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    last_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    phone_number = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    date_of_birth = serializers.DateField(required=False, allow_null=True)
+    gender = serializers.ChoiceField(choices=GenderChoices.choices, required=False, allow_blank=True)
+    
+    # Address Information (all optional)
+    address = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    city = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    country = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    postal_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    
+    # Emergency Contact (all optional)
+    emergency_contact_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    emergency_contact_phone = serializers.CharField(required=False, allow_blank=True, max_length=20)
 
     def validate_email(self, value):
         if User.objects.filter(email__iexact=value).exists():

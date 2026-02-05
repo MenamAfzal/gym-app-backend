@@ -64,18 +64,32 @@ class UserService:
             tenant=tenant
         )
 
-        # 3. Create Profile
-        # Extract known fields to prevent error on unexpected kwargs
-        nickname = profile_data.get('nickname', '')
-        bio = profile_data.get('bio', '')
-        profile_image = profile_data.get('profile_image', None)
+        # 3. Create Profile with all provided fields
+        # Define allowed profile fields for explicit handling
+        profile_fields = {
+            'nickname': profile_data.get('nickname', ''),
+            'bio': profile_data.get('bio', ''),
+            'profile_image': profile_data.get('profile_image'),
+            # Personal Information
+            'first_name': profile_data.get('first_name', ''),
+            'last_name': profile_data.get('last_name', ''),
+            'phone_number': profile_data.get('phone_number', ''),
+            'date_of_birth': profile_data.get('date_of_birth'),
+            'gender': profile_data.get('gender', ''),
+            # Address Information
+            'address': profile_data.get('address', ''),
+            'city': profile_data.get('city', ''),
+            'country': profile_data.get('country', ''),
+            'postal_code': profile_data.get('postal_code', ''),
+            # Emergency Contact
+            'emergency_contact_name': profile_data.get('emergency_contact_name', ''),
+            'emergency_contact_phone': profile_data.get('emergency_contact_phone', ''),
+        }
+        
+        # Filter out None values to avoid overwriting defaults
+        profile_fields = {k: v for k, v in profile_fields.items() if v is not None}
 
-        UserProfile.objects.create(
-            user=user,
-            nickname=nickname,
-            bio=bio,
-            profile_image=profile_image
-        )
+        UserProfile.objects.create(user=user, **profile_fields)
 
         return user
 
@@ -153,8 +167,23 @@ class AuthService:
             "password_hash": password_hash,
             "role": validated_data["role"],
             "tenant": tenant,
+            # Basic Profile
             "nickname": validated_data.get("nickname", ""),
             "bio": validated_data.get("bio", ""),
+            # Personal Information
+            "first_name": validated_data.get("first_name", ""),
+            "last_name": validated_data.get("last_name", ""),
+            "phone_number": validated_data.get("phone_number", ""),
+            "date_of_birth": validated_data.get("date_of_birth"),
+            "gender": validated_data.get("gender", ""),
+            # Address Information
+            "address": validated_data.get("address", ""),
+            "city": validated_data.get("city", ""),
+            "country": validated_data.get("country", ""),
+            "postal_code": validated_data.get("postal_code", ""),
+            # Emergency Contact
+            "emergency_contact_name": validated_data.get("emergency_contact_name", ""),
+            "emergency_contact_phone": validated_data.get("emergency_contact_phone", ""),
         }
 
         # Handle Image if present
@@ -260,11 +289,30 @@ class AuthService:
             # is_email_verified=True (Add this field to User model if you strictly need it)
         )
 
-        # 2. Create/Update Profile
+        # 2. Create/Update Profile with all fields from PendingRegistration
         # Note: User creation signal might create an empty profile, so we update it.
         profile, created = UserProfile.objects.get_or_create(user=user)
+        
+        # Basic Profile
         profile.nickname = pending.nickname
         profile.bio = pending.bio
+        
+        # Personal Information
+        profile.first_name = pending.first_name
+        profile.last_name = pending.last_name
+        profile.phone_number = pending.phone_number
+        profile.date_of_birth = pending.date_of_birth
+        profile.gender = pending.gender
+        
+        # Address Information
+        profile.address = pending.address
+        profile.city = pending.city
+        profile.country = pending.country
+        profile.postal_code = pending.postal_code
+        
+        # Emergency Contact
+        profile.emergency_contact_name = pending.emergency_contact_name
+        profile.emergency_contact_phone = pending.emergency_contact_phone
         
         # Move Image: Assign the file object from Pending to Profile
         if pending.profile_image:
