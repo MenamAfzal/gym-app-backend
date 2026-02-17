@@ -126,4 +126,23 @@ class TenantSerializer(serializers.ModelSerializer):
     def get_entitlements(self, obj):
         # Returns the resolved list of features this tenant has access to
         return TenantEntitlementService.get_entitlements(obj)
-    
+
+class CheckoutInitSerializer(serializers.Serializer):
+    """
+    Validates input for initiating a Stripe Checkout Session.
+    """
+    plan_id = serializers.UUIDField()
+    success_url = serializers.URLField(required=False)
+    cancel_url = serializers.URLField(required=False)
+
+    def validate_plan_id(self, value):
+        # Circular import avoidance
+        from apps.core.tenants.models import Plan
+        try:
+            plan = Plan.objects.get(id=value)
+            if not plan.stripe_price_id:
+                raise serializers.ValidationError("This plan is not available for purchase (Missing Stripe Price ID).")
+            return plan
+        except Plan.DoesNotExist:
+            raise serializers.ValidationError("Invalid Plan ID.")
+        

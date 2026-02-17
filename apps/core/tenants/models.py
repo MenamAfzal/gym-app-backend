@@ -32,6 +32,14 @@ class Tenant(UUIDMixin, TimestampMixin):
         help_text="Whether this tenant is active"
     )
 
+    stripe_customer_id = models.CharField(
+        max_length=255, 
+        blank=True, 
+        null=True, 
+        db_index=True,
+        help_text="Stripe Customer ID (cus_...)"
+    )
+
     class Meta:
         ordering = ['name']
         verbose_name = 'Tenant'
@@ -66,6 +74,13 @@ class Plan(UUIDMixin, TimestampMixin):
     is_public = models.BooleanField(
         default=True,
         help_text="Whether this plan is publicly available"
+    )
+
+    stripe_price_id = models.CharField(
+        max_length=255, 
+        blank=True, 
+        null=True,
+        help_text="Stripe Price ID (price_...)"
     )
 
     class Meta:
@@ -176,6 +191,14 @@ class TenantSubscription(UUIDMixin, TimestampMixin):
         null=True,
         blank=True,
         help_text="When subscription ends (null for ongoing)"
+    )
+
+    stripe_subscription_id = models.CharField(
+        max_length=255, 
+        blank=True, 
+        null=True,
+        db_index=True,
+        help_text="Stripe Subscription ID (sub_...)"
     )
 
     class Meta:
