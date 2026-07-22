@@ -70,6 +70,7 @@ class TenantMiddleware(MiddlewareMixin):
         # Set Context
         request.tenant = tenant
         request._tenant_context_token = set_current_tenant(tenant)
+        print(f"TenantMiddleware: Path={request.path} | Resolved Tenant={tenant} (ID={getattr(tenant, 'id', None)})")
         
         return None
 
