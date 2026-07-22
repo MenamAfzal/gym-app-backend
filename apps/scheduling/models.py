@@ -10,20 +10,316 @@ from datetime import timedelta
 
 User = settings.AUTH_USER_MODEL
 
-class SessionType(models.TextChoices):
-    PHYSICAL = 'physical', _('Physical')
-    VIRTUAL = 'virtual', _('Virtual')
+class Location(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Top-level tenant scoping for gym locations.
+    """
+    name = models.CharField(max_length=255)
+    address = models.TextField()
+    timezone = models.CharField(max_length=100, default='UTC', help_text="Timezone name, e.g. 'America/New_York'")
+    phone = models.CharField(max_length=20, blank=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.tenant.name if self.tenant else 'No Tenant'})"
+
+
+class Room(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Rooms within a specific Location. Used for conflict checking.
+    """
+    location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='rooms')
+    name = models.CharField(max_length=100)
+    capacity = models.PositiveIntegerField()
+    equipment_tags = models.JSONField(default=list, blank=True, help_text="List of equipment tags")
+
+    def __str__(self):
+        return f"{self.name} - {self.location.name}"
+
+
+class StaffLocation(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Mapping between Staff (User) and Locations.
+    """
+    staff = models.ForeignKey(User, on_delete=models.CASCADE, related_name='staff_locations')
+    location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='location_staff')
+
+    class Meta:
+        unique_together = ['staff', 'location']
+
+
+class StaffAvailability(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Defines bookable windows or blackouts for 1-on-1 appointments and eligibility.
+    """
+    staff = models.ForeignKey(User, on_delete=models.CASCADE, related_name='availabilities')
+    weekday_or_date = models.CharField(max_length=50, help_text="Day of week (e.g. 'monday') or YYYY-MM-DD string")
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    is_blackout = models.BooleanField(default=False)
+
+    def __str__(self):
+        type_str = "Blackout" if self.is_blackout else "Available"
+        return f"{self.staff.email} - {self.weekday_or_date} ({self.start_time}-{self.end_time}) [{type_str}]"
+
+
+class ClassTemplate(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Reusable definition of a class (does not appear on calendar directly).
+    """
+    location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='class_templates')
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    duration_min = models.PositiveIntegerField()
+    default_capacity = models.PositiveIntegerField(default=10)
+    intensity = models.CharField(max_length=50, blank=True)
+    category = models.CharField(max_length=100, blank=True)
+
+    def __str__(self):
+        return f"{self.name} ({self.duration_min} min)"
+
+
+class RecurrenceRule(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Generator settings that expand into ClassSession rows.
+    """
+    template = models.ForeignKey(ClassTemplate, on_delete=models.CASCADE, related_name='recurrence_rules')
+    days_of_week = models.JSONField(help_text="List of weekdays, e.g. ['monday', 'wednesday']")
+    start_date = models.DateField()
+    end_date = models.DateField()
+    start_time = models.TimeField()
+    room = models.ForeignKey(Room, on_delete=models.SET_NULL, null=True, blank=True, related_name='recurrence_rules')
+    staff = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='recurrence_rules', limit_choices_to={'role__in': ['trainer', 'gym_owner', 'gym_manager']})
+
+    def __str__(self):
+        return f"Rule for {self.template.name} ({self.start_date} to {self.end_date})"
+
+
+class ClassSession(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    An individual bookable class instance on the calendar.
+    """
+    STATUS_CHOICES = [
+        ('scheduled', 'Scheduled'),
+        ('cancelled', 'Cancelled'),
+        ('completed', 'Completed'),
+    ]
+    template = models.ForeignKey(ClassTemplate, on_delete=models.CASCADE, related_name='sessions')
+    recurrence_rule = models.ForeignKey(RecurrenceRule, on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions')
+    room = models.ForeignKey(Room, on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions')
+    staff = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions', limit_choices_to={'role__in': ['trainer', 'gym_owner', 'gym_manager']})
+    start_at = models.DateTimeField(db_index=True)
+    end_at = models.DateTimeField()
+    capacity = models.PositiveIntegerField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
+
+    class Meta:
+        ordering = ['start_at']
+
+    def __str__(self):
+        return f"{self.template.name} on {self.start_at} ({self.status})"
+
+    @property
+    def is_full(self):
+        return self.bookings.filter(status='booked').count() >= self.capacity
+
+
+class PackageType(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Purchasable credit package (e.g. '10-class pack').
+    """
+    location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='package_types')
+    name = models.CharField(max_length=100)
+    credit_count = models.PositiveIntegerField()
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    validity_days = models.PositiveIntegerField(help_text="Validity period in days after purchase")
+
+    def __str__(self):
+        return f"{self.name} - {self.credit_count} credits"
+
+
+class Package(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    An active instance of a purchased PackageType for a client.
+    """
+    client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='packages')
+    package_type = models.ForeignKey(PackageType, on_delete=models.PROTECT, related_name='purchased_packages')
+    credits_remaining = models.PositiveIntegerField()
+    purchased_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    def __str__(self):
+        return f"{self.package_type.name} for {self.client.email} ({self.credits_remaining} left)"
+
+    def is_valid_for_date(self, target_date):
+        target_d = target_date.date() if hasattr(target_date, 'date') else target_date
+        return (
+            self.credits_remaining > 0 and
+            self.expires_at.date() >= target_d
+        )
+
+
+class Booking(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Client's reservation of a slot in a ClassSession.
+    """
+    STATUS_CHOICES = [
+        ('booked', 'Booked'),
+        ('cancelled', 'Cancelled'),
+        ('no_show', 'No Show'),
+        ('attended', 'Attended'),
+    ]
+    client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bookings')
+    session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name='bookings')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='booked')
+    credit_source = models.ForeignKey(Package, on_delete=models.PROTECT, related_name='bookings', null=True, blank=True)
+    checked_in_at = models.DateTimeField(null=True, blank=True)
+    
+    # Metadata fields from original schema
+    join_mode = models.CharField(max_length=20, default='physical')
+    music_preference = models.CharField(max_length=100, blank=True)
+
+    class Meta:
+        unique_together = ['client', 'session']
+
+    def __str__(self):
+        return f"{self.client.email} booked {self.session.template.name} ({self.status})"
+
+
+class Appointment(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    1-on-1 private appointments (e.g. private personal training).
+    """
+    STATUS_CHOICES = [
+        ('scheduled', 'Scheduled'),
+        ('cancelled', 'Cancelled'),
+        ('completed', 'Completed'),
+        ('no_show', 'No Show'),
+    ]
+    client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='appointments')
+    provider = models.ForeignKey(User, on_delete=models.CASCADE, related_name='provider_appointments', limit_choices_to={'role__in': ['trainer', 'gym_owner', 'gym_manager']})
+    location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='appointments')
+    room = models.ForeignKey(Room, on_delete=models.SET_NULL, null=True, blank=True, related_name='appointments')
+    start_at = models.DateTimeField(db_index=True)
+    end_at = models.DateTimeField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
+    credit_source = models.ForeignKey(Package, on_delete=models.SET_NULL, null=True, blank=True, related_name='appointments')
+
+    def __str__(self):
+        return f"1-on-1: {self.client.email} with {self.provider.email} at {self.start_at}"
+
+
+class Waitlist(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    FIFO waitlist queue for full class sessions.
+    """
+    STATUS_CHOICES = [
+        ('waiting', 'Waiting'),
+        ('offered', 'Offered'),
+        ('expired', 'Expired'),
+        ('converted', 'Converted'),
+    ]
+    client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='waitlists')
+    session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name='waitlists')
+    position = models.PositiveIntegerField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='waiting')
+    offered_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Waitlist {self.position}: {self.client.email} for {self.session.template.name}"
+
+
+class SubstituteRequest(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Staff request for class session substitute coverage.
+    """
+    STATUS_CHOICES = [
+        ('open', 'Open'),
+        ('filled', 'Filled'),
+        ('expired', 'Expired'),
+    ]
+    session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name='substitute_requests')
+    requested_by_staff = models.ForeignKey(User, on_delete=models.CASCADE, related_name='requested_substitutes')
+    accepted_by_staff = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='accepted_substitutes')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='open')
+
+    def __str__(self):
+        return f"Sub Request for {self.session} by {self.requested_by_staff.email} ({self.status})"
+
+
+class Payment(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Transaction records for commerce.
+    """
+    TYPE_CHOICES = [
+        ('package_purchase', 'Package Purchase'),
+        ('drop_in', 'Drop-in'),
+        ('fee', 'Fee'),
+    ]
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('completed', 'Completed'),
+        ('failed', 'Failed'),
+    ]
+    client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='payments')
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    type = models.CharField(max_length=20, choices=TYPE_CHOICES)
+    related_booking = models.ForeignKey(Booking, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='completed')
+    provider_ref = models.CharField(max_length=255, blank=True)
+    idempotency_key = models.CharField(max_length=255, unique=True, db_index=True)
+
+    def __str__(self):
+        return f"Payment {self.id} - {self.type} - ${self.amount}"
+
+
+class CancellationPolicy(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Fee and cutoff configurations for booking cancellations.
+    """
+    SCOPE_CHOICES = [
+        ('template', 'Template'),
+        ('tier', 'Tier'),
+        ('global', 'Global'),
+    ]
+    scope_type = models.CharField(max_length=20, choices=SCOPE_CHOICES, default='global')
+    template = models.ForeignKey(ClassTemplate, on_delete=models.CASCADE, null=True, blank=True, related_name='cancellation_policies')
+    membership_tier = models.CharField(max_length=50, null=True, blank=True, help_text="e.g. VIP, Gold")
+    cutoff_hours = models.PositiveIntegerField(help_text="Cancel window cutoff in hours")
+    late_fee_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+
+    def __str__(self):
+        return f"Policy {self.scope_type} - {self.cutoff_hours}h cutoff"
+
+
+class Notification(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Inbox buffer for decoupled message transmissions.
+    """
+    CHANNEL_CHOICES = [
+        ('push', 'Push'),
+        ('sms', 'SMS'),
+        ('email', 'Email'),
+    ]
+    recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications')
+    channel = models.CharField(max_length=20, choices=CHANNEL_CHOICES)
+    template_key = models.CharField(max_length=100)
+    related_entity_id = models.UUIDField(null=True, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+
+    def __str__(self):
+        return f"Notification to {self.recipient.email} via {self.channel}"
+
 
 class StaffClientAssignment(UUIDMixin, TimestampMixin, TenantMixin):
     """
-    M2M link between Staff (Trainer) and Client.
-    Defines which staff manages which client.
+    Mapping linking trainer to client.
     """
     staff = models.ForeignKey(
         User, 
         on_delete=models.CASCADE, 
         related_name='assigned_client_relations',
-        limit_choices_to={'role': 'trainer'}
+        limit_choices_to={'role__in': ['trainer', 'gym_owner', 'gym_manager']}
     )
     client = models.ForeignKey(
         User, 
@@ -34,157 +330,9 @@ class StaffClientAssignment(UUIDMixin, TimestampMixin, TenantMixin):
 
     class Meta:
         unique_together = ['staff', 'client']
-        indexes = [
-            models.Index(fields=['staff', 'client']),
-        ]
 
     def clean(self):
-        if self.staff.role != 'trainer':
-            raise ValidationError("Assigned user must be a trainer.")
+        if self.staff.role not in ['trainer', 'gym_owner', 'gym_manager']:
+            raise ValidationError("Assigned user must be staff.")
         if self.client.role != 'client':
             raise ValidationError("Assigned target must be a client.")
-
-class PricingOption(UUIDMixin, TimestampMixin, TenantMixin):
-    """
-    Defines the product/plan a client buys.
-    """
-    name = models.CharField(max_length=100)
-    price = models.DecimalField(max_digits=10, decimal_places=2)
-    session_credits = models.PositiveIntegerField(help_text="Number of sessions this option grants")
-    
-    # Expiry Logic
-    duration_days = models.PositiveIntegerField(
-        null=True, blank=True, 
-        help_text="Valid for X days after purchase (e.g. 30)"
-    )
-    fixed_start_date = models.DateField(
-        null=True, blank=True, 
-        help_text="Hard start date (e.g. Semester start). Overrides duration."
-    )
-    fixed_expiry_date = models.DateField(
-        null=True, blank=True, 
-        help_text="Hard expiry date. Overrides duration."
-    )
-
-    def __str__(self):
-        return f"{self.name} ({self.session_credits} credits)"
-
-    def clean(self):
-        if not self.duration_days and not self.fixed_expiry_date:
-            raise ValidationError("You must specify either a duration or a fixed expiry date.")
-        if self.fixed_start_date and self.fixed_expiry_date:
-            if self.fixed_start_date >= self.fixed_expiry_date:
-                raise ValidationError("Start date must be before expiry date.")
-
-class ClientPass(UUIDMixin, TimestampMixin, TenantMixin):
-    """
-    The actual 'wallet' item assigned to a client.
-    """
-    client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='passes')
-    pricing_option = models.ForeignKey(PricingOption, on_delete=models.PROTECT)
-    credits_remaining = models.PositiveIntegerField(default=0)
-    
-    # Dates are calculated upon creation based on the PricingOption
-    start_date = models.DateField()
-    expiry_date = models.DateField()
-    is_active = models.BooleanField(default=True)
-
-    class Meta:
-        indexes = [models.Index(fields=['client', 'is_active'])]
-
-    def save(self, *args, **kwargs):
-        # Auto-calculate dates on creation if not set
-        if not self.pk: 
-            today = timezone.now().date()
-            
-            # Logic: Fixed dates take precedence
-            if self.pricing_option.fixed_start_date:
-                self.start_date = self.pricing_option.fixed_start_date
-            else:
-                self.start_date = today
-
-            if self.pricing_option.fixed_expiry_date:
-                self.expiry_date = self.pricing_option.fixed_expiry_date
-            elif self.pricing_option.duration_days:
-                self.expiry_date = self.start_date + timedelta(days=self.pricing_option.duration_days)
-            else:
-                # Fallback (should be caught by model validation)
-                self.expiry_date = today + timedelta(days=365) 
-
-            # Initialize credits
-            if self.credits_remaining == 0: 
-                self.credits_remaining = self.pricing_option.session_credits
-
-        super().save(*args, **kwargs)
-
-    def is_valid_for_session(self, session_date):
-        """Helper to check if pass covers a specific date"""
-        return (
-            self.is_active and 
-            self.credits_remaining > 0 and 
-            self.start_date <= session_date.date() <= self.expiry_date
-        )
-class Session(UUIDMixin, TimestampMixin, TenantMixin):
-    """
-    A specific class/slot created by Admin.
-    """
-    title = models.CharField(max_length=255)
-    staff = models.ForeignKey(
-        User, 
-        on_delete=models.SET_NULL, 
-        null=True, 
-        related_name='sessions_leading',
-        limit_choices_to={'role': 'trainer'}
-    )
-    start_time = models.DateTimeField(db_index=True)
-    end_time = models.DateTimeField()
-    capacity = models.PositiveIntegerField(default=10)
-    
-    session_type = models.CharField(max_length=20, choices=SessionType.choices, default=SessionType.PHYSICAL)
-    meeting_url = models.URLField(blank=True, null=True, help_text="Zoom/Meet link if virtual")
-    
-    # Prerequisite: Does this session require a specific pricing option?
-    # For MVP, we assume any active pass works, but we can link specific PricingOptions here later.
-
-    class Meta:
-        ordering = ['start_time']
-        indexes = [
-            models.Index(fields=['start_time', 'staff']),
-        ]
-
-    def __str__(self):
-        return f"{self.title} ({self.start_time})"
-
-    @property
-    def is_full(self):
-        return self.bookings.filter(status='booked').count() >= self.capacity
-
-class Booking(UUIDMixin, TimestampMixin, TenantMixin):
-    STATUS_CHOICES = [
-        ('booked', 'Booked'),
-        ('cancelled', 'Cancelled'),
-        ('completed', 'Completed'),
-    ]
-    
-    session = models.ForeignKey('Session', on_delete=models.CASCADE, related_name='bookings')
-    client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bookings')
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='booked')
-    
-    # We track WHICH pass was used, so we know where to refund
-    used_pass = models.ForeignKey(
-        ClientPass, 
-        on_delete=models.PROTECT, 
-        related_name='bookings',
-        null=True, blank=True
-    )
-    
-    join_mode = models.CharField(max_length=20, default='physical')
-    music_preference = models.CharField(max_length=100, blank=True)
-
-    class Meta:
-        unique_together = ['session', 'client']
-
-    def save(self, *args, **kwargs):
-        # Logic moved to Views/Service layer for better transactional control
-        # but basic validation remains here.
-        super().save(*args, **kwargs)

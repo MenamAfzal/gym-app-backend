@@ -38,7 +38,8 @@ CACHES = {
     }
 }
 
-CSRF_TRUSTED_ORIGINS = ['http://3.147.66.56']
+CSRF_TRUSTED_ORIGINS = [f"http://{host}" for host in ALLOWED_HOSTS if host] + [os.environ.get("FRONTEND_URL", "")]
+CSRF_TRUSTED_ORIGINS = [origin for origin in CSRF_TRUSTED_ORIGINS if origin]
 
 # 2. Disable SSL requirements (Since we don't have a domain/cert yet)
 SECURE_SSL_REDIRECT = False

@@ -23,3 +23,5 @@ venv.bak/
 
 # Docker
 docker-compose.override.yml
+pending_uploads/
+profile_images/

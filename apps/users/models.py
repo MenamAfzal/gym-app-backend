@@ -17,6 +17,7 @@ class UserRole(models.TextChoices):
     PLATFORM_ADMIN = 'platform_admin', _('Platform Admin')
     GYM_OWNER = 'gym_owner', _('Gym Owner')
     GYM_MANAGER = 'gym_manager', _('Gym Manager')
+    FRONT_DESK = 'front_desk', _('Front Desk')
     TRAINER = 'trainer', _('Trainer')
     CLIENT = 'client', _('Client')
 

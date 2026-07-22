@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# Ensure SQLite directory exists for volume mount
+mkdir -p /app/db
+
 if [ "$DATABASE" = "postgres" ]
 then
     echo "Waiting for postgres..."

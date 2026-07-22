@@ -1,4 +1,17 @@
 services:
+  # Database Service (Postgres)
+  db:
+    image: postgres:15-alpine
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_DB=gym_db
+      - POSTGRES_USER=gym_user
+      - POSTGRES_PASSWORD=gym_password
+    expose:
+      - 5432
+    restart: always
+
   # Django Application (Gunicorn)
   web:
     build: 
@@ -13,6 +26,7 @@ services:
     expose:
       - 8000
     depends_on:
+      - db
       - redis
     restart: always
 
@@ -45,6 +59,7 @@ services:
     env_file:
       - .env.prod
     depends_on:
+      - db
       - redis
     restart: always
 
@@ -57,10 +72,11 @@ services:
     env_file:
       - .env.prod
     depends_on:
+      - db
       - redis
     restart: always
 
 volumes:
   static_volume:
   media_volume:
-  
+  postgres_data:

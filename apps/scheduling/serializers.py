@@ -1,9 +1,250 @@
-from datetime import timedelta
+from datetime import timedelta, datetime
 from django.utils import timezone
 from rest_framework import serializers
 from django.db import transaction
-from .models import Session, Booking, PricingOption, ClientPass, StaffClientAssignment
+from django.db.models import Q
+from .models import (
+    Location, Room, StaffLocation, StaffAvailability, ClassTemplate,
+    RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
+    SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
+    Notification, StaffClientAssignment
+)
 from apps.users.models import User
+
+class LocationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Location
+        fields = ['id', 'name', 'address', 'timezone', 'phone', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+
+class RoomSerializer(serializers.ModelSerializer):
+    location_name = serializers.CharField(source='location.name', read_only=True)
+
+    class Meta:
+        model = Room
+        fields = ['id', 'location', 'location_name', 'name', 'capacity', 'equipment_tags', 'created_at']
+        read_only_fields = ['id', 'location_name', 'created_at']
+
+
+class StaffLocationSerializer(serializers.ModelSerializer):
+    staff_name = serializers.CharField(source='staff.profile.nickname', read_only=True)
+    staff_email = serializers.CharField(source='staff.email', read_only=True)
+    location_name = serializers.CharField(source='location.name', read_only=True)
+
+    class Meta:
+        model = StaffLocation
+        fields = ['id', 'staff', 'staff_name', 'staff_email', 'location', 'location_name', 'created_at']
+        read_only_fields = ['id', 'staff_name', 'staff_email', 'location_name', 'created_at']
+
+
+class StaffAvailabilitySerializer(serializers.ModelSerializer):
+    staff_name = serializers.CharField(source='staff.profile.nickname', read_only=True)
+
+    class Meta:
+        model = StaffAvailability
+        fields = ['id', 'staff', 'staff_name', 'weekday_or_date', 'start_time', 'end_time', 'is_blackout', 'created_at']
+        read_only_fields = ['id', 'staff_name', 'created_at']
+
+
+class ClassTemplateSerializer(serializers.ModelSerializer):
+    location_name = serializers.CharField(source='location.name', read_only=True)
+
+    class Meta:
+        model = ClassTemplate
+        fields = [
+            'id', 'location', 'location_name', 'name', 'description', 
+            'duration_min', 'default_capacity', 'intensity', 'category', 'created_at'
+        ]
+        read_only_fields = ['id', 'location_name', 'created_at']
+
+
+class RecurrenceRuleSerializer(serializers.ModelSerializer):
+    template_name = serializers.CharField(source='template.name', read_only=True)
+    room_name = serializers.CharField(source='room.name', read_only=True)
+    staff_name = serializers.CharField(source='staff.profile.nickname', read_only=True)
+
+    class Meta:
+        model = RecurrenceRule
+        fields = [
+            'id', 'template', 'template_name', 'days_of_week', 'start_date', 
+            'end_date', 'start_time', 'room', 'room_name', 'staff', 'staff_name', 'created_at'
+        ]
+        read_only_fields = ['id', 'template_name', 'room_name', 'staff_name', 'created_at']
+
+    def validate(self, data):
+        days = data.get('days_of_week')
+        if not isinstance(days, list) or not all(isinstance(d, str) for d in days):
+            raise serializers.ValidationError({"days_of_week": "Must be a list of weekday strings (e.g. ['monday', 'tuesday'])"})
+        
+        valid_days = {'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'}
+        for day in days:
+            if day.lower() not in valid_days:
+                raise serializers.ValidationError({"days_of_week": f"'{day}' is not a valid weekday name."})
+        
+        if data.get('start_date') >= data.get('end_date'):
+            raise serializers.ValidationError("End date must be after start date.")
+            
+        return data
+
+
+class ClassSessionSerializer(serializers.ModelSerializer):
+    template_name = serializers.CharField(source='template.name', read_only=True)
+    room_name = serializers.CharField(source='room.name', read_only=True)
+    staff_name = serializers.CharField(source='staff.profile.nickname', read_only=True)
+
+    class Meta:
+        model = ClassSession
+        fields = [
+            'id', 'template', 'template_name', 'recurrence_rule', 'room', 
+            'room_name', 'staff', 'staff_name', 'start_at', 'end_at', 
+            'capacity', 'status', 'is_full', 'created_at'
+        ]
+        read_only_fields = ['id', 'template_name', 'room_name', 'staff_name', 'is_full', 'created_at']
+
+    def validate(self, data):
+        start = data.get('start_at', self.instance.start_at if self.instance else None)
+        end = data.get('end_at', self.instance.end_at if self.instance else None)
+        if start and end and start >= end:
+            raise serializers.ValidationError("End time must be after start time.")
+        return data
+
+
+class PackageTypeSerializer(serializers.ModelSerializer):
+    location_name = serializers.CharField(source='location.name', read_only=True)
+
+    class Meta:
+        model = PackageType
+        fields = ['id', 'location', 'location_name', 'name', 'credit_count', 'price', 'validity_days', 'created_at']
+        read_only_fields = ['id', 'location_name', 'created_at']
+
+
+class PackageSerializer(serializers.ModelSerializer):
+    package_type_name = serializers.CharField(source='package_type.name', read_only=True)
+    client_name = serializers.CharField(source='client.profile.nickname', read_only=True)
+    client_email = serializers.CharField(source='client.email', read_only=True)
+
+    class Meta:
+        model = Package
+        fields = [
+            'id', 'client', 'client_name', 'client_email', 'package_type', 
+            'package_type_name', 'credits_remaining', 'purchased_at', 'expires_at', 'created_at'
+        ]
+        read_only_fields = ['id', 'client_name', 'client_email', 'package_type_name', 'created_at']
+        extra_kwargs = {
+            'credits_remaining': {'required': False},
+            'expires_at': {'required': False}
+        }
+
+    def create(self, validated_data):
+        pkg_type = validated_data['package_type']
+        if not validated_data.get('credits_remaining'):
+            validated_data['credits_remaining'] = pkg_type.credit_count
+        if not validated_data.get('expires_at'):
+            validated_data['expires_at'] = timezone.now() + timedelta(days=pkg_type.validity_days)
+        return super().create(validated_data)
+
+
+class BookingCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Booking
+        fields = ['id', 'session', 'join_mode', 'music_preference']
+
+    def validate(self, data):
+        session = data['session']
+        if session.status != 'scheduled':
+            raise serializers.ValidationError("Cannot book a session that is not in scheduled status.")
+        return data
+
+
+class BookingReadSerializer(serializers.ModelSerializer):
+    session = ClassSessionSerializer(read_only=True)
+    client_email = serializers.CharField(source='client.email', read_only=True)
+
+    class Meta:
+        model = Booking
+        fields = ['id', 'client', 'client_email', 'session', 'status', 'credit_source', 'checked_in_at', 'join_mode', 'music_preference', 'created_at']
+
+
+class BookingEditSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Booking
+        fields = ['join_mode', 'music_preference', 'status', 'checked_in_at']
+
+
+class AppointmentSerializer(serializers.ModelSerializer):
+    client_email = serializers.CharField(source='client.email', read_only=True)
+    provider_name = serializers.CharField(source='provider.profile.nickname', read_only=True)
+    location_name = serializers.CharField(source='location.name', read_only=True)
+    room_name = serializers.CharField(source='room.name', read_only=True)
+
+    class Meta:
+        model = Appointment
+        fields = [
+            'id', 'client', 'client_email', 'provider', 'provider_name', 
+            'location', 'location_name', 'room', 'room_name', 
+            'start_at', 'end_at', 'status', 'credit_source', 'created_at'
+        ]
+        read_only_fields = ['id', 'client_email', 'provider_name', 'location_name', 'room_name', 'created_at']
+
+    def validate(self, data):
+        start = data.get('start_at')
+        end = data.get('end_at')
+        if start >= end:
+            raise serializers.ValidationError("End time must be after start time.")
+        return data
+
+
+class WaitlistSerializer(serializers.ModelSerializer):
+    client_email = serializers.CharField(source='client.email', read_only=True)
+    session_title = serializers.CharField(source='session.template.name', read_only=True)
+
+    class Meta:
+        model = Waitlist
+        fields = ['id', 'client', 'client_email', 'session', 'session_title', 'position', 'status', 'offered_at', 'expires_at', 'created_at']
+        read_only_fields = ['id', 'client_email', 'session_title', 'position', 'created_at']
+
+
+class SubstituteRequestSerializer(serializers.ModelSerializer):
+    session_details = ClassSessionSerializer(source='session', read_only=True)
+    requested_by_email = serializers.CharField(source='requested_by_staff.email', read_only=True)
+    accepted_by_email = serializers.CharField(source='accepted_by_staff.email', read_only=True)
+
+    class Meta:
+        model = SubstituteRequest
+        fields = [
+            'id', 'session', 'session_details', 'requested_by_staff', 'requested_by_email',
+            'accepted_by_staff', 'accepted_by_email', 'status', 'created_at'
+        ]
+        read_only_fields = ['id', 'session_details', 'requested_by_email', 'accepted_by_email', 'created_at']
+
+
+class PaymentSerializer(serializers.ModelSerializer):
+    client_email = serializers.CharField(source='client.email', read_only=True)
+
+    class Meta:
+        model = Payment
+        fields = ['id', 'client', 'client_email', 'amount', 'type', 'related_booking', 'status', 'provider_ref', 'idempotency_key', 'created_at']
+        read_only_fields = ['id', 'client_email', 'created_at']
+
+
+class CancellationPolicySerializer(serializers.ModelSerializer):
+    template_name = serializers.CharField(source='template.name', read_only=True)
+
+    class Meta:
+        model = CancellationPolicy
+        fields = ['id', 'scope_type', 'template', 'template_name', 'membership_tier', 'cutoff_hours', 'late_fee_amount', 'created_at']
+        read_only_fields = ['id', 'template_name', 'created_at']
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    recipient_email = serializers.CharField(source='recipient.email', read_only=True)
+
+    class Meta:
+        model = Notification
+        fields = ['id', 'recipient', 'recipient_email', 'channel', 'template_key', 'related_entity_id', 'sent_at', 'created_at']
+        read_only_fields = ['id', 'recipient_email', 'created_at']
+
 
 class StaffAssignClientSerializer(serializers.ModelSerializer):
     staff_name = serializers.CharField(source='staff.profile.nickname', read_only=True)
@@ -16,175 +257,6 @@ class StaffAssignClientSerializer(serializers.ModelSerializer):
         read_only_fields = ['id']
 
     def validate(self, data):
-        # Ensure distinct tenant context is handled by view/mixin usually, 
-        # but validation here helps.
         if data['staff'].tenant != data['client'].tenant:
             raise serializers.ValidationError("Staff and Client must belong to the same gym.")
         return data
-
-class SessionSerializer(serializers.ModelSerializer):
-    staff_name = serializers.CharField(source='staff.profile.nickname', read_only=True)
-    
-    class Meta:
-        model = Session
-        fields = [
-            'id', 'title', 'staff', 'staff_name', 'start_time', 'end_time', 
-            'capacity', 'session_type', 'meeting_url', 'is_full'
-        ]
-
-    def validate(self, data):
-        # PATCH support: Use new value if provided, else fallback to existing instance value
-        start_time = data.get('start_time', self.instance.start_time if self.instance else None)
-        end_time = data.get('end_time', self.instance.end_time if self.instance else None)
-
-        # Safety check: ensure we actually have both times before comparing
-        if start_time and end_time and start_time >= end_time:
-            raise serializers.ValidationError("End time must be after start time.")
-            
-        return data
-
-class BookingCreateSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Booking
-        fields = ['id', 'session', 'join_mode', 'music_preference']
-
-    def validate(self, data):
-        user = self.context['request'].user
-        session = data['session']
-
-        # 1. Check Capacity
-        if session.is_full:
-            raise serializers.ValidationError("Session is fully booked.")
-
-        # 2. Check Staff Assignment (Constraint: Client can only book assigned staff)
-        if user.role == 'client' and session.staff:
-            is_assigned = user.assigned_staff_relations.filter(staff=session.staff).exists()
-            if not is_assigned:
-                raise serializers.ValidationError("You can only book sessions with your assigned trainer.")
-
-        # 3. Check for existing booking
-        if Booking.objects.filter(session=session, client=user, status='booked').exists():
-            raise serializers.ValidationError("You are already booked for this session.")
-
-        return data
-    
-    def create(self, validated_data):
-        # Auto-assign client from request
-        validated_data['client'] = self.context['request'].user
-        return super().create(validated_data)
-
-class BookingReadSerializer(serializers.ModelSerializer):
-    session = SessionSerializer(read_only=True)
-    
-    class Meta:
-        model = Booking
-        fields = ['id', 'session', 'status', 'join_mode', 'music_preference', 'created_at']
-
-class BookingEditSerializer(serializers.ModelSerializer):
-    """
-    Clients can edit details but NOT change the session.
-    """
-    class Meta:
-        model = Booking
-        fields = ['join_mode', 'music_preference']
-
-
-class PricingOptionSerializer(serializers.ModelSerializer):
-    """
-    Serializer for Plans/Credits created by Gym Admin.
-    """
-    class Meta:
-        model = PricingOption
-        fields = [
-            'id', 
-            'name', 
-            'price', 
-            'session_credits', 
-            'duration_days', 
-            'fixed_start_date', 
-            'fixed_expiry_date',
-            'created_at'
-        ]
-        read_only_fields = ['id', 'created_at']
-
-    def validate(self, data):
-        """
-        Ensure strict logic between Duration vs Fixed Dates.
-        """
-        # Note: Model.clean() handles this, but DRF validation is better for UI feedback
-        duration = data.get('duration_days')
-        fixed_expiry = data.get('fixed_expiry_date')
-        
-        if not duration and not fixed_expiry:
-            raise serializers.ValidationError("You must specify either a Duration (days) or a Fixed Expiry Date.")
-        
-        return data
-
-class ClientPassSerializer(serializers.ModelSerializer):
-    """
-    Serializer for assigning passes to clients and viewing them.
-    Includes nested details for Frontend display.
-    """
-    # Read-Only Fields for UI Display
-    pricing_option_name = serializers.CharField(source='pricing_option.name', read_only=True)
-    client_name = serializers.CharField(source='client.profile.nickname', read_only=True)
-    client_email = serializers.CharField(source='client.email', read_only=True)
-
-    class Meta:
-        model = ClientPass
-        fields = [
-            'id', 
-            'client',          # Write: UUID, Read: UUID
-            'client_name',     # Read-Only: String
-            'client_email',    # Read-Only: String
-            'pricing_option',       # Write: UUID
-            'pricing_option_name',  # Read-Only: String
-            'credits_remaining',
-            'start_date',
-            'expiry_date',
-            'is_active',
-            'created_at'
-        ]
-        # We allow admins to edit credits/dates manually if needed, 
-        # but they are auto-calculated on creation if left blank.
-        extra_kwargs = {
-            'credits_remaining': {'required': False},
-            'start_date': {'required': False},
-            'expiry_date': {'required': False},
-        }
-
-    def validate(self, data):
-        """
-        Ensure Client and PricingOption belong to the same Tenant.
-        (Although TenantMixin usually handles filtering, this is a safety check).
-        """
-        # If your ViewSet filters querysets by tenant, this is implicitly safe.
-        # But if you want explicit validation:
-        if 'client' in data and 'pricing_option' in data:
-            if data['client'].tenant_id != data['pricing_option'].tenant_id:
-               raise serializers.ValidationError("Client and Pricing Option must belong to the same gym.")
-        return data
-    
-    def create(self, validated_data):
-        pricing_option = validated_data['pricing_option']
-        today = timezone.now().date()
-
-        # 1. Calculate Start Date
-        if not validated_data.get('start_date'):
-            validated_data['start_date'] = pricing_option.fixed_start_date or today
-
-        # 2. Calculate Expiry Date
-        if not validated_data.get('expiry_date'):
-            if pricing_option.fixed_expiry_date:
-                validated_data['expiry_date'] = pricing_option.fixed_expiry_date
-            elif pricing_option.duration_days:
-                validated_data['expiry_date'] = validated_data['start_date'] + timedelta(days=pricing_option.duration_days)
-            else:
-                validated_data['expiry_date'] = validated_data['start_date'] + timedelta(days=365)
-
-        # 3. Calculate Credits
-        if not validated_data.get('credits_remaining'):
-            validated_data['credits_remaining'] = pricing_option.session_credits
-
-        return super().create(validated_data)
-    

@@ -1,126 +1,214 @@
-from rest_framework import viewsets, status, filters
+from django.shortcuts import get_object_or_404
+from django.db import transaction, models
+from django.db.models import Q, Count, F
+from django.utils import timezone
+from django.core.exceptions import ValidationError
+from django.utils.dateparse import parse_date, parse_datetime
+from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework.exceptions import ValidationError, PermissionDenied
-from django.db import transaction
-from django.db.models import Q
-from django.shortcuts import get_object_or_404
-from django.utils import timezone
+import logging
+from datetime import datetime, timedelta, time, timezone as datetime_timezone
 
-
-from .models import Session, Booking, StaffClientAssignment, PricingOption, ClientPass
-from .serializers import (
-    ClientPassSerializer, PricingOptionSerializer, SessionSerializer, BookingCreateSerializer, BookingReadSerializer, 
-    BookingEditSerializer, StaffAssignClientSerializer
+from .models import (
+    Location, Room, StaffLocation, StaffAvailability, ClassTemplate,
+    RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
+    SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
+    Notification, StaffClientAssignment
 )
-from .permissions import IsAuthenticated, IsGymStaffOrOwner, IsOwnerOrManager, IsAssignedClient
+from .serializers import (
+    LocationSerializer, RoomSerializer, StaffLocationSerializer,
+    StaffAvailabilitySerializer, ClassTemplateSerializer, RecurrenceRuleSerializer,
+    ClassSessionSerializer, BookingCreateSerializer, BookingReadSerializer,
+    BookingEditSerializer, AppointmentSerializer, WaitlistSerializer,
+    SubstituteRequestSerializer, PackageTypeSerializer, PackageSerializer,
+    PaymentSerializer, CancellationPolicySerializer, NotificationSerializer,
+    StaffAssignClientSerializer
+)
+from .permissions import (
+    IsAuthenticated, IsOwnerOrManager, IsGymStaffOrOwner, IsFrontDeskOrAdmin,
+    IsInstructor, IsClient, IsAssignedClient
+)
 from apps.users.models import User, UserRole
 
-from apps.scheduling import permissions
+logger = logging.getLogger(__name__)
 
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
     max_page_size = 100
 
-class StaffAssignmentViewSet(viewsets.ModelViewSet):
-    """
-    Admin Only: Assign Clients to Staff.
-    """
-    queryset = StaffClientAssignment.objects.all()
-    serializer_class = StaffAssignClientSerializer
+
+class LocationViewSet(viewsets.ModelViewSet):
+    queryset = Location.objects.all()
+    serializer_class = LocationSerializer
     permission_classes = [IsAuthenticated]
-    pagination_class = StandardResultsSetPagination
-    
-    def get_queryset(self):
-        user = self.request.user
-        # Start with the optimized select_related to prevent N+1 queries
-        queryset = StaffClientAssignment.objects.all().select_related(
-            'staff__profile', 
-            'client__profile'
-        )
-
-        # 1. If the user is a Trainer, filter to show only their assignments
-        if user.role == UserRole.TRAINER:
-            return queryset.filter(staff=user)
-        
-        # 2. If the user is an Admin or Manager, return the full tenant-scoped list
-        elif user.role in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER]:
-            return queryset
-
-        # 3. Fallback: Return nothing for roles that shouldn't access this (like standard clients)
-        return queryset.none()
-    
-    @action(detail=False, methods=['post'], url_path='bulk-assign')
-    def bulk_assign(self, request):
-        staff_id = request.data.get('staff')
-        client_ids = request.data.get('clients', [])
-
-        # 1. Validate Staff Exists and is a Trainer
-        staff = get_object_or_404(User, id=staff_id, role='trainer', tenant=request.tenant)
-
-        # 2. Validate all Client IDs exist and belong to this gym 
-        valid_clients = User.objects.filter(
-            id__in=client_ids, 
-            role='client', 
-            tenant=request.tenant
-        ).values_list('id', flat=True)
-
-        # Check if any IDs were invalid
-        invalid_ids = set(client_ids) - set([str(cid) for cid in valid_clients])
-        if invalid_ids:
-            return Response(
-                {"detail": f"The following Client IDs are invalid or belong to another gym: {list(invalid_ids)}"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # 3. Create Assignment Objects
-        assignments = [
-            StaffClientAssignment(
-                staff=staff, 
-                client_id=c_id, 
-                tenant=request.tenant
-            ) for c_id in valid_clients
-        ]
-        
-        # 4. Perform Bulk Create
-        # ignore_conflicts=True handles cases where the link already exists
-        StaffClientAssignment.objects.bulk_create(assignments, ignore_conflicts=True)
-        
-        return Response({
-            "detail": f"Successfully processed {len(valid_clients)} assignments."
-        }, status=status.HTTP_201_CREATED)
-
-class SessionViewSet(viewsets.ModelViewSet):
-    """
-    Manages Sessions.
-    Admin: Full CRUD.
-    Staff: Can see all (or filtered).
-    Client: Can see all, but Booking logic restricts interaction.
-    """
-    serializer_class = SessionSerializer
-    pagination_class = StandardResultsSetPagination
-    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['start_time', 'session_type', 'staff']
-    ordering_fields = ['start_time']
-
-    def get_queryset(self):
-        # Optimize: Fetch staff profile to avoid N+1 in serializer "staff_name"
-        return Session.objects.all().select_related('staff', 'staff__profile')
 
     def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
-            return [IsOwnerOrManager()] # Only Admin creates sessions
-        return [IsAuthenticated()] # Clients/Staff can view
+            return [IsOwnerOrManager()]
+        return [IsAuthenticated()]
+
+
+class RoomViewSet(viewsets.ModelViewSet):
+    queryset = Room.objects.all()
+    serializer_class = RoomSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsOwnerOrManager()]
+        return [IsAuthenticated()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        location_id = self.request.query_params.get('location')
+        if location_id:
+            qs = qs.filter(location_id=location_id)
+        return qs
+
+
+class StaffLocationViewSet(viewsets.ModelViewSet):
+    queryset = StaffLocation.objects.all()
+    serializer_class = StaffLocationSerializer
+    permission_classes = [IsOwnerOrManager]
+
+
+class StaffAvailabilityViewSet(viewsets.ModelViewSet):
+    queryset = StaffAvailability.objects.all()
+    serializer_class = StaffAvailabilitySerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        staff_id = self.request.query_params.get('staff')
+        if staff_id:
+            qs = qs.filter(staff_id=staff_id)
+        return qs
+
+
+class ClassTemplateViewSet(viewsets.ModelViewSet):
+    queryset = ClassTemplate.objects.all()
+    serializer_class = ClassTemplateSerializer
+    permission_classes = [IsOwnerOrManager]
+
+
+class RecurrenceRuleViewSet(viewsets.ModelViewSet):
+    queryset = RecurrenceRule.objects.all()
+    serializer_class = RecurrenceRuleSerializer
+    permission_classes = [IsOwnerOrManager]
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+        rule = serializer.save()
+        
+        # Expand RecurrenceRule into ClassSession rows
+        start_date = rule.start_date
+        end_date = rule.end_date
+        days_of_week = [d.lower() for d in rule.days_of_week]
+        
+        current_date = start_date
+        sessions_to_create = []
+
+        while current_date <= end_date:
+            weekday_name = current_date.strftime('%A').lower()
+            if weekday_name in days_of_week:
+                # Build start_at and end_at in UTC
+                naive_start = datetime.combine(current_date, rule.start_time)
+                # Assume UTC timezone for storage
+                start_at = timezone.make_aware(naive_start, datetime_timezone.utc)
+                end_at = start_at + timedelta(minutes=rule.template.duration_min)
+
+                # Check conflict
+                # Room Conflict check
+                if rule.room:
+                    room_conflict = ClassSession.objects.filter(
+                        room=rule.room,
+                        start_at__lt=end_at,
+                        end_at__gt=start_at,
+                        status='scheduled'
+                    ).exists()
+                    if room_conflict:
+                        raise ValidationError(f"Room conflict detected for {rule.room} on {current_date} at {rule.start_time}")
+
+                # Staff Conflict check
+                if rule.staff:
+                    staff_conflict = ClassSession.objects.filter(
+                        staff=rule.staff,
+                        start_at__lt=end_at,
+                        end_at__gt=start_at,
+                        status='scheduled'
+                    ).exists()
+                    if staff_conflict:
+                        raise ValidationError(f"Staff conflict detected for {rule.staff.email} on {current_date} at {rule.start_time}")
+
+                sessions_to_create.append(
+                    ClassSession(
+                        tenant=rule.tenant,
+                        template=rule.template,
+                        recurrence_rule=rule,
+                        room=rule.room,
+                        staff=rule.staff,
+                        start_at=start_at,
+                        end_at=end_at,
+                        capacity=rule.template.default_capacity
+                    )
+                )
+
+            current_date += timedelta(days=1)
+
+        ClassSession.objects.bulk_create(sessions_to_create)
+
+
+class ClassSessionViewSet(viewsets.ModelViewSet):
+    queryset = ClassSession.objects.select_related('template', 'room', 'staff', 'staff__profile')
+    serializer_class = ClassSessionSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsOwnerOrManager()]
+        return [IsAuthenticated()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        location = self.request.query_params.get('location')
+        date_from = self.request.query_params.get('date_from')
+        date_to = self.request.query_params.get('date_to')
+
+        if location:
+            qs = qs.filter(template__location_id=location)
+        if date_from:
+            qs = qs.filter(start_at__gte=parse_datetime(date_from) or date_from)
+        if date_to:
+            qs = qs.filter(start_at__lte=parse_datetime(date_to) or date_to)
+        return qs
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        """
+        Cancel a session. Triggers credit-refund and notifications.
+        """
+        session = self.get_object()
+        session.status = 'cancelled'
+        session.save()
+
+        # Import celery tasks inline to prevent circular dependencies
+        from .tasks import process_credit_refund_job
+        process_credit_refund_job.delay(str(session.id))
+
+        return Response({"detail": "Session cancelled successfully and refund job triggered."}, status=status.HTTP_200_OK)
+
 
 class BookingViewSet(viewsets.ModelViewSet):
-    """
-    Handles Booking Logic with Atomic Transactions.
-    """
+    queryset = Booking.objects.all()
+    permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination
-    
+
     def get_serializer_class(self):
         if self.action == 'create':
             return BookingCreateSerializer
@@ -130,177 +218,511 @@ class BookingViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = Booking.objects.select_related('session', 'session__staff', 'session__staff__profile')
-
+        qs = Booking.objects.select_related('session', 'session__template', 'client')
         if user.role == UserRole.CLIENT:
             return qs.filter(client=user)
         elif user.role == UserRole.TRAINER:
-            # Trainers see sessions they lead OR their assigned clients
-            return qs.filter(
-                Q(session__staff=user) | 
-                Q(client__assigned_staff_relations__staff=user)
-            ).distinct()
-        
-        return qs # Admin sees all
+            return qs.filter(session__staff=user)
+        return qs
 
+    @transaction.atomic
     def create(self, request, *args, **kwargs):
         """
-        Handles Credit Deduction Atomically.
-        Supports:
-        1. Client self-booking.
-        2. Staff booking for a specific client (via 'client_id').
+        Concurrently secure a booking.
         """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        
-        session = serializer.validated_data['session']
-        
-        # --- LOGIC FIX: Determine the Target Client ---
-        if request.user.role == UserRole.CLIENT:
-            client = request.user
-        else:
-            # Staff/Admin must provide a client_id to book for someone else
-            client_id = request.data.get('client_id')
-            if not client_id:
-                raise ValidationError({"client_id": "Staff must specify a client_id."})
-            
-            client = get_object_or_404(User, id=client_id, role=UserRole.CLIENT)
-            
-            # Staff Restriction: Can only book for assigned clients (unless Admin)
-            if request.user.role == UserRole.TRAINER:
-                 is_assigned = request.user.assigned_client_relations.filter(client=client).exists()
-                 if not is_assigned:
-                     raise PermissionDenied("You can only book for your assigned clients.")
+        session_id = serializer.validated_data['session'].id
 
-        # --- Atomic Transaction Start ---
-        with transaction.atomic():
-            # 1. Find Valid Pass (Row Locking)
-            active_pass = ClientPass.objects.select_for_update().filter(
-                client=client,
-                is_active=True,
-                credits_remaining__gt=0,
-                start_date__lte=session.start_time.date(),
-                expiry_date__gte=session.start_time.date()
-            ).first()
+        # Row lock session
+        session = ClassSession.objects.select_for_update().get(id=session_id)
 
-            if not active_pass:
-                return Response(
-                    {"detail": f"Client {client.email} has no active credits for this date."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+        if session.status != 'scheduled':
+            return Response({"detail": "Session is not scheduled."}, status=status.HTTP_400_BAD_REQUEST)
 
-            # 2. Check Capacity (Double Check inside transaction)
-            # Use select_for_update on session to prevent overbooking race condition
-            session_lock = Session.objects.select_for_update().get(id=session.id)
-            if session_lock.bookings.filter(status='booked').count() >= session_lock.capacity:
-                 return Response({"detail": "Session is full."}, status=status.HTTP_400_BAD_REQUEST)
+        # Check existing booking
+        if Booking.objects.filter(client=request.user, session=session, status='booked').exists():
+            return Response({"detail": "Already booked this session."}, status=status.HTTP_400_BAD_REQUEST)
 
-            # 3. Deduct Credit
-            active_pass.credits_remaining -= 1
-            active_pass.save()
+        # Capacity Check
+        current_bookings = session.bookings.filter(status='booked').count()
+        if current_bookings >= session.capacity:
+            return Response({"detail": "Session is full. Join waitlist instead."}, status=status.HTTP_400_BAD_REQUEST)
 
-            # 4. Create Booking
-            booking = Booking.objects.create(
-                client=client,
-                used_pass=active_pass,
-                **serializer.validated_data
-            )
+        # Resolve Payment: find active Package or raise error
+        package = Package.objects.select_for_update().filter(
+            client=request.user,
+            credits_remaining__gt=0,
+            expires_at__gt=timezone.now()
+        ).first()
 
-        headers = self.get_success_headers(serializer.data)
-        return Response(
-            BookingReadSerializer(booking).data, 
-            status=status.HTTP_201_CREATED, 
-            headers=headers
+        if not package:
+            return Response({"detail": "No active credits or packages found for booking."}, status=status.HTTP_402_PAYMENT_REQUIRED)
+
+        # Deduct Credit
+        package.credits_remaining -= 1
+        package.save()
+
+        # Create Booking
+        booking = Booking.objects.create(
+            tenant=request.tenant,
+            client=request.user,
+            session=session,
+            credit_source=package,
+            status='booked',
+            join_mode=serializer.validated_data.get('join_mode', 'physical'),
+            music_preference=serializer.validated_data.get('music_preference', '')
         )
 
-    @action(detail=True, methods=['post'])
-    def cancel(self, request, pk=None):
-        """
-        Custom endpoint to Cancel and Refund.
-        """
-        booking = self.get_object()
+        # Create confirmation notification
+        Notification.objects.create(
+            tenant=request.tenant,
+            recipient=request.user,
+            channel='email',
+            template_key='booking_confirmation',
+            related_entity_id=booking.id
+        )
 
-        if booking.status == 'cancelled':
-            return Response({"detail": "Booking already cancelled"}, status=400)
+        return Response(BookingReadSerializer(booking).data, status=status.HTTP_201_CREATED)
 
-        # Optional: Check cancellation window (e.g., 2 hours before)
-        # if booking.session.start_time - timezone.now() < timedelta(hours=2):
-        #    return Response({"detail": "Too late to cancel"}, status=400)
-
-        with transaction.atomic():
-            booking.status = 'cancelled'
-            booking.save()
-
-            if booking.used_pass:
-                # Lock and Refund
-                client_pass = ClientPass.objects.select_for_update().get(id=booking.used_pass.id)
-                client_pass.credits_remaining += 1
-                client_pass.save()
-
-        return Response({"status": "cancelled", "refunded": True})
-
+    @transaction.atomic
     def destroy(self, request, *args, **kwargs):
         """
-        Disable hard deletes to protect financial history.
-        Force users to use /cancel/ endpoint.
+        Clients calling cancellation.
         """
-        return Response(
-            {"detail": "Please use the 'cancel' action to remove a booking."},
-            status=status.HTTP_405_METHOD_NOT_ALLOWED
+        booking = self.get_object()
+        if booking.status == 'cancelled':
+            return Response({"detail": "Booking is already cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+
+        session = booking.session
+        now = timezone.now()
+
+        # Resolve cancellation policy (most specific first: template > global)
+        policy = CancellationPolicy.objects.filter(template=session.template).first()
+        if not policy:
+            policy = CancellationPolicy.objects.filter(scope_type='global').first()
+
+        cutoff_hours = policy.cutoff_hours if policy else 24
+        cutoff_time = session.start_at - timedelta(hours=cutoff_hours)
+
+        is_early_cancel = now <= cutoff_time
+
+        booking.status = 'cancelled'
+        booking.save()
+
+        if is_early_cancel:
+            # Refund Credit
+            if booking.credit_source:
+                pkg = Package.objects.select_for_update().get(id=booking.credit_source.id)
+                pkg.credits_remaining += 1
+                pkg.save()
+        else:
+            # Late cancellation: Forfeit credit or charge fee (represented by recording late status)
+            booking.status = 'no_show'
+            booking.save()
+
+        # Trigger WaitlistPromotionJob
+        from .tasks import process_waitlist_promotion_job
+        process_waitlist_promotion_job.delay(str(session.id))
+
+        return Response({
+            "status": "cancelled",
+            "refunded": is_early_cancel,
+            "detail": "Booking cancelled."
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsFrontDeskOrAdmin])
+    def check_in(self, request, pk=None):
+        booking = self.get_object()
+        booking.checked_in_at = timezone.now()
+        booking.status = 'attended'
+        booking.save()
+        return Response({"detail": "Checked in successfully."})
+
+
+class WaitlistViewSet(viewsets.ModelViewSet):
+    queryset = Waitlist.objects.all()
+    serializer_class = WaitlistSerializer
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        session_id = request.data.get('session')
+        session = get_object_or_404(ClassSession, id=session_id)
+
+        # Check existing waitlist or booking
+        if Waitlist.objects.filter(client=request.user, session=session, status='waiting').exists():
+            return Response({"detail": "Already on waitlist."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Calculate position
+        max_pos = Waitlist.objects.filter(session=session, status='waiting').aggregate(models.Max('position'))['position__max']
+        next_pos = (max_pos or 0) + 1
+
+        waitlist = Waitlist.objects.create(
+            tenant=request.tenant,
+            client=request.user,
+            session=session,
+            position=next_pos,
+            status='waiting'
         )
 
-class PricingOptionViewSet(viewsets.ModelViewSet):
-    queryset = PricingOption.objects.all()
-    serializer_class = PricingOptionSerializer # (Assume standard ModelSerializer)
+        return Response(WaitlistSerializer(waitlist).data, status=status.HTTP_201_CREATED)
+
+
+class AppointmentViewSet(viewsets.ModelViewSet):
+    queryset = Appointment.objects.all()
+    serializer_class = AppointmentSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == UserRole.CLIENT:
+            return self.queryset.filter(client=user)
+        elif user.role == UserRole.TRAINER:
+            return self.queryset.filter(provider=user)
+        return self.queryset
+
+    @action(detail=False, methods=['get'], url_path='availability')
+    def provider_availability(self, request):
+        provider_id = request.query_params.get('provider')
+        if not provider_id:
+            return Response({"detail": "provider query param required."}, status=400)
+        
+        provider = get_object_or_404(User, id=provider_id, role__in=['trainer', 'gym_owner', 'gym_manager'])
+        
+        # Calculate availability for the next 7 days
+        today = timezone.now().date()
+        slots = []
+
+        availabilities = StaffAvailability.objects.filter(staff=provider, is_blackout=False)
+        blackouts = StaffAvailability.objects.filter(staff=provider, is_blackout=True)
+
+        for i in range(7):
+            current_date = today + timedelta(days=i)
+            weekday_name = current_date.strftime('%A').lower()
+
+            # Find matching availabilities
+            day_avails = availabilities.filter(weekday_or_date__in=[weekday_name, str(current_date)])
+            day_blackouts = blackouts.filter(weekday_or_date__in=[weekday_name, str(current_date)])
+
+            if not day_avails.exists() or day_blackouts.exists():
+                continue
+
+            for avail in day_avails:
+                # Divide day into 1-hour slots
+                start_time = avail.start_time
+                end_time = avail.end_time
+
+                current_time = datetime.combine(current_date, start_time)
+                limit_time = datetime.combine(current_date, end_time)
+
+                while current_time + timedelta(hours=1) <= limit_time:
+                    slot_start = timezone.make_aware(current_time, datetime_timezone.utc)
+                    slot_end = timezone.make_aware(current_time + timedelta(hours=1), datetime_timezone.utc)
+
+                    # Check conflict with existing appointments or class sessions
+                    overlap_appt = Appointment.objects.filter(
+                        provider=provider,
+                        start_at__lt=slot_end,
+                        end_at__gt=slot_start,
+                        status='scheduled'
+                    ).exists()
+
+                    overlap_session = ClassSession.objects.filter(
+                        staff=provider,
+                        start_at__lt=slot_end,
+                        end_at__gt=slot_start,
+                        status='scheduled'
+                    ).exists()
+
+                    if not overlap_appt and not overlap_session:
+                        slots.append({
+                            "start_at": slot_start,
+                            "end_at": slot_end
+                        })
+
+                    current_time += timedelta(hours=1)
+
+        return Response({"availability": slots})
+
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        """
+        Book a 1-on-1 Appointment.
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        provider = data['provider']
+        start_at = data['start_at']
+        end_at = data['end_at']
+
+        # Conflict check
+        overlap_appt = Appointment.objects.filter(
+            provider=provider,
+            start_at__lt=end_at,
+            end_at__gt=start_at,
+            status='scheduled'
+        ).exists()
+
+        overlap_session = ClassSession.objects.filter(
+            staff=provider,
+            start_at__lt=end_at,
+            end_at__gt=start_at,
+            status='scheduled'
+        ).exists()
+
+        if overlap_appt or overlap_session:
+            return Response({"detail": "Provider is not available during this time slot."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check credits
+        package = Package.objects.select_for_update().filter(
+            client=request.user,
+            credits_remaining__gt=0,
+            expires_at__gt=timezone.now()
+        ).first()
+
+        if not package:
+            return Response({"detail": "No active credits/packages found to book appointment."}, status=status.HTTP_402_PAYMENT_REQUIRED)
+
+        package.credits_remaining -= 1
+        package.save()
+
+        appointment = Appointment.objects.create(
+            tenant=request.tenant,
+            client=request.user,
+            provider=provider,
+            location=data['location'],
+            room=data.get('room'),
+            start_at=start_at,
+            end_at=end_at,
+            credit_source=package,
+            status='scheduled'
+        )
+
+        return Response(AppointmentSerializer(appointment).data, status=status.HTTP_201_CREATED)
+
+
+class SubstituteRequestViewSet(viewsets.ModelViewSet):
+    queryset = SubstituteRequest.objects.all()
+    serializer_class = SubstituteRequestSerializer
+    permission_classes = [IsInstructor]
+
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        session_id = request.data.get('session')
+        session = get_object_or_404(ClassSession, id=session_id)
+
+        # Only session leader can open substitution request
+        if session.staff != request.user:
+            return Response({"detail": "You can only request substitution for classes you lead."}, status=status.HTTP_403_FORBIDDEN)
+
+        sub_req = SubstituteRequest.objects.create(
+            tenant=request.tenant,
+            session=session,
+            requested_by_staff=request.user,
+            status='open'
+        )
+
+        # Trigger SubstituteBroadcastJob
+        from .tasks import process_substitute_broadcast_job
+        process_substitute_broadcast_job.delay(str(sub_req.id))
+
+        return Response(SubstituteRequestSerializer(sub_req).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsInstructor])
+    @transaction.atomic
+    def accept(self, request, pk=None):
+        sub_req = SubstituteRequest.objects.select_for_update().get(id=pk)
+
+        if sub_req.status != 'open':
+            return Response({"detail": "Request has already been filled or expired."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Update substitute request
+        sub_req.status = 'filled'
+        sub_req.accepted_by_staff = request.user
+        sub_req.save()
+
+        # Update session
+        session = sub_req.session
+        session.staff = request.user
+        session.save()
+
+        return Response({"status": "filled", "accepted_by": request.user.email})
+
+
+class PackageTypeViewSet(viewsets.ModelViewSet):
+    queryset = PackageType.objects.all()
+    serializer_class = PackageTypeSerializer
     permission_classes = [IsOwnerOrManager]
 
-    def perform_create(self, serializer):
-        """
-        Force the pricing option to belong to the current user's tenant.
-        """
-        # Ensure the tenant is pulled from the request (set by Middleware)
-        serializer.save(tenant=self.request.tenant)
 
-    def get_queryset(self):
-        """
-        Explicitly filter by the current tenant to be safe.
-        """
-        return PricingOption.objects.filter(tenant=self.request.tenant)    
+class PackageViewSet(viewsets.ModelViewSet):
+    queryset = Package.objects.all()
+    serializer_class = PackageSerializer
+    permission_classes = [IsOwnerOrManager]
 
-class ClientPassViewSet(viewsets.ModelViewSet):
-    queryset = ClientPass.objects.all()
-    serializer_class = ClientPassSerializer # (Assume standard ModelSerializer)
-    permission_classes = [IsOwnerOrManager] # Admin manually assigns passes for now
-
-    def get_queryset(self):
-        """
-        1. Filters by the current tenant (Ali Gym).
-        2. Joins profiles to prevent N+1 queries for 'client_name' and 'pricing_option_name'.
-        """
-        return ClientPass.objects.filter(tenant=self.request.tenant).select_related(
-            'client__profile', 
-            'pricing_option'
-        )
-    
     def get_permissions(self):
-        if self.action == 'my_active_passes':
+        if self.action == 'my_active_packages':
             return [IsAuthenticated()]
         return super().get_permissions()
 
-    def perform_create(self, serializer):
-        """
-        Ensures the pass is explicitly linked to the current tenant.
-        """
-        serializer.save(tenant=self.request.tenant)
+    @action(detail=False, methods=['get'], url_path='my-active-packages')
+    def my_active_packages(self, request):
+        packages = Package.objects.filter(
+            client=request.user,
+            credits_remaining__gt=0,
+            expires_at__gt=timezone.now()
+        ).select_related('package_type')
+        return Response(PackageSerializer(packages, many=True).data)
 
-    @action(detail=False, methods=['get'], url_path='my-active-passes')
-    def my_active_passes(self, request):
-        passes = ClientPass.objects.filter(
-            client=request.user, 
-            is_active=True, 
-            credits_remaining__gt=0
-        ).select_related('pricing_option')
-        serializer = self.get_serializer(passes, many=True)
-        return Response(serializer.data)    
+
+class ReportsView(APIView):
+    permission_classes = [IsFrontDeskOrAdmin]
+
+    def get(self, request):
+        report_type = request.query_params.get('type')
+        location_id = request.query_params.get('location')
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+
+        if not report_type:
+            return Response({"detail": "type query param is required (fill-rate, no-show, staff-utilization)."}, status=400)
+
+        # Default dates
+        if not start_date:
+            start_date = timezone.now().date() - timedelta(days=30)
+        else:
+            start_date = parse_date(start_date)
+
+        if not end_date:
+            end_date = timezone.now().date()
+        else:
+            end_date = parse_date(end_date)
+
+        if report_type == 'fill-rate':
+            # Count bookings on completed/scheduled sessions
+            sessions = ClassSession.objects.filter(
+                start_at__date__gte=start_date,
+                start_at__date__lte=end_date
+            )
+            if location_id:
+                sessions = sessions.filter(template__location_id=location_id)
+
+            data = []
+            for s in sessions:
+                booked_count = s.bookings.filter(status='booked').count()
+                data.append({
+                    "session_id": s.id,
+                    "title": s.template.name,
+                    "date": s.start_at.date(),
+                    "capacity": s.capacity,
+                    "booked": booked_count,
+                    "fill_rate": round((booked_count / s.capacity) * 100, 2) if s.capacity > 0 else 0.0
+                })
+            return Response(data)
+
+        elif report_type == 'no-show':
+            bookings = Booking.objects.filter(
+                session__start_at__date__gte=start_date,
+                session__start_at__date__lte=end_date
+            )
+            if location_id:
+                bookings = bookings.filter(session__template__location_id=location_id)
+
+            total = bookings.count()
+            no_shows = bookings.filter(status='no_show').count()
+            no_show_rate = round((no_shows / total) * 100, 2) if total > 0 else 0.0
+
+            return Response({
+                "total_bookings": total,
+                "total_no_shows": no_shows,
+                "no_show_rate_percent": no_show_rate
+            })
+
+        elif report_type == 'staff-utilization':
+            # Available hours vs Booked hours
+            instructors = User.objects.filter(role__in=['trainer', 'gym_owner', 'gym_manager'])
+            if location_id:
+                instructors = instructors.filter(staff_locations__location_id=location_id)
+
+            data = []
+            for inst in instructors:
+                # Find available hours from StaffAvailability
+                avails = StaffAvailability.objects.filter(staff=inst, is_blackout=False)
+                # For MVP: simple calculation of avail hours (summing up avail windows)
+                total_avail_hours = 0
+                for a in avails:
+                    dummy_start = datetime.combine(timezone.now().date(), a.start_time)
+                    dummy_end = datetime.combine(timezone.now().date(), a.end_time)
+                    total_avail_hours += (dummy_end - dummy_start).total_seconds() / 3600.0
+
+                # Booked hours from class sessions
+                sessions = ClassSession.objects.filter(
+                    staff=inst,
+                    start_at__date__gte=start_date,
+                    start_at__date__lte=end_date,
+                    status='scheduled'
+                )
+                booked_hours = sum([s.template.duration_min for s in sessions]) / 60.0
+
+                data.append({
+                    "instructor_id": inst.id,
+                    "email": inst.email,
+                    "weekly_available_hours": total_avail_hours,
+                    "booked_session_hours": booked_hours,
+                    "utilization_rate_percent": round((booked_hours / (total_avail_hours * 4)) * 100, 2) if total_avail_hours > 0 else 0.0
+                })
+            return Response(data)
+
+        return Response({"detail": "Invalid report type."}, status=400)
+
+
+class StaffAssignmentViewSet(viewsets.ModelViewSet):
+    queryset = StaffClientAssignment.objects.all()
+    serializer_class = StaffAssignClientSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = StandardResultsSetPagination
+    
+    def get_queryset(self):
+        user = self.request.user
+        queryset = StaffClientAssignment.objects.all().select_related('staff__profile', 'client__profile')
+        if user.role == UserRole.TRAINER:
+            return queryset.filter(staff=user)
+        elif user.role in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER]:
+            return queryset
+        return queryset.none()
+    
+    @action(detail=False, methods=['post'], url_path='bulk-assign')
+    def bulk_assign(self, request):
+        staff_id = request.data.get('staff')
+        client_ids = request.data.get('clients', [])
+
+        staff = get_object_or_404(User, id=staff_id, role='trainer', tenant=request.tenant)
+        valid_clients = User.objects.filter(
+            id__in=client_ids, 
+            role='client', 
+            tenant=request.tenant
+        ).values_list('id', flat=True)
+
+        invalid_ids = set(client_ids) - set([str(cid) for cid in valid_clients])
+        if invalid_ids:
+            return Response(
+                {"detail": f"Invalid client IDs: {list(invalid_ids)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        assignments = [
+            StaffClientAssignment(
+                staff=staff, 
+                client_id=c_id, 
+                tenant=request.tenant
+            ) for c_id in valid_clients
+        ]
         
+        StaffClientAssignment.objects.bulk_create(assignments, ignore_conflicts=True)
         
+        return Response({
+            "detail": f"Successfully processed {len(valid_clients)} assignments."
+        }, status=status.HTTP_201_CREATED)
