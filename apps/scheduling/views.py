@@ -43,7 +43,7 @@ class StandardResultsSetPagination(PageNumberPagination):
 
 
 class LocationViewSet(viewsets.ModelViewSet):
-    queryset = Location.objects.all()
+    queryset = Location.all_objects.all()
     serializer_class = LocationSerializer
     permission_classes = [IsAuthenticated]
 
@@ -52,9 +52,12 @@ class LocationViewSet(viewsets.ModelViewSet):
             return [IsOwnerOrManager()]
         return [IsAuthenticated()]
 
+    def get_queryset(self):
+        return Location.objects.all()
+
 
 class RoomViewSet(viewsets.ModelViewSet):
-    queryset = Room.objects.all()
+    queryset = Room.all_objects.all()
     serializer_class = RoomSerializer
     permission_classes = [IsAuthenticated]
 
@@ -64,7 +67,7 @@ class RoomViewSet(viewsets.ModelViewSet):
         return [IsAuthenticated()]
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = Room.objects.all()
         location_id = self.request.query_params.get('location')
         if location_id:
             qs = qs.filter(location_id=location_id)
@@ -72,18 +75,21 @@ class RoomViewSet(viewsets.ModelViewSet):
 
 
 class StaffLocationViewSet(viewsets.ModelViewSet):
-    queryset = StaffLocation.objects.all()
+    queryset = StaffLocation.all_objects.all()
     serializer_class = StaffLocationSerializer
     permission_classes = [IsOwnerOrManager]
 
+    def get_queryset(self):
+        return StaffLocation.objects.all()
+
 
 class StaffAvailabilityViewSet(viewsets.ModelViewSet):
-    queryset = StaffAvailability.objects.all()
+    queryset = StaffAvailability.all_objects.all()
     serializer_class = StaffAvailabilitySerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = StaffAvailability.objects.all()
         staff_id = self.request.query_params.get('staff')
         if staff_id:
             qs = qs.filter(staff_id=staff_id)
@@ -91,15 +97,21 @@ class StaffAvailabilityViewSet(viewsets.ModelViewSet):
 
 
 class ClassTemplateViewSet(viewsets.ModelViewSet):
-    queryset = ClassTemplate.objects.all()
+    queryset = ClassTemplate.all_objects.all()
     serializer_class = ClassTemplateSerializer
     permission_classes = [IsOwnerOrManager]
 
+    def get_queryset(self):
+        return ClassTemplate.objects.all()
+
 
 class RecurrenceRuleViewSet(viewsets.ModelViewSet):
-    queryset = RecurrenceRule.objects.all()
+    queryset = RecurrenceRule.all_objects.all()
     serializer_class = RecurrenceRuleSerializer
     permission_classes = [IsOwnerOrManager]
+
+    def get_queryset(self):
+        return RecurrenceRule.objects.all()
 
     @transaction.atomic
     def perform_create(self, serializer):
@@ -164,7 +176,7 @@ class RecurrenceRuleViewSet(viewsets.ModelViewSet):
 
 
 class ClassSessionViewSet(viewsets.ModelViewSet):
-    queryset = ClassSession.objects.select_related('template', 'room', 'staff', 'staff__profile')
+    queryset = ClassSession.all_objects.all()
     serializer_class = ClassSessionSerializer
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination
@@ -175,7 +187,7 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         return [IsAuthenticated()]
 
     def get_queryset(self):
-        qs = super().get_queryset()
+        qs = ClassSession.objects.select_related('template', 'room', 'staff', 'staff__profile')
         location = self.request.query_params.get('location')
         date_from = self.request.query_params.get('date_from')
         date_to = self.request.query_params.get('date_to')
@@ -205,7 +217,7 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
 
 
 class BookingViewSet(viewsets.ModelViewSet):
-    queryset = Booking.objects.all()
+    queryset = Booking.all_objects.all()
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination
 
@@ -341,9 +353,12 @@ class BookingViewSet(viewsets.ModelViewSet):
 
 
 class WaitlistViewSet(viewsets.ModelViewSet):
-    queryset = Waitlist.objects.all()
+    queryset = Waitlist.all_objects.all()
     serializer_class = WaitlistSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Waitlist.objects.all()
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
@@ -370,17 +385,18 @@ class WaitlistViewSet(viewsets.ModelViewSet):
 
 
 class AppointmentViewSet(viewsets.ModelViewSet):
-    queryset = Appointment.objects.all()
+    queryset = Appointment.all_objects.all()
     serializer_class = AppointmentSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
+        qs = Appointment.objects.select_related('provider', 'client')
         if user.role == UserRole.CLIENT:
-            return self.queryset.filter(client=user)
+            return qs.filter(client=user)
         elif user.role == UserRole.TRAINER:
-            return self.queryset.filter(provider=user)
-        return self.queryset
+            return qs.filter(provider=user)
+        return qs
 
     @action(detail=False, methods=['get'], url_path='availability')
     def provider_availability(self, request):
@@ -505,9 +521,12 @@ class AppointmentViewSet(viewsets.ModelViewSet):
 
 
 class SubstituteRequestViewSet(viewsets.ModelViewSet):
-    queryset = SubstituteRequest.objects.all()
+    queryset = SubstituteRequest.all_objects.all()
     serializer_class = SubstituteRequestSerializer
     permission_classes = [IsInstructor]
+
+    def get_queryset(self):
+        return SubstituteRequest.objects.all()
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
@@ -553,13 +572,16 @@ class SubstituteRequestViewSet(viewsets.ModelViewSet):
 
 
 class PackageTypeViewSet(viewsets.ModelViewSet):
-    queryset = PackageType.objects.all()
+    queryset = PackageType.all_objects.all()
     serializer_class = PackageTypeSerializer
     permission_classes = [IsOwnerOrManager]
 
+    def get_queryset(self):
+        return PackageType.objects.all()
+
 
 class PackageViewSet(viewsets.ModelViewSet):
-    queryset = Package.objects.all()
+    queryset = Package.all_objects.all()
     serializer_class = PackageSerializer
     permission_classes = [IsOwnerOrManager]
 
@@ -567,6 +589,9 @@ class PackageViewSet(viewsets.ModelViewSet):
         if self.action == 'my_active_packages':
             return [IsAuthenticated()]
         return super().get_permissions()
+
+    def get_queryset(self):
+        return Package.objects.all()
 
     @action(detail=False, methods=['get'], url_path='my-active-packages')
     def my_active_packages(self, request):
