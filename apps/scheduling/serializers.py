@@ -185,7 +185,7 @@ class AppointmentSerializer(serializers.ModelSerializer):
             'location', 'location_name', 'room', 'room_name', 
             'start_at', 'end_at', 'status', 'credit_source', 'created_at'
         ]
-        read_only_fields = ['id', 'client_email', 'provider_name', 'location_name', 'room_name', 'created_at']
+        read_only_fields = ['id', 'client', 'client_email', 'provider_name', 'location_name', 'room_name', 'created_at']
 
     def validate(self, data):
         start = data.get('start_at')
