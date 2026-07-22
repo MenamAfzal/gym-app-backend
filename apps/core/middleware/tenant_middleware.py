@@ -54,10 +54,12 @@ class TenantMiddleware(MiddlewareMixin):
                         except Tenant.DoesNotExist:
                             pass # Token refers to deleted tenant? Ignore.
                             
-                except jwt.ExpiredSignatureError:
-                    pass # Let DRF handle auth errors
-                except jwt.DecodeError:
-                    pass # Invalid token
+                except jwt.ExpiredSignatureError as e:
+                    print("TenantMiddleware: JWT ExpiredSignatureError:", e)
+                except jwt.DecodeError as e:
+                    print("TenantMiddleware: JWT DecodeError:", e)
+                except Exception as e:
+                    print("TenantMiddleware: General exception:", e)
         
         # ------------------------------------------------------------------
         # Final Validation
