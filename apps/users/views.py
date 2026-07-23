@@ -74,6 +74,8 @@ class UserViewSet(viewsets.ModelViewSet):
                 phone_number=data.get('phone_number'),
                 date_of_birth=data.get('date_of_birth'),
                 gender=data.get('gender'),
+                height=data.get('height'),
+                weight=data.get('weight'),
                 # Address Information
                 address=data.get('address'),
                 city=data.get('city'),
@@ -185,6 +187,8 @@ class UserRegistrationView(APIView):
                 phone_number=data.get('phone_number'),
                 date_of_birth=data.get('date_of_birth'),
                 gender=data.get('gender'),
+                height=data.get('height'),
+                weight=data.get('weight'),
                 # Address Information
                 address=data.get('address'),
                 city=data.get('city'),
@@ -210,7 +214,7 @@ class RegistrationInitView(APIView):
     Action: Saves to Pending -> Sends OTP.
     """
     permission_classes = [permissions.AllowAny]
-    parser_classes = [parsers.MultiPartParser, parsers.FormParser] # Required for Image
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser] # Required for Image and JSON payloads
     serializer_class = RegistrationInitSerializer
 
     def post(self, request):
