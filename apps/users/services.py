@@ -76,6 +76,8 @@ class UserService:
             'phone_number': profile_data.get('phone_number', ''),
             'date_of_birth': profile_data.get('date_of_birth'),
             'gender': profile_data.get('gender', ''),
+            'height': profile_data.get('height'),
+            'weight': profile_data.get('weight'),
             # Address Information
             'address': profile_data.get('address', ''),
             'city': profile_data.get('city', ''),
@@ -176,6 +178,8 @@ class AuthService:
             "phone_number": validated_data.get("phone_number", ""),
             "date_of_birth": validated_data.get("date_of_birth"),
             "gender": validated_data.get("gender", ""),
+            "height": validated_data.get("height"),
+            "weight": validated_data.get("weight"),
             # Address Information
             "address": validated_data.get("address", ""),
             "city": validated_data.get("city", ""),
@@ -303,6 +307,8 @@ class AuthService:
         profile.phone_number = pending.phone_number
         profile.date_of_birth = pending.date_of_birth
         profile.gender = pending.gender
+        profile.height = pending.height
+        profile.weight = pending.weight
         
         # Address Information
         profile.address = pending.address

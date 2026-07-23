@@ -16,6 +16,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'nickname', 'bio', 'profile_image',
             # Personal Information
             'first_name', 'last_name', 'phone_number', 'date_of_birth', 'gender',
+            'height', 'weight',
             # Address Information
             'address', 'city', 'country', 'postal_code',
             # Emergency Contact
@@ -52,6 +53,8 @@ class CreateUserSerializer(serializers.Serializer):
     phone_number = serializers.CharField(required=False, allow_blank=True, max_length=20)
     date_of_birth = serializers.DateField(required=False, allow_null=True)
     gender = serializers.ChoiceField(choices=GenderChoices.choices, required=False, allow_blank=True)
+    height = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
+    weight = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
     
     # Address Information (all optional)
     address = serializers.CharField(required=False, allow_blank=True, max_length=255)
@@ -130,6 +133,8 @@ class RegistrationInitSerializer(serializers.Serializer):
     phone_number = serializers.CharField(required=False, allow_blank=True, max_length=20)
     date_of_birth = serializers.DateField(required=False, allow_null=True)
     gender = serializers.ChoiceField(choices=GenderChoices.choices, required=False, allow_blank=True)
+    height = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
+    weight = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
     
     # Address Information (all optional)
     address = serializers.CharField(required=False, allow_blank=True, max_length=255)

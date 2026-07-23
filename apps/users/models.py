@@ -122,6 +122,8 @@ class UserProfile(UUIDMixin, TimestampMixin):
         blank=True,
         help_text="Gender"
     )
+    height = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, help_text="Height in cm")
+    weight = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, help_text="Weight in kg")
     
     # Address Information
     address = models.CharField(max_length=255, blank=True, help_text="Street address")
@@ -205,6 +207,8 @@ class PendingRegistration(models.Model):
     phone_number = models.CharField(max_length=20, blank=True)
     date_of_birth = models.DateField(null=True, blank=True)
     gender = models.CharField(max_length=20, choices=GenderChoices.choices, blank=True)
+    height = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    weight = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     
     # Address Information
     address = models.CharField(max_length=255, blank=True)
