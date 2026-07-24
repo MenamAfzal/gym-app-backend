@@ -746,8 +746,9 @@ class ClientMacroHistoryListView(generics.ListAPIView):
         )
 
         # 2. Main Queryset
+        from apps.users.models import UserRole
         return User.objects.filter(
-            user_type=User.UserType.CLIENT,
+            role=UserRole.CLIENT,
             deactivated=False
         ).prefetch_related(
             all_goals_prefetch
