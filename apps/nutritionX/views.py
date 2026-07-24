@@ -24,6 +24,23 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics
 from django.db.models import Prefetch
 
+def resolve_target_user(request):
+    """
+    Resolves the target user. If 'client_id' or 'user_id' is passed in query params,
+    and the request.user is staff, returns the specified client.
+    Otherwise, returns request.user.
+    """
+    from apps.users.models import UserRole
+    from django.shortcuts import get_object_or_404
+    from django.contrib.auth import get_user_model
+
+    User = get_user_model()
+    target_id = request.query_params.get("client_id") or request.query_params.get("user_id")
+
+    if target_id and request.user.role in [UserRole.TRAINER, UserRole.GYM_MANAGER, UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
+        return get_object_or_404(User, id=target_id)
+    return request.user
+
 
 class AddFoodToMealView(APIView):
     permission_classes = [IsAuthenticated, IsClientUser]
@@ -103,7 +120,8 @@ class UserDailyMealsView(APIView):
         if not date:
             return Response({"error": "date query param is required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        meals_query = MealLogs.objects.filter(user=request.user)
+        target_user = resolve_target_user(request)
+        meals_query = MealLogs.objects.filter(user=target_user)
         if date:
             meals_query = meals_query.filter(date=date)
 
@@ -283,27 +301,36 @@ class WaterIntakeAPIView(APIView):
             progress = DailyNutritionProgress.objects.filter(
                 user=request.user,
                 date=query_date
-            ).first()
+        target_user = resolve_target_user(request)
+
+        # Get active goal for target user
+        goal = NutritionGoal.objects.filter(user=target_user, is_active=True).first()
+        
+        progress = None
+        if is_historical_date:
+            progress = DailyNutritionProgress.objects.filter(user=target_user, date=query_date).first()
             if not progress:
-                # No progress exists for this historical date
-                if not goal:
-                    return Response({"error": "No nutrition goal found for this date."}, status=status.HTTP_404_NOT_FOUND)
-                # Return empty progress with the goal that was active on that date
+                return Response(
+                    {"message": "No data logged for this past date."}, 
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            # If past date has no goal linked, but has data
+            if not progress.goal and not goal:
                 return Response({
-                    "goal": NutritionGoalSerializer(goal).data,
+                    "goal": None,
                     "progress": {
-                        "water_consumed_ml": 0,
-                        "calories_consumed_kcal": 0,
-                        "protein_consumed_g": 0,
-                        "carbs_consumed_g": 0,
-                        "fat_consumed_g": 0,
+                        "water_consumed_ml": progress.water_consumed_ml,
+                        "calories_consumed_kcal": progress.calories_consumed_kcal,
+                        "protein_consumed_g": progress.protein_consumed_g,
+                        "carbs_consumed_g": progress.carbs_consumed_g,
+                        "fat_consumed_g": progress.fat_consumed_g,
                     },
                     "remaining": {
-                        "water_ml": float(goal.water_intake_goal_ml or 0),
-                        "calories_kcal": float(goal.calories_goal_kcal or 0),
-                        "protein_g": float(goal.protein_goal_g or 0),
-                        "carbs_g": float(goal.carbs_goal_g or 0),
-                        "fat_g": float(goal.fat_goal_g or 0),
+                        "water_ml": 0,
+                        "calories_kcal": 0,
+                        "protein_g": 0,
+                        "carbs_g": 0,
+                        "fat_g": 0,
                     },
                 }, status=status.HTTP_200_OK)
             # Use the goal from the progress record for historical dates
@@ -314,13 +341,13 @@ class WaterIntakeAPIView(APIView):
             try:
                 with transaction.atomic():
                     progress, created = DailyNutritionProgress.objects.get_or_create(
-                        user=request.user,
+                        user=target_user,
                         date=query_date,
                         defaults={'goal': goal} if goal else {}
                     )
                     # Only reset progress for current/future dates when goal changes
                     if not created:
-                        current_active_goal = NutritionGoal.objects.filter(user=request.user, is_active=True).first()
+                        current_active_goal = NutritionGoal.objects.filter(user=target_user, is_active=True).first()
                         if current_active_goal and (progress.goal != current_active_goal or progress.goal is None or (progress.goal and not progress.goal.is_active)):
                             progress.goal = current_active_goal
                             progress.water_consumed_ml = 0
@@ -331,9 +358,9 @@ class WaterIntakeAPIView(APIView):
                             progress.save()
             except IntegrityError:
                 # Race condition: another request created the record between check and create
-                progress = DailyNutritionProgress.objects.get(user=request.user, date=query_date)
+                progress = DailyNutritionProgress.objects.get(user=target_user, date=query_date)
                 # Only reset for current/future dates
-                current_active_goal = NutritionGoal.objects.filter(user=request.user, is_active=True).first()
+                current_active_goal = NutritionGoal.objects.filter(user=target_user, is_active=True).first()
                 if current_active_goal and (progress.goal != current_active_goal or progress.goal is None or (progress.goal and not progress.goal.is_active)):
                     progress.goal = current_active_goal
                     progress.water_consumed_ml = 0
@@ -566,7 +593,7 @@ class DailyProgressAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        user = request.user
+        user = resolve_target_user(request)
         date_str = request.query_params.get("date")
         if not date_str:
             return Response({"error": "date parameter is required"}, status=400)
@@ -672,7 +699,7 @@ class UserDrinkHistoryAPIView(APIView):
             ?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD
         """
 
-        user = request.user
+        user = resolve_target_user(request)
         date_param = request.query_params.get("date")
         start_date = request.query_params.get("start_date")
         end_date = request.query_params.get("end_date")
