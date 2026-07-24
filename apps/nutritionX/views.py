@@ -749,7 +749,7 @@ class ClientMacroHistoryListView(generics.ListAPIView):
         from apps.users.models import UserRole
         return User.objects.filter(
             role=UserRole.CLIENT,
-            deactivated=False
+            is_active=True
         ).prefetch_related(
             all_goals_prefetch
         )
