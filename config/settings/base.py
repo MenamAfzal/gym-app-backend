@@ -27,6 +27,7 @@ LOCAL_APPS = [
     'apps.core.tenants',
     'apps.users',
     "apps.scheduling",
+    'apps.reflection_logger',
 ]
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
