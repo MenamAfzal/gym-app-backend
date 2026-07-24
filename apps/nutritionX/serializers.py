@@ -124,7 +124,7 @@ class ClientMacroHistorySerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'id', 'email', 'user_type', 
+            'id', 'email', 'role', 
             'current_limits', 'historical_limits'
         ]
 

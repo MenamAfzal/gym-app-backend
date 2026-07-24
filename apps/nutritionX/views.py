@@ -526,7 +526,8 @@ class NutritionGoalBulkCreateAPIView(APIView):
     GET: Retrieve all users with their goals
     """
     def post(self, request):
-        if request.user.user_type != User.UserType.STAFF:
+        from apps.users.models import UserRole
+        if request.user.role == UserRole.CLIENT:
             return Response({"error": "Only staff users can create goals for users."},
                             status=status.HTTP_403_FORBIDDEN)
         
