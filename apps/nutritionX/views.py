@@ -271,36 +271,6 @@ class WaterIntakeAPIView(APIView):
         # Check if this is a historical date (past date)
         is_historical_date = query_date < date.today()
         
-        # Get active goal for current/future dates, or goal that was active on historical date
-        if is_historical_date:
-            # For historical dates, get the goal that was active on that date
-            goal = NutritionGoal.objects.filter(
-                user=request.user,
-                created_at__lte=query_date
-            ).order_by("-created_at").first()
-            
-            # Also check if progress exists and has a goal
-            existing_progress = DailyNutritionProgress.objects.filter(
-                user=request.user,
-                date=query_date
-            ).first()
-            
-            if existing_progress and existing_progress.goal:
-                # Use the goal from the progress record (preserves historical data)
-                goal = existing_progress.goal
-        else:
-            # For today or future dates, use current active goal
-            goal = NutritionGoal.objects.filter(user=request.user, is_active=True).first()
-            if not goal:
-                return Response({"error": "Active nutrition goal not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        # Get or create daily progress for this date
-        # Note: unique constraint is on (user, date), so we use get_or_create with those fields
-        # For historical dates, only get (don't create new records)
-        if is_historical_date:
-            progress = DailyNutritionProgress.objects.filter(
-                user=request.user,
-                date=query_date
         target_user = resolve_target_user(request)
 
         # Get active goal for target user
