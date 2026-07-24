@@ -151,6 +151,8 @@ class CustomFoodEntryAPIView(APIView):
         """
         data = request.data.copy()
         data["user"] = request.user.id
+        if request.user.tenant_id:
+            data["tenant"] = request.user.tenant_id
 
         meal_log_name = data.get("food")
         food_name = data.get("food_name")
