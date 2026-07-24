@@ -4,7 +4,7 @@ from .views import (
     LocationViewSet, RoomViewSet, StaffLocationViewSet, StaffAvailabilityViewSet,
     ClassTemplateViewSet, RecurrenceRuleViewSet, ClassSessionViewSet, BookingViewSet,
     AppointmentViewSet, WaitlistViewSet, SubstituteRequestViewSet, PackageTypeViewSet,
-    PackageViewSet, ReportsView, StaffAssignmentViewSet
+    PackageViewSet, ReportsView, StaffAssignmentViewSet, ViewAllClientsAPIView
 )
 
 router = DefaultRouter()
@@ -24,6 +24,7 @@ router.register(r'packages', PackageViewSet, basename='package')
 router.register(r'staff-assignments', StaffAssignmentViewSet, basename='staff-assignment')
 
 urlpatterns = [
+    path('api/view-all-clients/', ViewAllClientsAPIView.as_view(), name='view-all-clients'),
     path('', include(router.urls)),
     path('reports/', ReportsView.as_view(), name='reports'),
 ]

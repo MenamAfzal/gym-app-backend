@@ -750,4 +750,32 @@ class StaffAssignmentViewSet(viewsets.ModelViewSet):
         
         return Response({
             "detail": f"Successfully processed {len(valid_clients)} assignments."
-        }, status=status.HTTP_201_CREATED)
+        }, status=status.HTTP_200_OK)
+
+
+class ViewAllClientsAPIView(APIView):
+    """
+    Legacy endpoint support for frontend fetching all active clients.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        status_filter = request.query_params.get('status', 'Active')
+        
+        qs = User.objects.filter(role='client')
+        if status_filter.lower() == 'active':
+            qs = qs.filter(is_active=True)
+            
+        # Basic serialization to match typical legacy client list shape
+        data = []
+        for user in qs:
+            data.append({
+                "id": user.id,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "status": "Active" if user.is_active else "Inactive",
+                "phone_number": getattr(user.profile, "phone_number", "") if hasattr(user, "profile") else ""
+            })
+            
+        return Response(data, status=status.HTTP_200_OK)
