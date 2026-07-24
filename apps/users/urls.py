@@ -7,7 +7,9 @@ from apps.users.views import (
     UserViewSet, 
     CustomTokenObtainPairView, 
     UserRegistrationView,
-    VerifyOTPAndRegisterView
+    VerifyOTPAndRegisterView,
+    ForgotPasswordInitView,
+    ForgotPasswordVerifyView
 )
 
 router = DefaultRouter()
@@ -19,6 +21,10 @@ urlpatterns = [
     path('auth/register/', UserRegistrationView.as_view(), name='auth_register'),
     path('auth/register/verify/', VerifyOTPAndRegisterView.as_view(), name='register_verify'),
     path('auth/login/', CustomTokenObtainPairView.as_view(), name='auth_login'),
+    
+    # Forgot Password Routes
+    path('auth/forgot-password/init/', ForgotPasswordInitView.as_view(), name='forgot_password_init'),
+    path('auth/forgot-password/verify/', ForgotPasswordVerifyView.as_view(), name='forgot_password_verify'),
     
     # Standard JWT Helper Routes (Refresh/Verify)
     path('auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),

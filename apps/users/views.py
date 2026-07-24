@@ -284,3 +284,57 @@ class ChangePasswordView(APIView):
         )
         
         return Response({"detail": "Password updated successfully."}, status=status.HTTP_200_OK)
+
+from apps.users.serializers import ForgotPasswordInitSerializer, ForgotPasswordVerifySerializer
+
+class ForgotPasswordInitView(APIView):
+    """
+    Initializes the forgot password flow by generating and emailing an OTP.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = ForgotPasswordInitSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        email = serializer.validated_data['email']
+        
+        # Generate OTP
+        code = AuthService.create_email_otp(email=email, purpose=OTPPurpose.PASSWORD_RESET)
+        
+        # Send OTP
+        AuthService.send_email_otp(email=email, code=code, purpose=OTPPurpose.PASSWORD_RESET)
+        
+        return Response({"detail": "Password reset code sent to your email."}, status=status.HTTP_200_OK)
+
+class ForgotPasswordVerifyView(APIView):
+    """
+    Verifies the OTP and updates the user's password.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        serializer = ForgotPasswordVerifySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        data = serializer.validated_data
+        email = data['email']
+        
+        # 1. Verify OTP
+        AuthService.verify_email_otp(
+            email=email, 
+            code=data['code'], 
+            purpose=OTPPurpose.PASSWORD_RESET
+        )
+        
+        # 2. Update Password
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        user = User.objects.get(email=email)
+        
+        AuthService.change_password(
+            user=user, 
+            new_password=data['new_password']
+        )
+        
+        return Response({"detail": "Password has been successfully reset."}, status=status.HTTP_200_OK)

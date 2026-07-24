@@ -216,4 +216,18 @@ class UserSerializer(serializers.ModelSerializer):
             user_data=validated_data, 
             profile_data=profile_data
         )
-    
+
+class ForgotPasswordInitSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+    def validate_email(self, value):
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+        if not User.objects.filter(email=value).exists():
+            raise serializers.ValidationError("No user found with this email address.")
+        return value
+
+class ForgotPasswordVerifySerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    code = serializers.CharField(max_length=6, min_length=6)
+    new_password = serializers.CharField(required=True, min_length=8)
