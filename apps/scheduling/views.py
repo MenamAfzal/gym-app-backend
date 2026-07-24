@@ -188,7 +188,7 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = ClassSession.objects.select_related('template', 'room', 'staff', 'staff__profile')
-        location = self.request.query_params.get('location')
+        location = self.request.query_params.get('location') or self.request.query_params.get('locationId')
         date_from = self.request.query_params.get('date_from')
         date_to = self.request.query_params.get('date_to')
 
@@ -763,6 +763,9 @@ class ViewAllClientsAPIView(APIView):
         status_filter = request.query_params.get('status', 'Active')
         
         qs = User.objects.filter(role='client')
+        if request.user.tenant:
+            qs = qs.filter(tenant=request.user.tenant)
+
         if status_filter.lower() == 'active':
             qs = qs.filter(is_active=True)
             
