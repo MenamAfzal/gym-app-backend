@@ -188,16 +188,59 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = ClassSession.objects.select_related('template', 'room', 'staff', 'staff__profile')
-        location = self.request.query_params.get('location') or self.request.query_params.get('locationId')
-        date_from = self.request.query_params.get('date_from')
-        date_to = self.request.query_params.get('date_to')
-
+        params = self.request.query_params
+        
+        # 1. Location filter
+        location = params.get('location') or params.get('locationId') or params.get('location_id')
         if location:
             qs = qs.filter(template__location_id=location)
-        if date_from:
-            qs = qs.filter(start_at__gte=parse_datetime(date_from) or date_from)
-        if date_to:
-            qs = qs.filter(start_at__lte=parse_datetime(date_to) or date_to)
+            
+        # 2. Date filters (handling single date, date range, or timestamps without midnight cutoff)
+        single_date = params.get('date')
+        if single_date:
+            d = parse_date(single_date) or single_date[:10]
+            qs = qs.filter(start_at__date=d)
+        else:
+            date_from = params.get('date_from') or params.get('start_date')
+            date_to = params.get('date_to') or params.get('end_date')
+            
+            if date_from:
+                # If length is 10 (e.g. YYYY-MM-DD), use date__gte to avoid time format mismatch
+                if len(str(date_from)) == 10 and parse_date(str(date_from)):
+                    qs = qs.filter(start_at__date__gte=parse_date(str(date_from)))
+                else:
+                    qs = qs.filter(start_at__gte=parse_datetime(str(date_from)) or date_from)
+                    
+            if date_to:
+                # If length is 10 (e.g. YYYY-MM-DD), use date__lte to include the entire end day up to 23:59:59
+                if len(str(date_to)) == 10 and parse_date(str(date_to)):
+                    qs = qs.filter(start_at__date__lte=parse_date(str(date_to)))
+                else:
+                    qs = qs.filter(start_at__lte=parse_datetime(str(date_to)) or date_to)
+                    
+        # 3. Status filter
+        status_param = params.get('status')
+        if status_param and status_param.lower() != 'all':
+            if status_param.lower() == 'active':
+                qs = qs.filter(status='scheduled')
+            else:
+                qs = qs.filter(status__iexact=status_param)
+                
+        # 4. Staff / Trainer filter
+        staff_id = params.get('staff') or params.get('staff_id') or params.get('trainer') or params.get('trainer_id')
+        if staff_id:
+            qs = qs.filter(staff_id=staff_id)
+            
+        # 5. Template / Class filter
+        template_id = params.get('template') or params.get('template_id') or params.get('class_id') or params.get('class_template')
+        if template_id:
+            qs = qs.filter(template_id=template_id)
+            
+        # 6. Room filter
+        room_id = params.get('room') or params.get('room_id')
+        if room_id:
+            qs = qs.filter(room_id=room_id)
+
         return qs
 
     @transaction.atomic
