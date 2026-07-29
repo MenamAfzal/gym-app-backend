@@ -18,4 +18,7 @@ CACHES = {
     }
 }
 
+ALLOWED_HOSTS = ['*']
+
 CELERY_TASK_ALWAYS_EAGER = True
+
