@@ -7,7 +7,7 @@ from .models import (
     Location, Room, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
-    Notification, StaffClientAssignment
+    Notification, StaffClientAssignment, FacilityAccessLog, PayoutRun, PlatformLedger
 )
 from apps.users.models import User
 
@@ -90,17 +90,106 @@ class RecurrenceRuleSerializer(serializers.ModelSerializer):
 
 class ClassSessionSerializer(serializers.ModelSerializer):
     template_name = serializers.CharField(source='template.name', read_only=True)
-    room_name = serializers.CharField(source='room.name', read_only=True)
-    staff_name = serializers.CharField(source='staff.profile.nickname', read_only=True)
+    description = serializers.CharField(source='template.description', read_only=True, default='')
+    duration_min = serializers.IntegerField(source='template.duration_min', read_only=True, default=0)
+    category = serializers.CharField(source='template.category', read_only=True, default='')
+    intensity = serializers.CharField(source='template.intensity', read_only=True, default='')
+    location_id = serializers.UUIDField(source='template.location_id', read_only=True, default=None)
+    location_name = serializers.CharField(source='template.location.name', read_only=True, default='')
+    
+    room_name = serializers.CharField(source='room.name', read_only=True, default='')
+    
+    staff_name = serializers.SerializerMethodField()
+    staff_email = serializers.CharField(source='staff.email', read_only=True, default='')
+    staff_image = serializers.SerializerMethodField()
+    
+    booked_count = serializers.SerializerMethodField()
+    waitlist_count = serializers.SerializerMethodField()
+    bookings = serializers.SerializerMethodField()
+    user_booking_status = serializers.SerializerMethodField()
 
     class Meta:
         model = ClassSession
         fields = [
-            'id', 'template', 'template_name', 'recurrence_rule', 'room', 
-            'room_name', 'staff', 'staff_name', 'start_at', 'end_at', 
-            'capacity', 'status', 'is_full', 'created_at'
+            'id', 'template', 'template_name', 'description', 'duration_min', 'category', 'intensity',
+            'location_id', 'location_name', 'recurrence_rule', 'room', 'room_name',
+            'staff', 'staff_name', 'staff_email', 'staff_image',
+            'start_at', 'end_at', 'capacity', 'status', 'is_full',
+            'booked_count', 'waitlist_count', 'bookings', 'user_booking_status',
+            'created_at'
         ]
-        read_only_fields = ['id', 'template_name', 'room_name', 'staff_name', 'is_full', 'created_at']
+        read_only_fields = [
+            'id', 'template_name', 'description', 'duration_min', 'category', 'intensity',
+            'location_id', 'location_name', 'room_name', 'staff_name', 'staff_email', 'staff_image',
+            'is_full', 'booked_count', 'waitlist_count', 'bookings', 'user_booking_status',
+            'created_at'
+        ]
+
+    def get_staff_name(self, obj):
+        if not obj.staff:
+            return ""
+        profile = getattr(obj.staff, 'profile', None)
+        if profile:
+            name = getattr(profile, 'nickname', None) or f"{getattr(profile, 'first_name', '')} {getattr(profile, 'last_name', '')}".strip()
+            if name:
+                return name
+        return obj.staff.email
+
+    def get_staff_image(self, obj):
+        if not obj.staff:
+            return None
+        profile = getattr(obj.staff, 'profile', None)
+        if profile and getattr(profile, 'profile_image', None) and hasattr(profile.profile_image, 'url'):
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(profile.profile_image.url)
+            return profile.profile_image.url
+        return None
+
+    def get_booked_count(self, obj):
+        if hasattr(obj, 'bookings'):
+            return obj.bookings.filter(status='booked').count()
+        return 0
+
+    def get_waitlist_count(self, obj):
+        if hasattr(obj, 'waitlist_entries'):
+            return obj.waitlist_entries.filter(status='waiting').count()
+        return 0
+
+    def get_bookings(self, obj):
+        request = self.context.get('request')
+        if request and request.user and request.user.role in ['trainer', 'gym_owner', 'gym_manager', 'staff']:
+            if hasattr(obj, 'bookings'):
+                active_bookings = obj.bookings.filter(status__in=['booked', 'checked_in']).select_related('client', 'client__profile')
+                results = []
+                for b in active_bookings:
+                    c = b.client
+                    prof = getattr(c, 'profile', None)
+                    name = getattr(prof, 'nickname', '') or f"{getattr(prof, 'first_name', '')} {getattr(prof, 'last_name', '')}".strip() or c.email
+                    img = None
+                    if prof and getattr(prof, 'profile_image', None) and hasattr(prof.profile_image, 'url'):
+                        img = request.build_absolute_uri(prof.profile_image.url)
+                    results.append({
+                        "id": str(b.id),
+                        "client_id": str(c.id),
+                        "client_email": c.email,
+                        "client_name": name,
+                        "client_image": img,
+                        "status": b.status,
+                        "checked_in_at": b.checked_in_at,
+                        "join_mode": b.join_mode,
+                    })
+                return results
+        return []
+
+    def get_user_booking_status(self, obj):
+        request = self.context.get('request')
+        if request and request.user and request.user.is_authenticated:
+            if hasattr(obj, 'bookings') and obj.bookings.filter(client=request.user, status='booked').exists():
+                return "booked"
+            if hasattr(obj, 'waitlist_entries') and obj.waitlist_entries.filter(client=request.user, status='waiting').exists():
+                return "waitlist"
+        return None
 
     def validate(self, data):
         start = data.get('start_at', self.instance.start_at if self.instance else None)
@@ -260,3 +349,24 @@ class StaffAssignClientSerializer(serializers.ModelSerializer):
         if data['staff'].tenant != data['client'].tenant:
             raise serializers.ValidationError("Staff and Client must belong to the same gym.")
         return data
+
+class FacilityAccessLogSerializer(serializers.ModelSerializer):
+    client_email = serializers.CharField(source='client.email', read_only=True)
+    location_name = serializers.CharField(source='location.name', read_only=True)
+
+    class Meta:
+        model = FacilityAccessLog
+        fields = ['id', 'client', 'client_email', 'location', 'location_name', 'checked_in_at', 'checked_out_at']
+        read_only_fields = ['id', 'checked_in_at', 'checked_out_at']
+
+class PayoutRunSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PayoutRun
+        fields = ['id', 'status', 'total_amount', 'stripe_payout_id', 'created_at']
+        read_only_fields = ['id', 'created_at']
+
+class PlatformLedgerSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PlatformLedger
+        fields = ['id', 'payment', 'gross_amount', 'platform_fee', 'net_payout_amount', 'payout_run', 'created_at']
+        read_only_fields = ['id', 'created_at']

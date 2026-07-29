@@ -251,11 +251,13 @@ class TenantAdministrationService:
 
     @staticmethod
     @transaction.atomic
-    def assign_plan(tenant, plan):
+    def assign_plan(tenant, plan, trial_days=None):
         """
         Switches a tenant to a new plan.
         Cancels old active subscriptions and creates a new one.
+        If trial_days is provided, sets trial_ends_at.
         """
+        from datetime import timedelta
         now = timezone.now()
 
         # Cancel current active subscriptions
@@ -267,12 +269,15 @@ class TenantAdministrationService:
             ends_at=now
         )
 
+        trial_ends_at = now + timedelta(days=trial_days) if trial_days else None
+
         # Create new subscription
         subscription = TenantSubscription.objects.create(
             tenant=tenant,
             plan=plan,
             status='active',
-            started_at=now
+            started_at=now,
+            trial_ends_at=trial_ends_at
         )
         
         # Signals will automatically invalidate cache (Priority 2 Impl)

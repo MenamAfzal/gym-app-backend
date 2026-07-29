@@ -1,5 +1,5 @@
 from django.db import models
-from apps.core.tenants.context import get_current_tenant
+from apps.core.tenants.context import get_current_tenant, is_isolation_bypassed
 
 class TenantAwareManager(models.Manager):
     """
@@ -12,17 +12,19 @@ class TenantAwareManager(models.Manager):
         Override get_queryset to filter by the active tenant.
         """
         queryset = super().get_queryset()
+        
+        # Explicit bypass for cross-tenant operations (e.g. Platform Admin)
+        if is_isolation_bypassed():
+            return queryset
+            
         tenant = get_current_tenant()
         
         if tenant:
             # If we have a tenant in context, filter by it
             return queryset.filter(tenant=tenant)
         
-        # If no tenant is active (e.g. public site, superuser console script),
-        # strictly returning .none() is safest for a "Strict Isolation" motto,
-        # BUT developers might need to access data in scripts.
-        # Decision: Return empty queryset to fail safe. 
-        # Explicit bypass required for cross-tenant operations (to be implemented).
+        # If no tenant is active and bypass is not set, strictly return none
+        # to prevent data leakage.
         return queryset.none()
 
 class TenantMixin(models.Model):

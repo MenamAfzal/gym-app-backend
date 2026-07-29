@@ -4,7 +4,8 @@ from .views import (
     LocationViewSet, RoomViewSet, StaffLocationViewSet, StaffAvailabilityViewSet,
     ClassTemplateViewSet, RecurrenceRuleViewSet, ClassSessionViewSet, BookingViewSet,
     AppointmentViewSet, WaitlistViewSet, SubstituteRequestViewSet, PackageTypeViewSet,
-    PackageViewSet, ReportsView, StaffAssignmentViewSet, ViewAllClientsAPIView
+    PackageViewSet, ReportsView, StaffAssignmentViewSet, ViewAllClientsAPIView,
+    FacilityAccessViewSet, TenantLedgerViewSet, PlatformLedgerViewSet
 )
 
 router = DefaultRouter()
@@ -22,6 +23,9 @@ router.register(r'substitute-requests', SubstituteRequestViewSet, basename='subs
 router.register(r'package-types', PackageTypeViewSet, basename='package-type')
 router.register(r'packages', PackageViewSet, basename='package')
 router.register(r'staff-assignments', StaffAssignmentViewSet, basename='staff-assignment')
+router.register(r'facility-access', FacilityAccessViewSet, basename='facility-access')
+router.register(r'tenant-ledgers', TenantLedgerViewSet, basename='tenant-ledger')
+router.register(r'platform-ledgers', PlatformLedgerViewSet, basename='platform-ledger')
 
 urlpatterns = [
     path('api/view-all-clients/', ViewAllClientsAPIView.as_view(), name='view-all-clients'),

@@ -100,6 +100,16 @@ class UserProfile(UUIDMixin, TimestampMixin):
         related_name='profile'
     )
     
+    # Isolation & Tracking
+    primary_location = models.ForeignKey(
+        'scheduling.Location',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='primary_clients',
+        help_text="The main location this client belongs to. Used for data isolation."
+    )
+    
     # Basic Info
     nickname = models.CharField(max_length=50, blank=True)
     bio = models.TextField(blank=True, max_length=500)

@@ -53,7 +53,11 @@ class LocationViewSet(viewsets.ModelViewSet):
         return [IsAuthenticated()]
 
     def get_queryset(self):
-        return Location.objects.all()
+        qs = Location.objects.all()
+        user = self.request.user
+        if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
+            qs = qs.filter(stafflocation__staff=user).distinct()
+        return qs
 
 
 class RoomViewSet(viewsets.ModelViewSet):
@@ -68,6 +72,12 @@ class RoomViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = Room.objects.all()
+        user = self.request.user
+        
+        # Staff location segregation
+        if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
+            qs = qs.filter(location__stafflocation__staff=user).distinct()
+            
         location_id = self.request.query_params.get('location')
         if location_id:
             qs = qs.filter(location_id=location_id)
@@ -188,6 +198,12 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = ClassSession.objects.select_related('template', 'room', 'staff', 'staff__profile')
+        user = self.request.user
+        
+        # Staff location segregation
+        if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
+            qs = qs.filter(template__location__stafflocation__staff=user).distinct()
+            
         params = self.request.query_params
         
         # 1. Location filter
@@ -276,8 +292,10 @@ class BookingViewSet(viewsets.ModelViewSet):
         qs = Booking.objects.select_related('session', 'session__template', 'client')
         if user.role == UserRole.CLIENT:
             return qs.filter(client=user)
+        elif user.role in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
+            return qs.filter(session__template__location__stafflocation__staff=user).distinct()
         elif user.role == UserRole.TRAINER:
-            return qs.filter(session__staff=user)
+            return qs.filter(Q(session__staff=user) | Q(session__template__location__stafflocation__staff=user)).distinct()
         return qs
 
     @transaction.atomic
@@ -394,6 +412,13 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.save()
         return Response({"detail": "Checked in successfully."})
 
+    @action(detail=True, methods=['post'], permission_classes=[IsFrontDeskOrAdmin])
+    def check_out(self, request, pk=None):
+        booking = self.get_object()
+        booking.checked_out_at = timezone.now()
+        booking.save()
+        return Response({"detail": "Checked out successfully."})
+
 
 class WaitlistViewSet(viewsets.ModelViewSet):
     queryset = Waitlist.all_objects.all()
@@ -437,8 +462,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         qs = Appointment.objects.select_related('provider', 'client')
         if user.role == UserRole.CLIENT:
             return qs.filter(client=user)
+        elif user.role in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
+            return qs.filter(location__stafflocation__staff=user).distinct()
         elif user.role == UserRole.TRAINER:
-            return qs.filter(provider=user)
+            return qs.filter(Q(provider=user) | Q(location__stafflocation__staff=user)).distinct()
         return qs
 
     @action(detail=False, methods=['get'], url_path='availability')
@@ -825,3 +852,64 @@ class ViewAllClientsAPIView(APIView):
             })
             
         return Response(data, status=status.HTTP_200_OK)
+
+class FacilityAccessViewSet(viewsets.ModelViewSet):
+    from .models import FacilityAccessLog
+    from .serializers import FacilityAccessLogSerializer
+    queryset = FacilityAccessLog.all_objects.all()
+    serializer_class = FacilityAccessLogSerializer
+    permission_classes = [IsFrontDeskOrAdmin]
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        qs = self.queryset.select_related('client', 'location')
+        user = self.request.user
+        if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
+            qs = qs.filter(location__stafflocation__staff=user).distinct()
+        return qs
+
+    @action(detail=True, methods=['post'])
+    def check_out(self, request, pk=None):
+        access_log = self.get_object()
+        if access_log.checked_out_at:
+            return Response({"detail": "Already checked out."}, status=status.HTTP_400_BAD_REQUEST)
+        access_log.checked_out_at = timezone.now()
+        access_log.save()
+        return Response({"detail": "Checked out successfully."})
+
+
+class TenantLedgerViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    For Gym Owners to see their own payout and fee ledgers.
+    """
+    from .models import PlatformLedger
+    from .serializers import PlatformLedgerSerializer
+    queryset = PlatformLedger.objects.all().select_related('payment')
+    serializer_class = PlatformLedgerSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
+            return self.queryset.none()
+        return super().get_queryset()
+
+
+class PlatformLedgerViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    For Platform Admins to see ledgers across all tenants.
+    """
+    from .models import PlatformLedger
+    from .serializers import PlatformLedgerSerializer
+    serializer_class = PlatformLedgerSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role != UserRole.PLATFORM_ADMIN:
+            from .models import PlatformLedger
+            return PlatformLedger.objects.none()
+            
+        with bypass_tenant_isolation():
+            from .models import PlatformLedger
+            return PlatformLedger.all_objects.all().select_related('payment', 'tenant')

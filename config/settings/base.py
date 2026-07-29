@@ -29,6 +29,8 @@ LOCAL_APPS = [
     "apps.scheduling",
     'apps.reflection_logger',
     'apps.nutritionX',
+    'apps.support',
+    'apps.inventory',
 ]
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
@@ -159,3 +161,6 @@ STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY")
 STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
+
+# PLATFORM SETTINGS
+PLATFORM_FEE_PERCENTAGE = 10.0

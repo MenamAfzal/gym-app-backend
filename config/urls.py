@@ -27,7 +27,9 @@ urlpatterns = [
     path('api/v1/users/', include('apps.users.urls')),
     path('api/v1/scheduling/', include('apps.scheduling.urls')),  
     path('api/v1/', include('apps.reflection_logger.urls')),
-    path('api/v1/nutrition/', include('apps.nutritionX.urls')),
+    path('api/v1/nutritionx/', include('apps.nutritionX.urls')),
+    path('api/v1/support/', include('apps.support.urls')),
+    path('api/v1/inventory/', include('apps.inventory.urls')),
 ]
 
 if settings.DEBUG:

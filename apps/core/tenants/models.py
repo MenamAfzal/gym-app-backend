@@ -39,6 +39,15 @@ class Tenant(UUIDMixin, TimestampMixin):
         db_index=True,
         help_text="Stripe Customer ID (cus_...)"
     )
+    
+    referred_by = models.ForeignKey(
+        'self', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='referrals',
+        help_text="Which tenant referred this tenant"
+    )
 
     class Meta:
         ordering = ['name']
@@ -190,7 +199,12 @@ class TenantSubscription(UUIDMixin, TimestampMixin):
     ends_at = models.DateTimeField(
         null=True,
         blank=True,
-        help_text="When subscription ends (null for ongoing)"
+        help_text="When subscription ends/renews"
+    )
+    trial_ends_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the free trial ends, if applicable"
     )
 
     stripe_subscription_id = models.CharField(
