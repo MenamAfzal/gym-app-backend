@@ -3,14 +3,15 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.core.exceptions import ValidationError
 
-from apps.core.tenants.models import Tenant, Plan, Feature
+from apps.core.tenants.models import Tenant, Plan, Feature, ReferralReward
 from apps.core.tenants.services import TenantAdministrationService
 from apps.core.tenants.serializers import (
     TenantSerializer, 
     PlanSerializer, 
     FeatureSerializer,
     OnboardTenantSerializer,
-    TenantEntitlementOverrideSerializer
+    TenantEntitlementOverrideSerializer,
+    ReferralRewardSerializer
 )
 
 class IsPlatformAdmin(permissions.BasePermission):
@@ -57,8 +58,8 @@ class PlatformTenantViewSet(viewsets.ModelViewSet):
                 owner_email=data['owner_email'],
                 owner_password=data['owner_password'],
                 initial_plan_id=data.get('initial_plan_id'),
-                branding=data.get('branding')
-                
+                branding=data.get('branding'),
+                referred_by_id=data.get('referred_by_id')
             )
             return Response(
                 TenantSerializer(tenant).data, 
@@ -127,5 +128,14 @@ class PlatformFeatureViewSet(viewsets.ModelViewSet):
     """
     queryset = Feature.objects.all().order_by('key')
     serializer_class = FeatureSerializer
+    permission_classes = [IsPlatformAdmin]
+
+
+class PlatformReferralRewardViewSet(viewsets.ModelViewSet):
+    """
+    API for Managing and Auditing Referral Rewards platform-wide.
+    """
+    queryset = ReferralReward.objects.all().order_by('-created_at')
+    serializer_class = ReferralRewardSerializer
     permission_classes = [IsPlatformAdmin]
     

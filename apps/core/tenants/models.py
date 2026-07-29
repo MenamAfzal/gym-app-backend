@@ -259,3 +259,51 @@ class TenantEntitlementOverride(UUIDMixin, TimestampMixin):
 
     def __str__(self):
         return f"{self.tenant.name} - {self.feature.key}: {self.value}"
+
+
+class ReferralReward(UUIDMixin, TimestampMixin):
+    """
+    Tracks commission rewards earned by a tenant for referring another tenant.
+    """
+    referrer = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name='earned_referral_rewards',
+        help_text="The tenant who referred and earned the reward"
+    )
+    referred_tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name='referred_by_rewards',
+        help_text="The tenant who was referred"
+    )
+    subscription = models.ForeignKey(
+        'TenantSubscription',
+        on_delete=models.CASCADE,
+        related_name='referral_rewards',
+        help_text="The subscription that triggered this reward"
+    )
+    reward_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="The reward amount earned (e.g. commission)"
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=[
+            ('pending', 'Pending'),
+            ('paid', 'Paid'),
+            ('void', 'Void'),
+        ],
+        default='pending',
+        help_text="Status of the reward payout"
+    )
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Referral Reward'
+        verbose_name_plural = 'Referral Rewards'
+
+    def __str__(self):
+        return f"Reward for {self.referrer.name} referring {self.referred_tenant.name}: ${self.reward_amount}"
+

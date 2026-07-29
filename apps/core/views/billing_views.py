@@ -78,4 +78,20 @@ class BillingViewSet(viewsets.ViewSet):
             )
         except Exception as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['get'], url_path='referrals')
+    def get_referral_rewards(self, request):
+        """
+        Retrieve referral rewards earned by this gym.
+        """
+        tenant = request.user.tenant
+        if not tenant:
+            return Response({"detail": "No active tenant context."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        from apps.core.tenants.models import ReferralReward
+        from apps.core.tenants.serializers import ReferralRewardSerializer
+        
+        rewards = ReferralReward.objects.filter(referrer=tenant)
+        serializer = ReferralRewardSerializer(rewards, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
         

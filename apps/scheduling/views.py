@@ -891,8 +891,10 @@ class TenantLedgerViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         user = self.request.user
         if user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
-            return self.queryset.none()
-        return super().get_queryset()
+            from .models import PlatformLedger
+            return PlatformLedger.objects.none()
+        from .models import PlatformLedger
+        return PlatformLedger.objects.all().select_related('payment')
 
 
 class PlatformLedgerViewSet(viewsets.ReadOnlyModelViewSet):

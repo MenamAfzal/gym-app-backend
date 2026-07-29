@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from apps.core.tenants.models import (
     Tenant, Plan, Feature, PlanEntitlement, 
-    TenantSubscription, TenantEntitlementOverride
+    TenantSubscription, TenantEntitlementOverride, ReferralReward
 )
 from django.db import transaction
 from apps.core.tenants.services import TenantEntitlementService
@@ -94,6 +94,7 @@ class OnboardTenantSerializer(serializers.Serializer):
     owner_password = serializers.CharField(write_only=True, min_length=8)
     initial_plan_id = serializers.UUIDField(required=False)
     branding = serializers.JSONField(required=False, default=dict)
+    referred_by_id = serializers.UUIDField(required=False, allow_null=True)
 
 class TenantSerializer(serializers.ModelSerializer):
     current_subscription = serializers.SerializerMethodField()
@@ -145,4 +146,19 @@ class CheckoutInitSerializer(serializers.Serializer):
             return plan
         except Plan.DoesNotExist:
             raise serializers.ValidationError("Invalid Plan ID.")
+
+
+class ReferralRewardSerializer(serializers.ModelSerializer):
+    referrer_name = serializers.ReadOnlyField(source='referrer.name')
+    referred_tenant_name = serializers.ReadOnlyField(source='referred_tenant.name')
+    plan_name = serializers.ReadOnlyField(source='subscription.plan.name')
+
+    class Meta:
+        model = ReferralReward
+        fields = [
+            'id', 'referrer', 'referrer_name', 
+            'referred_tenant', 'referred_tenant_name', 
+            'subscription', 'plan_name', 
+            'reward_amount', 'status', 'created_at'
+        ]
         

@@ -64,6 +64,10 @@ def _handle_checkout_completed(session):
     # Update the newly created subscription with Stripe details
     subscription.stripe_subscription_id = stripe_subscription_id
     subscription.save()
+
+    # Also update any pending referral rewards to paid
+    from apps.core.tenants.models import ReferralReward
+    ReferralReward.objects.filter(subscription=subscription, status='pending').update(status='paid')
     
     logger.info(f"Provisioned Plan {plan.name} for Tenant {tenant.name}")
 
@@ -80,6 +84,9 @@ def _handle_subscription_updated(subscription_data):
         # Map Stripe status to Django status
         if status == 'active':
             sub.status = 'active'
+            # Also update referral rewards to paid
+            from apps.core.tenants.models import ReferralReward
+            ReferralReward.objects.filter(subscription=sub, status='pending').update(status='paid')
         elif status in ['past_due', 'unpaid']:
             sub.status = 'past_due'
         elif status == 'canceled':
@@ -122,4 +129,27 @@ def _handle_payment_failed(invoice):
             sub.save()
         except TenantSubscription.DoesNotExist:
             pass
+
+
+@shared_task
+def check_expired_trials():
+    """
+    Checks for subscriptions whose trials have expired and marks them as past_due.
+    """
+    now = timezone.now()
+    expired_subscriptions = TenantSubscription.objects.filter(
+        status='active',
+        trial_ends_at__lt=now
+    )
+    
+    count = 0
+    for sub in expired_subscriptions:
+        # If they haven't set up Stripe yet (or subscription ID isn't synced), the trial has expired
+        if not sub.stripe_subscription_id:
+            sub.status = 'past_due'
+            sub.save()
+            count += 1
+            logger.info(f"Subscription for tenant {sub.tenant.name} has expired from trial. Status set to past_due.")
+            
+    return f"Checked expired trials. Updated {count} subscriptions."
         

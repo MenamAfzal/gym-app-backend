@@ -216,7 +216,7 @@ class TenantAdministrationService:
 
     @staticmethod
     @transaction.atomic
-    def onboard_tenant(gym_name, subdomain, owner_email, owner_password, initial_plan_id=None, branding=None):
+    def onboard_tenant(gym_name, subdomain, owner_email, owner_password, initial_plan_id=None, branding=None, referred_by_id=None):
         """
         Creates Tenant (with branding), Plan, and Owner.
         """
@@ -226,10 +226,18 @@ class TenantAdministrationService:
         # Fix: Default to empty dict if None to prevent null errors if DB enforces it
         branding_data = branding if branding else {}
 
+        referred_by = None
+        if referred_by_id:
+            try:
+                referred_by = Tenant.objects.get(id=referred_by_id)
+            except Tenant.DoesNotExist:
+                raise ValidationError("Referring Tenant does not exist.")
+
         tenant = Tenant.objects.create(
             name=gym_name, 
             subdomain=subdomain,
-            branding=branding_data
+            branding=branding_data,
+            referred_by=referred_by
         )
 
         if initial_plan_id:
@@ -279,6 +287,24 @@ class TenantAdministrationService:
             started_at=now,
             trial_ends_at=trial_ends_at
         )
+
+        # Calculate and record referral reward if referred by another tenant
+        if tenant.referred_by:
+            import decimal
+            # Default commission: 10% of subscription plan price
+            reward_percentage = decimal.Decimal(10.0)
+            plan_price = decimal.Decimal(str(plan.price))
+            reward_amount = (plan_price * reward_percentage) / decimal.Decimal(100.0)
+            
+            if reward_amount > 0:
+                from apps.core.tenants.models import ReferralReward
+                ReferralReward.objects.create(
+                    referrer=tenant.referred_by,
+                    referred_tenant=tenant,
+                    subscription=subscription,
+                    reward_amount=reward_amount,
+                    status='pending' if trial_ends_at else 'paid'
+                )
         
         # Signals will automatically invalidate cache (Priority 2 Impl)
         return subscription
