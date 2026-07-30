@@ -59,6 +59,14 @@ class PlatformTicketViewSet(viewsets.ModelViewSet):
                 'comments__author__profile'
             )
 
+    def list(self, request, *args, **kwargs):
+        with bypass_tenant_isolation():
+            return super().list(request, *args, **kwargs)
+
+    def retrieve(self, request, *args, **kwargs):
+        with bypass_tenant_isolation():
+            return super().retrieve(request, *args, **kwargs)
+
     @action(detail=True, methods=['post'])
     def add_comment(self, request, pk=None):
         with bypass_tenant_isolation():
