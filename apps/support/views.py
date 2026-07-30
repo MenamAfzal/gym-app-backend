@@ -18,7 +18,13 @@ class TenantTicketViewSet(viewsets.ModelViewSet):
     """
     For Gym Owners to manage tickets for their specific tenant.
     """
-    queryset = Ticket.objects.all().select_related('created_by', 'assigned_to')
+    queryset = Ticket.objects.all().select_related(
+        'created_by__profile', 
+        'assigned_to__profile'
+    ).prefetch_related(
+        'comments', 
+        'comments__author__profile'
+    )
     serializer_class = TicketSerializer
     permission_classes = [IsGymOwnerOrAdmin]
 
@@ -45,7 +51,13 @@ class PlatformTicketViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         # Use bypass to see everything across all tenants
         with bypass_tenant_isolation():
-            return Ticket.all_objects.all().select_related('created_by', 'assigned_to')
+            return Ticket.all_objects.all().select_related(
+                'created_by__profile', 
+                'assigned_to__profile'
+            ).prefetch_related(
+                'comments', 
+                'comments__author__profile'
+            )
 
     @action(detail=True, methods=['post'])
     def add_comment(self, request, pk=None):

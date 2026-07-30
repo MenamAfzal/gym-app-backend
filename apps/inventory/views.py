@@ -20,14 +20,21 @@ class ProductViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
+        from django.db.models import Sum
+        
         if getattr(user, 'role', None) == UserRole.PLATFORM_ADMIN:
             with bypass_tenant_isolation():
-                return Product.all_objects.all().select_related('location', 'tenant')
+                return Product.all_objects.all().select_related('location', 'tenant').annotate(
+                    annotated_stock=Sum('transactions__quantity')
+                )
         
-        qs = Product.objects.all()
+        qs = Product.objects.all().select_related('location').annotate(
+            annotated_stock=Sum('transactions__quantity')
+        )
         if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
             qs = qs.filter(location__stafflocation__staff=user).distinct()
         return qs
+
 
 class StockTransactionViewSet(viewsets.ModelViewSet):
     """
@@ -41,9 +48,9 @@ class StockTransactionViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if getattr(user, 'role', None) == UserRole.PLATFORM_ADMIN:
             with bypass_tenant_isolation():
-                return StockTransaction.all_objects.all().select_related('product', 'handled_by', 'tenant')
+                return StockTransaction.all_objects.all().select_related('product', 'handled_by__profile', 'tenant')
                 
-        qs = StockTransaction.objects.all()
+        qs = StockTransaction.objects.all().select_related('product', 'handled_by__profile')
         if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
             qs = qs.filter(product__location__stafflocation__staff=user).distinct()
         return qs

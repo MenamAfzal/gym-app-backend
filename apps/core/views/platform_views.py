@@ -135,7 +135,7 @@ class PlatformReferralRewardViewSet(viewsets.ModelViewSet):
     """
     API for Managing and Auditing Referral Rewards platform-wide.
     """
-    queryset = ReferralReward.objects.all().order_by('-created_at')
+    queryset = ReferralReward.objects.all().select_related('referrer', 'referred_tenant', 'subscription__plan').order_by('-created_at')
     serializer_class = ReferralRewardSerializer
     permission_classes = [IsPlatformAdmin]
     
