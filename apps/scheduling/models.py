@@ -280,13 +280,14 @@ class Payment(UUIDMixin, TimestampMixin, TenantMixin):
             import decimal
             
             fee_percentage = decimal.Decimal(getattr(settings, 'PLATFORM_FEE_PERCENTAGE', 10.0))
-            platform_fee = (self.amount * fee_percentage) / decimal.Decimal(100.0)
-            net_payout = self.amount - platform_fee
+            amount_decimal = decimal.Decimal(str(self.amount))
+            platform_fee = (amount_decimal * fee_percentage) / decimal.Decimal(100.0)
+            net_payout = amount_decimal - platform_fee
             
             PlatformLedger.objects.create(
                 tenant=self.tenant,
                 payment=self,
-                gross_amount=self.amount,
+                gross_amount=amount_decimal,
                 platform_fee=platform_fee,
                 net_payout_amount=net_payout
             )

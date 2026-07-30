@@ -196,4 +196,55 @@ class InventoryPlatformAdminTest(TestCase):
         self.assertNotIn(str(self.prod2.id), product_ids)
 
 
+class PlatformLedgerViewSetTest(TestCase):
+    """Test cases verifying platform ledgers viewset permissions and cross-tenant querying."""
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+        from apps.users.models import User, UserRole
+        from apps.scheduling.models import Payment, PlatformLedger
+
+        self.client = APIClient()
+
+        # Create two tenants
+        self.tenant1 = Tenant.objects.create(name="Gym 1", subdomain="gym1", is_active=True)
+        self.tenant2 = Tenant.objects.create(name="Gym 2", subdomain="gym2", is_active=True)
+
+        # Create member users
+        self.member1 = User.objects.create_user(email="member1@gym1.com", password="password123", tenant=self.tenant1)
+        self.member2 = User.objects.create_user(email="member2@gym2.com", password="password123", tenant=self.tenant2)
+
+        # Create payments/ledgers in each tenant context
+        from apps.core.tenants.context import set_current_tenant
+        set_current_tenant(self.tenant1)
+        self.pay1 = Payment.objects.create(
+            tenant=self.tenant1, client=self.member1, amount=100.00,
+            type="package_purchase", status="completed", idempotency_key="key1"
+        )
+
+        set_current_tenant(self.tenant2)
+        self.pay2 = Payment.objects.create(
+            tenant=self.tenant2, client=self.member2, amount=200.00,
+            type="package_purchase", status="completed", idempotency_key="key2"
+        )
+        set_current_tenant(None)
+
+        # Create platform admin
+        self.admin = User.objects.create_user(
+            email="admin@platform.com",
+            password="adminpassword",
+            role=UserRole.PLATFORM_ADMIN,
+            is_staff=True
+        )
+
+    def test_platform_admin_can_view_all_ledgers(self):
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.get('/api/v1/scheduling/platform-ledgers/')
+        self.assertEqual(response.status_code, 200)
+
+        ledger_ids = [item['id'] for item in response.data]
+        self.assertEqual(len(ledger_ids), 2)
+
+
+
 

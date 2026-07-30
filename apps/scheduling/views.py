@@ -912,6 +912,7 @@ class PlatformLedgerViewSet(viewsets.ReadOnlyModelViewSet):
             from .models import PlatformLedger
             return PlatformLedger.objects.none()
             
+        from apps.core.tenants.context import bypass_tenant_isolation
         with bypass_tenant_isolation():
             from .models import PlatformLedger
             return PlatformLedger.all_objects.all().select_related('payment', 'tenant')
