@@ -14,8 +14,10 @@ class Product(UUIDMixin, TimestampMixin, TenantMixin):
     @property
     def current_stock(self):
         # Calculate current stock by aggregating all transactions
-        stock = self.transactions.aggregate(models.Sum('quantity'))['quantity__sum']
-        return stock or 0
+        from apps.core.tenants.context import bypass_tenant_isolation
+        with bypass_tenant_isolation():
+            stock = self.transactions.aggregate(models.Sum('quantity'))['quantity__sum']
+            return stock or 0
 
     def __str__(self):
         return f"{self.name} ({self.sku})"
