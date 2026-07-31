@@ -402,3 +402,138 @@ class StaffDetailedSchedulingAPITest(TestCase):
         self.client_user.refresh_from_db()
         self.assertTrue(self.client_user.is_active)
 
+
+class ClientDetailedNutritionAPITest(TestCase):
+    def setUp(self):
+        self.tenant = Tenant.objects.create(name="Padel Gym", subdomain="padel")
+        self.owner = User.objects.create_user(
+            email="owner@padel.com", password="password123", role=UserRole.GYM_OWNER, tenant=self.tenant
+        )
+        self.client_user = User.objects.create_user(
+            email="client@padel.com", password="password123", role=UserRole.CLIENT, tenant=self.tenant
+        )
+        self.api_client = APIClient()
+        self.api_client.force_authenticate(user=self.owner)
+
+    def test_clients_detailed_nutrition(self):
+        from apps.nutritionX.models import NutritionGoal, DailyNutritionProgress, MealLogs, FoodEntry, WaterIntake
+        from django.utils import timezone
+        
+        now = timezone.now().date()
+        
+        # Create Goal & Progress
+        goal = NutritionGoal.objects.create(
+            tenant=self.tenant, user=self.client_user,
+            calories_goal_kcal="2000", protein_goal_g="150", carbs_goal_g="200", fat_goal_g="70", is_active=True
+        )
+        DailyNutritionProgress.objects.create(
+            tenant=self.tenant, user=self.client_user, goal=goal, date=now,
+            water_consumed_ml=1000, calories_consumed_kcal=1800, protein_consumed_g=140, carbs_consumed_g=190, fat_consumed_g=65
+        )
+        
+        # Create meal and food log
+        meal = MealLogs.objects.create(
+            tenant=self.tenant, user=self.client_user, meal_type="Breakfast", date=now
+        )
+        FoodEntry.objects.create(
+            tenant=self.tenant, user=self.client_user, food=meal, food_name="Oatmeal", calories="300", protein="10", carbs="50", fat="5"
+        )
+        
+        # Create water intake
+        WaterIntake.objects.create(
+            tenant=self.tenant, user=self.client_user, date=now, amount_ml=1000
+        )
+        
+        # Hit List endpoint
+        url_list = reverse('users-clients-detailed-nutrition')
+        response_list = self.api_client.get(url_list, HTTP_HOST='padel.testserver')
+        self.assertEqual(response_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(response_list.data['count'], 1)
+        
+        client_data = response_list.data['results'][0]
+        self.assertEqual(client_data['email'], self.client_user.email)
+        self.assertEqual(client_data['stats']['active_goal']['calories_goal_kcal'], "2000")
+        self.assertEqual(client_data['stats']['averages']['average_daily_calories_kcal'], 1800.0)
+        self.assertEqual(len(client_data['meal_logs']), 1)
+        self.assertEqual(client_data['meal_logs'][0]['foods'][0]['food_name'], "Oatmeal")
+        
+        # Hit Detail endpoint
+        url_detail = reverse('users-detailed-nutrition', kwargs={'pk': self.client_user.id})
+        response_detail = self.api_client.get(url_detail, HTTP_HOST='padel.testserver')
+        self.assertEqual(response_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(response_detail.data['id'], str(self.client_user.id))
+        self.assertEqual(len(response_detail.data['water_intakes']), 1)
+
+
+class ClientDetailedReflectionAPITest(TestCase):
+    def setUp(self):
+        self.tenant = Tenant.objects.create(name="Padel Gym", subdomain="padel")
+        self.owner = User.objects.create_user(
+            email="owner@padel.com", password="password123", role=UserRole.GYM_OWNER, tenant=self.tenant
+        )
+        self.client_user = User.objects.create_user(
+            email="client@padel.com", password="password123", role=UserRole.CLIENT, tenant=self.tenant
+        )
+        self.api_client = APIClient()
+        self.api_client.force_authenticate(user=self.owner)
+
+    def test_clients_detailed_reflection(self):
+        from apps.reflection_logger.models import DailyReflection, MorningEntry, EveningEntry, FocusOption, MorningFocusSelection, MenstrualCycle, CycleDailyLog, SymptomCategory, SymptomTag
+        from django.utils import timezone
+        
+        now = timezone.now().date()
+        
+        # Create reflection with morning and evening entry
+        ref = DailyReflection.objects.create(
+            tenant=self.tenant, user=self.client_user, date=now
+        )
+        morning = MorningEntry.objects.create(
+            tenant=self.tenant, reflection=ref, mood="Happy", sleep_quality=8, affirmation="I am strong", gratitude_1="Family"
+        )
+        focus = FocusOption.objects.create(
+            tenant=self.tenant, user=self.client_user, name="Mindfulness", slug="mindfulness"
+        )
+        MorningFocusSelection.objects.create(
+            tenant=self.tenant, morning_entry=morning, focus=focus, action_plan="Meditate for 10 mins"
+        )
+        
+        EveningEntry.objects.create(
+            tenant=self.tenant, reflection=ref, stress_level=3, mood_after="Peaceful", highlight_1="Great padel game", lesson="Patience is key"
+        )
+        
+        # Menstrual cycle setup
+        MenstrualCycle.objects.create(
+            tenant=self.tenant, user=self.client_user, last_period_start_date=now, cycle_length_days=28, period_duration_days=5
+        )
+        
+        # Cycle daily log setup
+        cat = SymptomCategory.objects.create(tenant=self.tenant, name="Physical")
+        tag = SymptomTag.objects.create(tenant=self.tenant, category=cat, name="Cramps")
+        cycle_log = CycleDailyLog.objects.create(tenant=self.tenant, user=self.client_user, date=now, notes="Feeling tired", flow_intensity=2)
+        cycle_log.symptoms.add(tag)
+        
+        # Hit List endpoint
+        url_list = reverse('users-clients-detailed-reflection')
+        response_list = self.api_client.get(url_list, HTTP_HOST='padel.testserver')
+        self.assertEqual(response_list.status_code, status.HTTP_200_OK)
+        self.assertEqual(response_list.data['count'], 1)
+        
+        client_data = response_list.data['results'][0]
+        self.assertEqual(client_data['email'], self.client_user.email)
+        self.assertEqual(client_data['stats']['average_sleep_quality'], 8.0)
+        self.assertEqual(client_data['stats']['average_stress_level'], 3.0)
+        self.assertEqual(client_data['stats']['most_common_mood'], "Happy")
+        self.assertEqual(client_data['stats']['active_menstrual_cycle']['cycle_length_days'], 28)
+        self.assertEqual(len(client_data['daily_reflections']), 1)
+        self.assertEqual(client_data['daily_reflections'][0]['morning']['mood'], "Happy")
+        self.assertEqual(client_data['daily_reflections'][0]['morning']['focus_selections'][0]['focus_name'], "Mindfulness")
+        self.assertEqual(len(client_data['cycle_logs']), 1)
+        self.assertEqual(client_data['cycle_logs'][0]['symptoms'][0], "Cramps")
+        
+        # Hit Detail endpoint
+        url_detail = reverse('users-detailed-reflection', kwargs={'pk': self.client_user.id})
+        response_detail = self.api_client.get(url_detail, HTTP_HOST='padel.testserver')
+        self.assertEqual(response_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(response_detail.data['id'], str(self.client_user.id))
+        self.assertEqual(response_detail.data['stats']['average_sleep_quality'], 8.0)
+

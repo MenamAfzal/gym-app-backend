@@ -17,7 +17,9 @@ from apps.users.serializers import (
     UserProfileSerializer,
     VerifyOTPSerializer,
     ClientDetailedSchedulingSerializer,
-    StaffDetailedSchedulingSerializer
+    StaffDetailedSchedulingSerializer,
+    ClientDetailedNutritionSerializer,
+    ClientDetailedReflectionSerializer
 )
 from apps.users.services import AuthService, UserService
 from apps.users.models import OTPPurpose, UserRole
@@ -388,12 +390,269 @@ class UserViewSet(viewsets.ModelViewSet):
                     "cancelled_bookings_count": 0
                 }, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=['get'], url_path='clients-detailed-nutrition', permission_classes=[IsOwnerOrManager])
+    def clients_detailed_nutrition(self, request):
+        """
+        GET: Paginated list of clients with complete detailed nutrition profiles.
+        """
+        queryset = self.request.user.tenant.users.filter(role=UserRole.CLIENT).select_related('profile')
+        
+        user_id = request.query_params.get('id')
+        if user_id:
+            queryset = queryset.filter(id=user_id)
+            
+        search_query = request.query_params.get('search')
+        if search_query:
+            from django.db.models import Q
+            queryset = queryset.filter(
+                Q(email__icontains=search_query) |
+                Q(first_name__icontains=search_query) |
+                Q(last_name__icontains=search_query) |
+                Q(profile__nickname__icontains=search_query)
+            )
+
+        paginator = ClientDetailedNutritionPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        
+        if page is not None:
+            user_ids = [u.id for u in page]
+            
+            from apps.nutritionX.models import NutritionGoal, DailyNutritionProgress, MealLogs, WaterIntake, DrinkNutrients, CustomBeverage, FoodEntry
+            
+            # Fetch and map related models
+            goals = NutritionGoal.objects.filter(user_id__in=user_ids)
+            goals_map = {}
+            for g in goals:
+                goals_map.setdefault(g.user_id, []).append(g)
+                
+            progress = DailyNutritionProgress.objects.filter(user_id__in=user_ids)
+            progress_map = {}
+            for p in progress:
+                progress_map.setdefault(p.user_id, []).append(p)
+                
+            meals = MealLogs.objects.filter(user_id__in=user_ids)
+            # Fetch foods for these meals to optimize
+            meal_ids = [m.id for m in meals]
+            foods = FoodEntry.objects.filter(food_id__in=meal_ids)
+            foods_map = {}
+            for f in foods:
+                foods_map.setdefault(f.food_id, []).append(f)
+                
+            for m in meals:
+                m.prefetched_foods = foods_map.get(m.id, [])
+                
+            meals_map = {}
+            for m in meals:
+                meals_map.setdefault(m.user_id, []).append(m)
+                
+            waters = WaterIntake.objects.filter(user_id__in=user_ids)
+            waters_map = {}
+            for w in waters:
+                waters_map.setdefault(w.user_id, []).append(w)
+                
+            drinks = DrinkNutrients.objects.filter(user_id__in=user_ids)
+            drinks_map = {}
+            for d in drinks:
+                drinks_map.setdefault(d.user_id, []).append(d)
+                
+            beverages = CustomBeverage.objects.filter(user_id__in=user_ids)
+            beverages_map = {}
+            for b in beverages:
+                beverages_map.setdefault(b.user_id, []).append(b)
+                
+            for u in page:
+                u.prefetched_goals = goals_map.get(u.id, [])
+                u.prefetched_progress = progress_map.get(u.id, [])
+                u.prefetched_meals = meals_map.get(u.id, [])
+                u.prefetched_waters = waters_map.get(u.id, [])
+                u.prefetched_drinks = drinks_map.get(u.id, [])
+                u.prefetched_beverages = beverages_map.get(u.id, [])
+                
+            serializer = ClientDetailedNutritionSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+            
+        serializer = ClientDetailedNutritionSerializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='detailed-nutrition', permission_classes=[IsOwnerOrManager])
+    def detailed_nutrition(self, request, pk=None):
+        """
+        GET: Complete detailed nutrition profile for a single user by ID.
+        """
+        user = self.get_object()
+        
+        from apps.nutritionX.models import NutritionGoal, DailyNutritionProgress, MealLogs, WaterIntake, DrinkNutrients, CustomBeverage, FoodEntry
+        
+        user.prefetched_goals = list(NutritionGoal.objects.filter(user=user))
+        user.prefetched_progress = list(DailyNutritionProgress.objects.filter(user=user))
+        
+        meals = list(MealLogs.objects.filter(user=user))
+        meal_ids = [m.id for m in meals]
+        foods = FoodEntry.objects.filter(food_id__in=meal_ids)
+        foods_map = {}
+        for f in foods:
+            foods_map.setdefault(f.food_id, []).append(f)
+        for m in meals:
+            m.prefetched_foods = foods_map.get(m.id, [])
+            
+        user.prefetched_meals = meals
+        user.prefetched_waters = list(WaterIntake.objects.filter(user=user))
+        user.prefetched_drinks = list(DrinkNutrients.objects.filter(user=user))
+        user.prefetched_beverages = list(CustomBeverage.objects.filter(user=user))
+        
+        serializer = ClientDetailedNutritionSerializer(user)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='clients-detailed-reflection', permission_classes=[IsOwnerOrManager])
+    def clients_detailed_reflection(self, request):
+        """
+        GET: Paginated list of clients with complete detailed reflection/journal logs.
+        """
+        queryset = self.request.user.tenant.users.filter(role=UserRole.CLIENT).select_related('profile')
+        
+        user_id = request.query_params.get('id')
+        if user_id:
+            queryset = queryset.filter(id=user_id)
+            
+        search_query = request.query_params.get('search')
+        if search_query:
+            from django.db.models import Q
+            queryset = queryset.filter(
+                Q(email__icontains=search_query) |
+                Q(first_name__icontains=search_query) |
+                Q(last_name__icontains=search_query) |
+                Q(profile__nickname__icontains=search_query)
+            )
+
+        paginator = ClientDetailedReflectionPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        
+        if page is not None:
+            user_ids = [u.id for u in page]
+            
+            from apps.reflection_logger.models import DailyReflection, MenstrualCycle, CycleDailyLog, MorningFocusSelection, EveningFocusReflection
+            
+            # Fetch reflections
+            reflections = DailyReflection.objects.filter(user_id__in=user_ids).select_related('morning', 'evening')
+            
+            # Prefetch morning selections
+            morning_ids = [r.morning.id for r in reflections if hasattr(r, 'morning') and r.morning]
+            selections = MorningFocusSelection.objects.filter(morning_entry_id__in=morning_ids).select_related('focus')
+            selections_map = {}
+            for s in selections:
+                selections_map.setdefault(s.morning_entry_id, []).append(s)
+                
+            # Prefetch evening reflections
+            evening_ids = [r.evening.id for r in reflections if hasattr(r, 'evening') and r.evening]
+            eve_refs = EveningFocusReflection.objects.filter(evening_entry_id__in=evening_ids).select_related('focus')
+            eve_refs_map = {}
+            for f in eve_refs:
+                eve_refs_map.setdefault(f.evening_entry_id, []).append(f)
+                
+            for r in reflections:
+                if hasattr(r, 'morning') and r.morning:
+                    r.morning.prefetched_selections = selections_map.get(r.morning.id, [])
+                if hasattr(r, 'evening') and r.evening:
+                    r.evening.prefetched_reflections = eve_refs_map.get(r.evening.id, [])
+                    
+            reflections_map = {}
+            for r in reflections:
+                reflections_map.setdefault(r.user_id, []).append(r)
+                
+            cycles = MenstrualCycle.objects.filter(user_id__in=user_ids)
+            cycles_map = {}
+            for c in cycles:
+                cycles_map.setdefault(c.user_id, []).append(c)
+                
+            cycle_logs = CycleDailyLog.objects.filter(user_id__in=user_ids)
+            # Prefetch symptoms tags
+            cycle_log_ids = [l.id for l in cycle_logs]
+            
+            # Django ManyToMany prefetches
+            symptoms_through = CycleDailyLog.symptoms.through.objects.filter(cycledailylog_id__in=cycle_log_ids).select_related('symptomtag')
+            symptoms_map = {}
+            for st in symptoms_through:
+                symptoms_map.setdefault(st.cycledailylog_id, []).append(st.symptomtag)
+                
+            for l in cycle_logs:
+                l.prefetched_symptoms = symptoms_map.get(l.id, [])
+                
+            cycle_logs_map = {}
+            for l in cycle_logs:
+                cycle_logs_map.setdefault(l.user_id, []).append(l)
+                
+            for u in page:
+                u.prefetched_reflections = reflections_map.get(u.id, [])
+                u.prefetched_cycles = cycles_map.get(u.id, [])
+                u.prefetched_cycle_logs = cycle_logs_map.get(u.id, [])
+                
+            serializer = ClientDetailedReflectionSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+            
+        serializer = ClientDetailedReflectionSerializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='detailed-reflection', permission_classes=[IsOwnerOrManager])
+    def detailed_reflection(self, request, pk=None):
+        """
+        GET: Complete detailed reflection profile for a single user by ID.
+        """
+        user = self.get_object()
+        
+        from apps.reflection_logger.models import DailyReflection, MenstrualCycle, CycleDailyLog, MorningFocusSelection, EveningFocusReflection
+        
+        reflections = list(DailyReflection.objects.filter(user=user).select_related('morning', 'evening'))
+        morning_ids = [r.morning.id for r in reflections if hasattr(r, 'morning') and r.morning]
+        selections = MorningFocusSelection.objects.filter(morning_entry_id__in=morning_ids).select_related('focus')
+        selections_map = {}
+        for s in selections:
+            selections_map.setdefault(s.morning_entry_id, []).append(s)
+            
+        evening_ids = [r.evening.id for r in reflections if hasattr(r, 'evening') and r.evening]
+        eve_refs = EveningFocusReflection.objects.filter(evening_entry_id__in=evening_ids).select_related('focus')
+        eve_refs_map = {}
+        for f in eve_refs:
+            eve_refs_map.setdefault(f.evening_entry_id, []).append(f)
+            
+        for r in reflections:
+            if hasattr(r, 'morning') and r.morning:
+                r.morning.prefetched_selections = selections_map.get(r.morning.id, [])
+            if hasattr(r, 'evening') and r.evening:
+                r.evening.prefetched_reflections = eve_refs_map.get(r.evening.id, [])
+                
+        user.prefetched_reflections = reflections
+        user.prefetched_cycles = list(MenstrualCycle.objects.filter(user=user))
+        
+        cycle_logs = list(CycleDailyLog.objects.filter(user=user))
+        cycle_log_ids = [l.id for l in cycle_logs]
+        symptoms_through = CycleDailyLog.symptoms.through.objects.filter(cycledailylog_id__in=cycle_log_ids).select_related('symptomtag')
+        symptoms_map = {}
+        for st in symptoms_through:
+            symptoms_map.setdefault(st.cycledailylog_id, []).append(st.symptomtag)
+        for l in cycle_logs:
+            l.prefetched_symptoms = symptoms_map.get(l.id, [])
+            
+        user.prefetched_cycle_logs = cycle_logs
+        
+        serializer = ClientDetailedReflectionSerializer(user)
+        return Response(serializer.data)
+
 class ClientDetailedSchedulingPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
     max_page_size = 100
 
 class StaffDetailedSchedulingPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+class ClientDetailedNutritionPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+class ClientDetailedReflectionPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
     max_page_size = 100

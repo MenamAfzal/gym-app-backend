@@ -650,3 +650,217 @@ class StaffDetailedSchedulingSerializer(serializers.ModelSerializer):
             "status": sr.status,
             "requested_by_staff_email": sr.requested_by_staff.email
         } for sr in all_accepted_subs]
+
+
+class ClientDetailedNutritionSerializer(serializers.ModelSerializer):
+    profile = UserProfileSerializer(read_only=True)
+    stats = serializers.SerializerMethodField()
+    meal_logs = serializers.SerializerMethodField()
+    water_intakes = serializers.SerializerMethodField()
+    drink_nutrients = serializers.SerializerMethodField()
+    custom_beverages = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'email', 'role', 'profile', 'date_joined', 'is_active',
+            'stats', 'meal_logs', 'water_intakes', 'drink_nutrients', 'custom_beverages'
+        ]
+        read_only_fields = fields
+
+    def get_stats(self, obj):
+        # Fetch nutrition goals & daily progress
+        goals = getattr(obj, 'prefetched_goals', list(obj.nutrition_goals.all()))
+        progress = getattr(obj, 'prefetched_progress', list(obj.daily_progress.all()))
+        
+        active_goal = next((g for g in goals if g.is_active), None)
+        active_goal_data = {
+            "water_intake_goal_ml": active_goal.water_intake_goal_ml if active_goal else None,
+            "calories_goal_kcal": active_goal.calories_goal_kcal if active_goal else None,
+            "protein_goal_g": active_goal.protein_goal_g if active_goal else None,
+            "carbs_goal_g": active_goal.carbs_goal_g if active_goal else None,
+            "fat_goal_g": active_goal.fat_goal_g if active_goal else None,
+        }
+        
+        # Calculate daily averages
+        total_days = len(progress)
+        if total_days > 0:
+            avg_water = sum(p.water_consumed_ml for p in progress) / total_days
+            avg_calories = sum(p.calories_consumed_kcal for p in progress) / total_days
+            avg_protein = sum(p.protein_consumed_g for p in progress) / total_days
+            avg_carbs = sum(p.carbs_consumed_g for p in progress) / total_days
+            avg_fat = sum(p.fat_consumed_g for p in progress) / total_days
+        else:
+            avg_water = avg_calories = avg_protein = avg_carbs = avg_fat = 0.0
+
+        return {
+            "active_goal": active_goal_data,
+            "averages": {
+                "average_daily_water_intake_ml": round(avg_water, 2),
+                "average_daily_calories_kcal": round(avg_calories, 2),
+                "average_daily_protein_g": round(avg_protein, 2),
+                "average_daily_carbs_g": round(avg_carbs, 2),
+                "average_daily_fat_g": round(avg_fat, 2),
+            },
+            "total_days_logged": total_days
+        }
+
+    def get_meal_logs(self, obj):
+        meals = getattr(obj, 'prefetched_meals', list(obj.meal_logs.all()))
+        meals.sort(key=lambda m: m.date, reverse=True)
+        return [{
+            "id": str(m.id),
+            "meal_type": m.meal_type,
+            "date": m.date.isoformat(),
+            "foods": [{
+                "id": str(f.id),
+                "food_name": f.food_name,
+                "serving_qty": f.serving_qty,
+                "serving_unit": f.serving_unit,
+                "serving_weight_grams": f.serving_weight_grams,
+                "calories": f.calories,
+                "protein": f.protein,
+                "carbs": f.carbs,
+                "fat": f.fat,
+                "sodium": f.sodium,
+                "sugars": f.sugars,
+                "dietary_fiber": f.dietary_fiber,
+                "image": f.image
+            } for f in getattr(m, 'prefetched_foods', list(m.foods.all()))]
+        } for m in meals]
+
+    def get_water_intakes(self, obj):
+        waters = getattr(obj, 'prefetched_waters', list(obj.water_intakes.all()))
+        waters.sort(key=lambda w: w.date, reverse=True)
+        return [{
+            "id": str(w.id),
+            "date": w.date.isoformat(),
+            "amount_ml": w.amount_ml
+        } for w in waters]
+
+    def get_drink_nutrients(self, obj):
+        drinks = getattr(obj, 'prefetched_drinks', list(obj.nutrients.all()))
+        drinks.sort(key=lambda d: d.date, reverse=True)
+        return [{
+            "id": str(d.id),
+            "name": d.name,
+            "drink_take_ml": d.drink_take_ml,
+            "calories": d.calories,
+            "date": d.date.isoformat()
+        } for d in drinks]
+
+    def get_custom_beverages(self, obj):
+        bevs = getattr(obj, 'prefetched_beverages', list(obj.custom_beverages.all()))
+        return [{
+            "id": str(b.id),
+            "name": b.name,
+            "type": b.type,
+            "image": b.image
+        } for b in bevs]
+
+
+class ClientDetailedReflectionSerializer(serializers.ModelSerializer):
+    profile = UserProfileSerializer(read_only=True)
+    stats = serializers.SerializerMethodField()
+    daily_reflections = serializers.SerializerMethodField()
+    cycle_logs = serializers.SerializerMethodField()
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'email', 'role', 'profile', 'date_joined', 'is_active',
+            'stats', 'daily_reflections', 'cycle_logs'
+        ]
+        read_only_fields = fields
+
+    def get_stats(self, obj):
+        reflections = getattr(obj, 'prefetched_reflections', list(obj.reflections.all()))
+        cycles = getattr(obj, 'prefetched_cycles', list(obj.cycles.all()))
+        
+        # Calculate mood/sleep/stress stats
+        sleep_scores = []
+        stress_levels = []
+        moods = []
+        
+        for r in reflections:
+            if hasattr(r, 'morning') and r.morning and r.morning.sleep_quality is not None:
+                sleep_scores.append(r.morning.sleep_quality)
+            if hasattr(r, 'morning') and r.morning and r.morning.mood:
+                moods.append(r.morning.mood)
+            if hasattr(r, 'evening') and r.evening and r.evening.stress_level is not None:
+                stress_levels.append(r.evening.stress_level)
+                
+        avg_sleep = sum(sleep_scores) / len(sleep_scores) if sleep_scores else 0.0
+        avg_stress = sum(stress_levels) / len(stress_levels) if stress_levels else 0.0
+        
+        from collections import Counter
+        most_common_mood = Counter(moods).most_common(1)[0][0] if moods else None
+        
+        active_cycle = cycles[0] if cycles else None
+        active_cycle_data = {
+            "last_period_start_date": active_cycle.last_period_start_date.isoformat() if active_cycle else None,
+            "cycle_length_days": active_cycle.cycle_length_days if active_cycle else None,
+            "period_duration_days": active_cycle.period_duration_days if active_cycle else None
+        }
+        
+        return {
+            "average_sleep_quality": round(avg_sleep, 2),
+            "average_stress_level": round(avg_stress, 2),
+            "most_common_mood": most_common_mood,
+            "active_menstrual_cycle": active_cycle_data,
+            "total_reflections_logged": len(reflections)
+        }
+
+    def get_daily_reflections(self, obj):
+        reflections = getattr(obj, 'prefetched_reflections', list(obj.reflections.all()))
+        reflections.sort(key=lambda r: r.date, reverse=True)
+        
+        result = []
+        for r in reflections:
+            # Morning Log
+            morning_data = None
+            if hasattr(r, 'morning') and r.morning:
+                morning_data = {
+                    "mood": r.morning.mood,
+                    "sleep_quality": r.morning.sleep_quality,
+                    "affirmation": r.morning.affirmation,
+                    "gratitude": [r.morning.gratitude_1, r.morning.gratitude_2, r.morning.gratitude_3],
+                    "focus_selections": [{
+                        "focus_name": s.focus.name,
+                        "action_plan": s.action_plan
+                    } for s in getattr(r.morning, 'prefetched_selections', list(r.morning.focus_selections.all()))]
+                }
+                
+            # Evening Log
+            evening_data = None
+            if hasattr(r, 'evening') and r.evening:
+                evening_data = {
+                    "stress_level": r.evening.stress_level,
+                    "mood_after": r.evening.mood_after,
+                    "highlights": [r.evening.highlight_1, r.evening.highlight_2, r.evening.highlight_3],
+                    "lesson": r.evening.lesson,
+                    "focus_reflections": [{
+                        "focus_name": f.focus.name,
+                        "effort": f.effort,
+                        "improvement": f.improvement
+                    } for f in getattr(r.evening, 'prefetched_reflections', list(r.evening.focus_reflections.all()))]
+                }
+                
+            result.append({
+                "id": str(r.id),
+                "date": r.date.isoformat(),
+                "morning": morning_data,
+                "evening": evening_data
+            })
+        return result
+
+    def get_cycle_logs(self, obj):
+        logs = getattr(obj, 'prefetched_cycle_logs', list(obj.cycle_logs.all()))
+        logs.sort(key=lambda l: l.date, reverse=True)
+        return [{
+            "id": str(l.id),
+            "date": l.date.isoformat(),
+            "notes": l.notes,
+            "flow_intensity": l.flow_intensity,
+            "symptoms": [s.name for s in getattr(l, 'prefetched_symptoms', list(l.symptoms.all()))]
+        } for l in logs]
