@@ -29,8 +29,8 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'email', 'role', 'profile', 'date_joined']
-        read_only_fields = ['id', 'email', 'role', 'date_joined']
+        fields = ['id', 'email', 'role', 'profile', 'date_joined', 'is_active']
+        read_only_fields = ['id', 'email', 'role', 'date_joined', 'is_active']
 
 class CreateUserSerializer(serializers.Serializer):
     """
@@ -203,8 +203,8 @@ class UserSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ['id', 'email', 'role', 'profile', 'date_joined']
-        read_only_fields = ['id', 'email', 'role', 'date_joined']
+        fields = ['id', 'email', 'role', 'profile', 'date_joined', 'is_active']
+        read_only_fields = ['id', 'email', 'role', 'date_joined', 'is_active']
 
     def update(self, instance, validated_data):
         # Extract nested profile data
@@ -249,7 +249,7 @@ class ClientDetailedSchedulingSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'id', 'email', 'role', 'profile', 'date_joined',
+            'id', 'email', 'role', 'profile', 'date_joined', 'is_active',
             'stats', 'next_class_session', 'previous_class_session',
             'next_appointment', 'previous_appointment', 'packages',
             'bookings', 'appointments', 'facility_access_logs', 'waitlists'
@@ -455,7 +455,7 @@ class StaffDetailedSchedulingSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'id', 'email', 'role', 'profile', 'date_joined',
+            'id', 'email', 'role', 'profile', 'date_joined', 'is_active',
             'stats', 'next_class_session', 'previous_class_session',
             'next_appointment', 'previous_appointment', 'locations',
             'availabilities', 'assigned_clients', 'recent_classes_led',

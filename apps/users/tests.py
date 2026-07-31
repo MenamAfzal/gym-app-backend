@@ -137,6 +137,18 @@ class ClientDetailedSchedulingAPITest(TestCase):
         self.assertEqual(client_data['previous_class_session']['class_name'], "Power Pilates")
         self.assertEqual(client_data['previous_class_session']['status'], "attended")
 
+        # Test Query by specific ID parameter
+        response_id = self.api_client.get(url + f"?id={self.client_user.id}", HTTP_HOST='padel.testserver')
+        self.assertEqual(response_id.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response_id.data['results']), 1)
+
+        # Test single detail URL
+        detail_url = reverse('users-detailed-scheduling', kwargs={'pk': self.client_user.id})
+        response_detail = self.api_client.get(detail_url, HTTP_HOST='padel.testserver')
+        self.assertEqual(response_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(response_detail.data['id'], str(self.client_user.id))
+        self.assertEqual(response_detail.data['stats']['total_classes_booked'], 1)
+
 
 class StaffDetailedSchedulingAPITest(TestCase):
     def setUp(self):
@@ -299,4 +311,94 @@ class StaffDetailedSchedulingAPITest(TestCase):
         
         self.assertEqual(len(trainer_data['substitute_requests_raised']), 1)
         self.assertEqual(trainer_data['substitute_requests_raised'][0]['id'], str(sub_req.id))
+
+        # Test Query by specific ID parameter
+        response_id = self.api_client.get(url + f"?id={self.trainer.id}", HTTP_HOST='padel.testserver')
+        self.assertEqual(response_id.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response_id.data['results']), 1)
+
+        # Test single detail URL
+        detail_url = reverse('users-detailed-scheduling', kwargs={'pk': self.trainer.id})
+        response_detail = self.api_client.get(detail_url, HTTP_HOST='padel.testserver')
+        self.assertEqual(response_detail.status_code, status.HTTP_200_OK)
+        self.assertEqual(response_detail.data['id'], str(self.trainer.id))
+        self.assertEqual(response_detail.data['stats']['total_upcoming_classes'], 1)
+
+    def test_user_deactivate_toggle(self):
+        from apps.scheduling.models import Booking, Package, PackageType
+        
+        # Create client booking to cancel
+        location = Location.objects.create(
+            tenant=self.tenant,
+            name="Downtown Studio",
+            address="123 Street",
+            timezone="America/New_York"
+        )
+        template = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=location,
+            name="Power Pilates",
+            duration_min=60
+        )
+        now = timezone.now()
+        session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template,
+            start_at=now + timedelta(days=2),
+            end_at=now + timedelta(days=2, hours=-1),
+            capacity=10,
+            status="scheduled"
+        )
+        pkg_type = PackageType.objects.create(
+            tenant=self.tenant,
+            location=location,
+            name="Standard 5-Pack",
+            credit_count=5,
+            price="100.00",
+            validity_days=30
+        )
+        pkg = Package.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            package_type=pkg_type,
+            credits_remaining=4,
+            expires_at=now + timedelta(days=30)
+        )
+        booking = Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            session=session,
+            credit_source=pkg,
+            status="booked"
+        )
+        
+        # Initially client is active
+        self.assertTrue(self.client_user.is_active)
+        
+        # Hitting deactive endpoint as Gym Owner
+        url = reverse('users-deactivate', kwargs={'pk': self.client_user.id})
+        response = self.api_client.post(url, HTTP_HOST='padel.testserver')
+        
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['is_active'])
+        self.assertEqual(response.data['cancelled_bookings_count'], 1)
+        
+        # Verify user is deactivated
+        self.client_user.refresh_from_db()
+        self.assertFalse(self.client_user.is_active)
+        
+        # Verify booking is cancelled & package is refunded
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, 'cancelled')
+        pkg.refresh_from_db()
+        self.assertEqual(pkg.credits_remaining, 5) # 4 + 1 refunded
+        
+        # Hitting deactivate toggle AGAIN to reactivate
+        response_reactivate = self.api_client.post(url, HTTP_HOST='padel.testserver')
+        self.assertEqual(response_reactivate.status_code, status.HTTP_200_OK)
+        self.assertTrue(response_reactivate.data['is_active'])
+        self.assertEqual(response_reactivate.data['cancelled_bookings_count'], 0)
+        
+        self.client_user.refresh_from_db()
+        self.assertTrue(self.client_user.is_active)
 

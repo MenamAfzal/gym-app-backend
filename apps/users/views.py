@@ -135,6 +135,11 @@ class UserViewSet(viewsets.ModelViewSet):
         # Filter for clients under the owner's active tenant
         queryset = self.request.user.tenant.users.filter(role=UserRole.CLIENT).select_related('profile')
         
+        # Filter by specific ID if provided in query params
+        user_id = request.query_params.get('id')
+        if user_id:
+            queryset = queryset.filter(id=user_id)
+        
         # Support search
         search_query = request.query_params.get('search')
         if search_query:
@@ -212,6 +217,11 @@ class UserViewSet(viewsets.ModelViewSet):
         """
         # Filter for staff under the owner's active tenant (role != client)
         queryset = self.request.user.tenant.users.exclude(role=UserRole.CLIENT).select_related('profile')
+        
+        # Filter by specific ID if provided in query params
+        user_id = request.query_params.get('id')
+        if user_id:
+            queryset = queryset.filter(id=user_id)
         
         # Support search
         search_query = request.query_params.get('search')
@@ -291,6 +301,92 @@ class UserViewSet(viewsets.ModelViewSet):
             
         serializer = StaffDetailedSchedulingSerializer(queryset, many=True)
         return Response(serializer.data)
+
+    @action(detail=True, methods=['get'], url_path='detailed-scheduling', permission_classes=[IsOwnerOrManager])
+    def detailed_scheduling(self, request, pk=None):
+        """
+        GET: Complete detailed scheduling summary for a single client or staff member by ID.
+        """
+        user = self.get_object()
+        
+        # Optimize queries by prefetching relationships for this single user
+        from apps.scheduling.models import Booking, Appointment, Package, FacilityAccessLog, Waitlist, StaffLocation, StaffAvailability, StaffClientAssignment, SubstituteRequest, ClassSession
+        
+        if user.role == UserRole.CLIENT:
+            user.prefetched_bookings = list(Booking.objects.filter(client=user).select_related(
+                'session', 'session__template', 'session__template__location', 'session__room', 'session__staff', 'session__staff__profile'
+            ))
+            user.prefetched_packages = list(Package.objects.filter(client=user).select_related('package_type'))
+            user.prefetched_appointments = list(Appointment.objects.filter(client=user).select_related(
+                'provider', 'provider__profile', 'location', 'room'
+            ))
+            user.prefetched_logs = list(FacilityAccessLog.objects.filter(client=user).select_related('location'))
+            user.prefetched_waitlists = list(Waitlist.objects.filter(client=user).select_related('session', 'session__template'))
+            
+            serializer = ClientDetailedSchedulingSerializer(user)
+        else:
+            user.prefetched_staff_locations = list(StaffLocation.objects.filter(staff=user).select_related('location'))
+            user.prefetched_availabilities = list(StaffAvailability.objects.filter(staff=user))
+            user.prefetched_sessions = list(ClassSession.objects.filter(staff=user).select_related('template', 'template__location', 'room'))
+            user.prefetched_provider_appointments = list(Appointment.objects.filter(provider=user).select_related('client', 'client__profile', 'location', 'room'))
+            user.prefetched_assigned_clients = list(StaffClientAssignment.objects.filter(staff=user).select_related('client', 'client__profile'))
+            user.prefetched_raised_subs = list(SubstituteRequest.objects.filter(requested_by_staff=user).select_related('session', 'session__template', 'accepted_by_staff'))
+            user.prefetched_accepted_subs = list(SubstituteRequest.objects.filter(accepted_by_staff=user).select_related('session', 'session__template', 'requested_by_staff'))
+            
+            serializer = StaffDetailedSchedulingSerializer(user)
+            
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='deactivate', permission_classes=[IsOwnerOrManager])
+    def deactivate(self, request, pk=None):
+        """
+        POST: Toggle deactivation/activation of a client or staff member.
+        If deactivating and user is a client, cancel all active bookings and refund credits.
+        """
+        from django.db import transaction
+        
+        with transaction.atomic():
+            user = self.get_object()
+            
+            if user.is_active:
+                # Deactivate
+                user.is_active = False
+                user.save()
+                
+                from apps.scheduling.models import Booking, Package
+                from apps.scheduling.tasks import process_waitlist_promotion_job
+                
+                active_bookings = Booking.objects.filter(client=user, status='booked').select_for_update()
+                cancelled_count = active_bookings.count()
+                
+                for booking in active_bookings:
+                    booking.status = 'cancelled'
+                    booking.save()
+                    
+                    # Refund credit if a package was used
+                    if booking.credit_source:
+                        pkg = Package.objects.select_for_update().get(id=booking.credit_source.id)
+                        pkg.credits_remaining += 1
+                        pkg.save()
+                    
+                    # Trigger waitlist promotion
+                    process_waitlist_promotion_job.delay(str(booking.session.id))
+                    
+                return Response({
+                    "detail": "User deactivated successfully.",
+                    "is_active": False,
+                    "cancelled_bookings_count": cancelled_count
+                }, status=status.HTTP_200_OK)
+            else:
+                # Reactivate
+                user.is_active = True
+                user.save()
+                
+                return Response({
+                    "detail": "User activated successfully.",
+                    "is_active": True,
+                    "cancelled_bookings_count": 0
+                }, status=status.HTTP_200_OK)
 
 class ClientDetailedSchedulingPagination(PageNumberPagination):
     page_size = 20
