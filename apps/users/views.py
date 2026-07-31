@@ -4,6 +4,7 @@ User Views
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
 from django.core.exceptions import ValidationError
 from apps.scheduling.permissions import IsOwnerOrManager
 
@@ -14,7 +15,9 @@ from apps.users.serializers import (
     UserSerializer, 
     CreateUserSerializer, 
     UserProfileSerializer,
-    VerifyOTPSerializer
+    VerifyOTPSerializer,
+    ClientDetailedSchedulingSerializer,
+    StaffDetailedSchedulingSerializer
 )
 from apps.users.services import AuthService, UserService
 from apps.users.models import OTPPurpose, UserRole
@@ -123,6 +126,181 @@ class UserViewSet(viewsets.ModelViewSet):
             return Response(status=status.HTTP_204_NO_CONTENT)
         except ValidationError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['get'], url_path='clients-detailed-scheduling', permission_classes=[IsOwnerOrManager])
+    def clients_detailed_scheduling(self, request):
+        """
+        GET: Paginated list of clients with complete scheduling, packages, check-in history.
+        """
+        # Filter for clients under the owner's active tenant
+        queryset = self.request.user.tenant.users.filter(role=UserRole.CLIENT).select_related('profile')
+        
+        # Support search
+        search_query = request.query_params.get('search')
+        if search_query:
+            from django.db.models import Q
+            queryset = queryset.filter(
+                Q(email__icontains=search_query) |
+                Q(first_name__icontains=search_query) |
+                Q(last_name__icontains=search_query) |
+                Q(profile__nickname__icontains=search_query) |
+                Q(profile__phone_number__icontains=search_query)
+            )
+
+        # Optimize queries by prefetching related data for the paginated page.
+        # Pagination must happen first, so we only fetch related data for the active page!
+        paginator = ClientDetailedSchedulingPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        
+        if page is not None:
+            user_ids = [u.id for u in page]
+            
+            from apps.scheduling.models import Booking, Appointment, Package, FacilityAccessLog, Waitlist
+            
+            # Fetch all matching packages
+            packages = Package.objects.filter(client_id__in=user_ids).select_related('package_type')
+            packages_map = {}
+            for p in packages:
+                packages_map.setdefault(p.client_id, []).append(p)
+                
+            # Fetch all bookings
+            bookings = Booking.objects.filter(client_id__in=user_ids).select_related(
+                'session', 'session__template', 'session__template__location', 'session__room', 'session__staff', 'session__staff__profile'
+            )
+            bookings_map = {}
+            for b in bookings:
+                bookings_map.setdefault(b.client_id, []).append(b)
+                
+            # Fetch all appointments
+            appointments = Appointment.objects.filter(client_id__in=user_ids).select_related(
+                'provider', 'provider__profile', 'location', 'room'
+            )
+            appointments_map = {}
+            for a in appointments:
+                appointments_map.setdefault(a.client_id, []).append(a)
+                
+            # Fetch all logs
+            logs = FacilityAccessLog.objects.filter(client_id__in=user_ids).select_related('location')
+            logs_map = {}
+            for log in logs:
+                logs_map.setdefault(log.client_id, []).append(log)
+                
+            # Fetch waitlists
+            waitlists = Waitlist.objects.filter(client_id__in=user_ids).select_related('session', 'session__template')
+            waitlists_map = {}
+            for w in waitlists:
+                waitlists_map.setdefault(w.client_id, []).append(w)
+                
+            # Attach lists to the user objects in memory for serializers to pick up
+            for u in page:
+                u.prefetched_bookings = bookings_map.get(u.id, [])
+                u.prefetched_packages = packages_map.get(u.id, [])
+                u.prefetched_appointments = appointments_map.get(u.id, [])
+                u.prefetched_logs = logs_map.get(u.id, [])
+                u.prefetched_waitlists = waitlists_map.get(u.id, [])
+                
+            serializer = ClientDetailedSchedulingSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+            
+        serializer = ClientDetailedSchedulingSerializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='staff-detailed-scheduling', permission_classes=[IsOwnerOrManager])
+    def staff_detailed_scheduling(self, request):
+        """
+        GET: Paginated list of staff members with complete scheduling, locations, availabilities.
+        """
+        # Filter for staff under the owner's active tenant (role != client)
+        queryset = self.request.user.tenant.users.exclude(role=UserRole.CLIENT).select_related('profile')
+        
+        # Support search
+        search_query = request.query_params.get('search')
+        if search_query:
+            from django.db.models import Q
+            queryset = queryset.filter(
+                Q(email__icontains=search_query) |
+                Q(first_name__icontains=search_query) |
+                Q(last_name__icontains=search_query) |
+                Q(profile__nickname__icontains=search_query) |
+                Q(profile__phone_number__icontains=search_query)
+            )
+
+        # Optimize queries by prefetching related data for the paginated page.
+        paginator = StaffDetailedSchedulingPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        
+        if page is not None:
+            user_ids = [u.id for u in page]
+            
+            from apps.scheduling.models import StaffLocation, StaffAvailability, ClassSession, Appointment, StaffClientAssignment, SubstituteRequest
+            
+            # Fetch all staff location mappings
+            staff_locs = StaffLocation.objects.filter(staff_id__in=user_ids).select_related('location')
+            staff_locs_map = {}
+            for sl in staff_locs:
+                staff_locs_map.setdefault(sl.staff_id, []).append(sl)
+                
+            # Fetch availabilities
+            avails = StaffAvailability.objects.filter(staff_id__in=user_ids)
+            avails_map = {}
+            for a in avails:
+                avails_map.setdefault(a.staff_id, []).append(a)
+                
+            # Fetch class sessions
+            sessions = ClassSession.objects.filter(staff_id__in=user_ids).select_related('template', 'template__location', 'room')
+            sessions_map = {}
+            for s in sessions:
+                sessions_map.setdefault(s.staff_id, []).append(s)
+                
+            # Fetch appointments
+            appts = Appointment.objects.filter(provider_id__in=user_ids).select_related('client', 'client__profile', 'location', 'room')
+            appts_map = {}
+            for a in appts:
+                appts_map.setdefault(a.provider_id, []).append(a)
+                
+            # Fetch client assignments
+            clients = StaffClientAssignment.objects.filter(staff_id__in=user_ids).select_related('client', 'client__profile')
+            clients_map = {}
+            for c in clients:
+                clients_map.setdefault(c.staff_id, []).append(c)
+                
+            # Fetch raised subs
+            raised_subs = SubstituteRequest.objects.filter(requested_by_staff_id__in=user_ids).select_related('session', 'session__template', 'accepted_by_staff')
+            raised_subs_map = {}
+            for sr in raised_subs:
+                raised_subs_map.setdefault(sr.requested_by_staff_id, []).append(sr)
+                
+            # Fetch accepted subs
+            accepted_subs = SubstituteRequest.objects.filter(accepted_by_staff_id__in=user_ids).select_related('session', 'session__template', 'requested_by_staff')
+            accepted_subs_map = {}
+            for sr in accepted_subs:
+                accepted_subs_map.setdefault(sr.accepted_by_staff_id, []).append(sr)
+                
+            # Attach lists in memory
+            for u in page:
+                u.prefetched_staff_locations = staff_locs_map.get(u.id, [])
+                u.prefetched_availabilities = avails_map.get(u.id, [])
+                u.prefetched_sessions = sessions_map.get(u.id, [])
+                u.prefetched_provider_appointments = appts_map.get(u.id, [])
+                u.prefetched_assigned_clients = clients_map.get(u.id, [])
+                u.prefetched_raised_subs = raised_subs_map.get(u.id, [])
+                u.prefetched_accepted_subs = accepted_subs_map.get(u.id, [])
+                
+            serializer = StaffDetailedSchedulingSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+            
+        serializer = StaffDetailedSchedulingSerializer(queryset, many=True)
+        return Response(serializer.data)
+
+class ClientDetailedSchedulingPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+class StaffDetailedSchedulingPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 class CustomTokenObtainPairView(TokenObtainPairView):
     """
