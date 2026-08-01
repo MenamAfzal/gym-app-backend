@@ -23,8 +23,12 @@ venv.bak/
 
 # Docker
 docker-compose.override.yml
+
+# Other
 pending_uploads/
 profile_images/
 gym_scheduling_api.postman_collection.json
 verify_gym_api.py
 .DS_Store
+verify_remote_apis.py
+verify_nutrition_reflections_api.py
