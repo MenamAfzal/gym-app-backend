@@ -1198,7 +1198,8 @@ class MultiMediaUploadAPIView(APIView):
                 status_code=status.HTTP_401_UNAUTHORIZED
             )
 
-        if not user.is_staff:
+        from apps.users.models import UserRole
+        if not (user.is_staff or user.role != UserRole.CLIENT):
             return format_error_response(
                 'Staff privileges required',
                 status_code=status.HTTP_403_FORBIDDEN
@@ -1213,12 +1214,23 @@ class MultiMediaUploadAPIView(APIView):
         return handle_poll_upload(request, user)
 
 
-class PollCreateAPIView(generics.CreateAPIView):
-    serializer_class = PollSerializer
+class PollCreateAPIView(APIView):
     permission_classes = [AllowAny]
 
-    def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+    def post(self, request, *args, **kwargs):
+        user = request.user
+        if not user.is_authenticated:
+            return format_error_response(
+                'Authentication required',
+                status_code=status.HTTP_401_UNAUTHORIZED
+            )
+        from apps.users.models import UserRole
+        if not (user.is_staff or user.role != UserRole.CLIENT):
+            return format_error_response(
+                'Staff privileges required',
+                status_code=status.HTTP_403_FORBIDDEN
+            )
+        return handle_poll_upload(request, user)
 
 
 class PollAPIView(viewsets.ModelViewSet):
@@ -1454,7 +1466,8 @@ class MediaViewSet(viewsets.ModelViewSet):
                 status_code=status.HTTP_401_UNAUTHORIZED
             )
 
-        if not user.is_staff:
+        from apps.users.models import UserRole
+        if not (user.is_staff or user.role != UserRole.CLIENT):
             return format_error_response(
                 'Staff privileges required',
                 status_code=status.HTTP_403_FORBIDDEN
