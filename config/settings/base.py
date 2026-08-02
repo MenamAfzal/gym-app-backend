@@ -32,6 +32,7 @@ LOCAL_APPS = [
     'apps.food_logger',
     'apps.support',
     'apps.inventory',
+    'apps.socialnetwork',
 ]
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 

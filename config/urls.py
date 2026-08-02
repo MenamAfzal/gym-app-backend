@@ -35,6 +35,7 @@ urlpatterns = [
     path('api/v1/food/', include('apps.food_logger.urls')),
     path('api/v1/support/', include('apps.support.urls')),
     path('api/v1/inventory/', include('apps.inventory.urls')),
+    path("socialnetwork/", include("apps.socialnetwork.urls")),
 ]
 
 if settings.DEBUG:
