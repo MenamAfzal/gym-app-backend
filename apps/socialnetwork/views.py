@@ -1226,7 +1226,8 @@ class PollAPIView(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.is_authenticated and user.user_type in [user.UserType.STAFF, user.UserType.ADMIN]:
+        from apps.users.models import UserRole
+        if user.is_authenticated and (user.is_staff or user.role != UserRole.CLIENT):
             return Poll.objects.all().order_by('-created_at')
         return Poll.objects.filter(visible_to_clients=True).order_by('-created_at')
 
@@ -1779,11 +1780,10 @@ class UnifiedFeedAPIView(APIView):
         poll_qs = Poll.objects.select_related('user').filter(
             models.Q(end_date__isnull=True) | models.Q(end_date__gt=timezone.now()))
 
-        if request.user.is_authenticated and request.user.user_type not in (
-                request.user.UserType.STAFF, request.user.UserType.ADMIN
-        ):
-            poll_qs = poll_qs.filter(visible_to_clients=True)
-        elif not request.user.is_authenticated:
+        from apps.users.models import UserRole
+        if request.user.is_authenticated and (request.user.is_staff or request.user.role != UserRole.CLIENT):
+            pass
+        else:
             poll_qs = poll_qs.filter(visible_to_clients=True)
 
         add_items(poll_qs, PollSerializer, media_type='poll')
