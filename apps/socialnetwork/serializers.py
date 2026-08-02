@@ -28,7 +28,9 @@ class UserMinimalSerializer(serializers.ModelSerializer):
         fields = ['id', 'email', 'username', 'profile_picture', 'first_name', 'last_name']
     
     def get_profile_picture(self, obj): 
-        return obj.profile_picture, 
+        if hasattr(obj, 'profile') and obj.profile.profile_image:
+            return obj.profile.profile_image.url
+        return None
     
     def get_first_name(self, obj):
         return obj.profile.first_name if hasattr(obj, 'profile') else None
