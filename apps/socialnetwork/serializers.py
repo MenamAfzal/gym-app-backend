@@ -29,6 +29,9 @@ class UserMinimalSerializer(serializers.ModelSerializer):
     
     def get_profile_picture(self, obj): 
         if hasattr(obj, 'profile') and obj.profile.profile_image:
+            request = self.context.get('request')
+            if request is not None:
+                return request.build_absolute_uri(obj.profile.profile_image.url)
             return obj.profile.profile_image.url
         return None
     
@@ -115,6 +118,9 @@ class PhotoSerializer(serializers.ModelSerializer):
         try:
             if obj.image:
                 print(f"Image URL: {obj.image.url}")
+                request = self.context.get('request')
+                if request is not None:
+                    return request.build_absolute_uri(obj.image.url)
                 return obj.image.url
             else:
                 print("Image is None")
@@ -215,6 +221,9 @@ class VideoSerializer(serializers.ModelSerializer):
         try:
             if obj.video_file:
                 print(f"Video URL: {obj.video_file.url}")
+                request = self.context.get('request')
+                if request is not None:
+                    return request.build_absolute_uri(obj.video_file.url)
                 return obj.video_file.url
             else:
                 print("Video file is None")
