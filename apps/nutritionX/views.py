@@ -7,8 +7,40 @@ from rest_framework.views import APIView
 
 from django.contrib.auth import get_user_model
 User = get_user_model()
-def upload_image_to_s3(file, obj): return "http://mock-s3-url.com/image.jpg"
-def delete_s3_file_threaded(url): pass
+def upload_image_to_s3(file, obj):
+    import os
+    import uuid
+    from django.core.files.storage import FileSystemStorage
+    from django.conf import settings
+    
+    subfolder = 'beverage_images'
+    fs = FileSystemStorage(
+        location=os.path.join(settings.MEDIA_ROOT, subfolder),
+        base_url=f"/media/{subfolder}/"
+    )
+    ext = os.path.splitext(file.name)[1]
+    filename = f"{uuid.uuid4()}{ext}"
+    saved_filename = fs.save(filename, file)
+    
+    url = fs.url(saved_filename)
+    obj.image = url
+    obj.save()
+    return url
+
+def delete_s3_file_threaded(url):
+    import os
+    from django.conf import settings
+    if not url:
+        return
+    try:
+        if "/media/" in url:
+            parts = url.split("/media/", 1)
+            media_relative_path = parts[1]
+            file_path = os.path.join(settings.MEDIA_ROOT, media_relative_path)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+    except Exception:
+        pass
 from .models import CustomBeverage, DailyNutritionProgress, MealLogs, FoodEntry, NutritionGoal, DrinkNutrients
 from datetime import datetime, date
 from django.utils.dateparse import parse_date

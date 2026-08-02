@@ -29,6 +29,7 @@ LOCAL_APPS = [
     "apps.scheduling",
     'apps.reflection_logger',
     'apps.nutritionX',
+    'apps.food_logger',
     'apps.support',
     'apps.inventory',
 ]
