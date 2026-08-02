@@ -52,15 +52,18 @@ def food_loger_s3(file_obj, obj):
     return url
 
 # Permission Classes
+def is_staff_user(user):
+    return user.is_authenticated and user.role in [
+        UserRole.TRAINER, UserRole.GYM_MANAGER, UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN
+    ]
+
 class IsClientUser(BasePermission):
     def has_permission(self, request, view):
         return request.user.is_authenticated and request.user.role == UserRole.CLIENT
 
 class IsStaffUser(BasePermission):
     def has_permission(self, request, view):
-        return request.user.is_authenticated and request.user.role in [
-            UserRole.TRAINER, UserRole.GYM_MANAGER, UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN
-        ]
+        return is_staff_user(request.user)
 
 # --- Staff Suggestion ---
 
@@ -72,7 +75,7 @@ class NutritionGoalBulkCreateAPIView(APIView):
     """
 
     def post(self, request):
-        if request.user.user_type != User.UserType.STAFF:
+        if not is_staff_user(request.user):
             return Response({"error": "Only staff users can create goals for users."},
                             status=status.HTTP_403_FORBIDDEN)
 
@@ -105,7 +108,7 @@ class NutritionGoalBulkCreateAPIView(APIView):
         """
         Bulk update multiple goals
         """
-        if request.user.user_type != User.UserType.STAFF:
+        if not is_staff_user(request.user):
             return Response(
                 {"error": "Only staff users can update goals."},
                 status=status.HTTP_403_FORBIDDEN
@@ -156,7 +159,7 @@ class FoodSuggestionListCreateAPIView(APIView):
 
 
     def post(self, request):
-        if not request.user.is_staff:
+        if not is_staff_user(request.user):
             return Response({'error': 'Only staff can create suggestions'}, status=403)
         serializer = FoodSuggestionSerializer(data=request.data)
         if serializer.is_valid():
@@ -165,7 +168,7 @@ class FoodSuggestionListCreateAPIView(APIView):
         return Response(serializer.errors, status=400)
 
     def delete(self, request):
-        if not request.user.is_staff:
+        if not is_staff_user(request.user):
             return Response({'error': 'Only staff can delete suggestions'}, status=403)
         food_suggestion_id = request.data.get('food_suggestion_id')
         try:
@@ -189,7 +192,7 @@ class StaffRecipeListCreateAPIView(APIView):
 
 
     def post(self, request):
-        if not request.user.is_staff:
+        if not is_staff_user(request.user):
              return Response({"detail": "Only staff can create recipes"}, status=403)
         serializer = StaffRecipeSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
@@ -197,15 +200,15 @@ class StaffRecipeListCreateAPIView(APIView):
             created_item = getattr(recipe, '_created_item', None)
             if created_item:
                 file_obj = request.FILES.get("image")
-                file_copy = io.BytesIO(file_obj.read())
-                file_copy.name = file_obj.name
-
-                food_loger_s3(file_copy, created_item)
+                if file_obj:
+                    file_copy = io.BytesIO(file_obj.read())
+                    file_copy.name = file_obj.name
+                    food_loger_s3(file_copy, created_item)
             return Response(serializer.data, status=201)
         return Response(serializer.errors, status=400)
 
     def delete(self, request):
-        if not request.user.is_staff:
+        if not is_staff_user(request.user):
             return Response({"detail": "Only staff can delete recipes"}, status=status.HTTP_403_FORBIDDEN)
 
         recipe_id = request.data.get('category_id')
@@ -477,7 +480,8 @@ class CustomFoodApiView(APIView):
         food = CustomFood.objects.filter(user=user)
 
         if is_custom_food is not None:
-            food = food.filter(is_custom_food=is_custom_food)
+            is_custom_bool = str(is_custom_food).lower() in ['true', '1']
+            food = food.filter(is_custom_food=is_custom_bool)
 
         if today:
             food = food.filter(date=today)
@@ -773,7 +777,7 @@ class StaffRecipeItemUpdateAPIView(APIView):
         return self.update_item(request, partial=True)
 
     def update_item(self, request, partial=False):
-        if not request.user.is_staff:
+        if not is_staff_user(request.user):
             return Response({"detail": "Only staff can update items"}, status=403)
 
         recipe_id = request.query_params.get("recipe_id")
@@ -799,7 +803,7 @@ class StaffRecipeUpdateAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, recipe_id):
-        if not request.user.is_staff:
+        if not is_staff_user(request.user):
             return Response({"detail": "Only staff can update recipes"}, status=403)
 
         try:
@@ -925,7 +929,7 @@ class UserMedicationViewSet(viewsets.ModelViewSet):
             return UserMedication.objects.none()
 
         queryset = UserMedication.objects.all()
-        if self.request.user.is_staff:
+        if is_staff_user(self.request.user):
             client_id = self.request.query_params.get('client_id')
             if client_id:
                 return queryset.filter(user_id=client_id)

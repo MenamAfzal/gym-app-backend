@@ -15,7 +15,15 @@ class Userserializer(serializers.ModelSerializer):
         fields = ['id', 'email', 'fullname']
 
     def get_fullname(self, obj):
-        return obj.profile.first_name + ' ' + obj.profile.last_name
+        try:
+            if hasattr(obj, 'profile') and obj.profile:
+                val = f"{obj.profile.first_name or ''} {obj.profile.last_name or ''}".strip()
+                if val:
+                    return val
+        except Exception:
+            pass
+        val_user = f"{obj.first_name or ''} {obj.last_name or ''}".strip()
+        return val_user if val_user else obj.email
 
 
 class NutritionXGoalSerializer(serializers.ModelSerializer):
@@ -79,33 +87,16 @@ class StaffRecipeSerializer(serializers.ModelSerializer):
         fields = ['id', 'category', 'created_at', 'items']
         read_only_fields = ['created_at']
 
-    # def create(self, validated_data):
-    #     items_data = validated_data.pop('items', [])
-    #     request = self.context.get('request')
-    #     user = request.user
-    #
-    #
-    #     recipe, created = StaffRecipe.objects.get_or_create(
-    #         category=validated_data.get('category'),
-    #         defaults=validated_data
-    #     )
-    #
-    #     existing_item_names = set(
-    #         recipe.items.values_list('name', flat=True)
-    #     )
-    #
-    #     duplicates = [
-    #         item['name'] for item in items_data if item['name'] in existing_item_names
-    #     ]
-    #     if duplicates:
-    #         raise serializers.ValidationError({
-    #             "items": [f"Item(s) already exist in this recipe: {', '.join(duplicates)}"]
-    #         })
-    #
-    #     for item in items_data:
-    #         StaffRecipeItem.objects.create(recipe=recipe, created_by=user, **item)
-    #
-    #     return recipe
+    def to_internal_value(self, data):
+        if 'items' in data and isinstance(data['items'], str):
+            try:
+                import json
+                data = data.copy()
+                data['items'] = json.loads(data['items'])
+            except Exception:
+                pass
+        return super().to_internal_value(data)
+
     def create(self, validated_data):
         """
         Custom create method for multipart/form-data + nested JSON items.
@@ -113,19 +104,22 @@ class StaffRecipeSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         user = request.user
 
-        # recipe = StaffRecipe.objects.create(category=validated_data.get('category'))
-
         recipe, created = StaffRecipe.objects.get_or_create(
                     category=validated_data.get('category'),
                 )
 
-        items_data = []
-        items_raw = request.data.get('items')
-        if items_raw:
-            try:
-                items_data = json.loads(items_raw)
-            except json.JSONDecodeError:
-                raise serializers.ValidationError({"items": "Invalid JSON format"})
+        items_data = validated_data.pop('items', [])
+        if not items_data:
+            items_raw = request.data.get('items')
+            if items_raw:
+                if isinstance(items_raw, list):
+                    items_data = items_raw
+                else:
+                    try:
+                        import json
+                        items_data = json.loads(items_raw)
+                    except Exception:
+                        pass
 
         shared_image = request.FILES.get('image')
 
