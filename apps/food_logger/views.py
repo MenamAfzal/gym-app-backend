@@ -292,7 +292,7 @@ class StaffRecipeItemListAPIView(APIView):
 
 
 class AddFoodToMealView(APIView):
-    permission_classes = [IsAuthenticated, IsStaffUser]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         query = request.query_params.get('query')

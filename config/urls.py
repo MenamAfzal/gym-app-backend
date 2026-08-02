@@ -31,6 +31,7 @@ urlpatterns = [
     path('api/v1/nutritionx/', include('apps.nutritionX.urls')),
     path('api/v1/nutrition/', include('apps.nutritionX.urls')),
     path('api/v1/foodlogger/', include('apps.food_logger.urls')),
+    path('api/v1/foodloger/', include('apps.food_logger.urls')),
     path('api/v1/food/', include('apps.food_logger.urls')),
     path('api/v1/support/', include('apps.support.urls')),
     path('api/v1/inventory/', include('apps.inventory.urls')),
