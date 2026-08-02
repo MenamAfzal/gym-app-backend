@@ -1,7 +1,5 @@
 import json
-
 import requests
-
 
 class NutritionXService:
     NUTRITIONIX_BASE_URL = "https://trackapi.nutritionix.com/v2"
@@ -19,7 +17,7 @@ class NutritionXService:
             "query": query
         }
 
-        response = requests.get(url, headers=headers, params=data)
+        response = requests.get(url, headers=headers, params=data, timeout=10)
         return response
 
     def nutrients(self, drink_name):
@@ -33,7 +31,5 @@ class NutritionXService:
             "query": drink_name
         }
 
-        response = requests.post(url, headers=headers, json=data)
+        response = requests.post(url, headers=headers, json=data, timeout=10)
         return response
-
-
