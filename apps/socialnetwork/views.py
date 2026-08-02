@@ -1009,7 +1009,7 @@ def format_error_response(message, details=None, status_code=status.HTTP_400_BAD
     response = {'error': message}
     if details:
         response['details'] = details
-    return Response(response, status=status.HTTP_400_BAD_REQUEST)
+    return Response(response, status=status_code)
 
 
 # Utility function for poll creation
