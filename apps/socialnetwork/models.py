@@ -5,14 +5,14 @@ from django.dispatch import receiver
 from django.contrib.contenttypes.fields import GenericForeignKey
 from django.contrib.contenttypes.models import ContentType
 from django.contrib.auth import get_user_model
-from core_models.base_models import BaseModel
+from core_models.base_models import BaseModel, TenantAwareModel
 from django.contrib.contenttypes.models import ContentType
 import uuid
 
 User = get_user_model()
 
 
-class Post(BaseModel):
+class Post(TenantAwareModel):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='%(class)s_posts')
     caption = models.CharField(max_length=2400, null=True, blank=True)
 
@@ -63,11 +63,10 @@ class Poll(Post):
         return f"Poll: {self.question} by {self.user.email}"
 
 
-class Vote(models.Model):
+class Vote(TenantAwareModel):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='votes')
     poll = models.ForeignKey(Poll, on_delete=models.CASCADE, related_name='user_votes')
     option = models.ForeignKey(PollOption, on_delete=models.CASCADE, related_name='user_votes')
-    created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
         unique_together = ('user', 'poll', 'option')  
@@ -76,11 +75,11 @@ class Vote(models.Model):
         return f"{self.user.email} voted for {self.option.text} in {self.poll.question}"
 
 
-class Like(BaseModel):
+class Like(TenantAwareModel):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='likes')
     
     content_type = models.ForeignKey('contenttypes.ContentType', on_delete=models.CASCADE)
-    object_id = models.PositiveIntegerField()
+    object_id = models.UUIDField()
     content_object = GenericForeignKey('content_type', 'object_id')
     
     class Meta:
@@ -90,13 +89,13 @@ class Like(BaseModel):
         return f"{self.user.email} liked {self.content_object}"
 
 
-class Comment(BaseModel):
+class Comment(TenantAwareModel):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='comments')
     content = models.TextField()
     parent = models.ForeignKey('self', on_delete=models.CASCADE, null=True, blank=True, related_name='replies')
     
     content_type = models.ForeignKey('contenttypes.ContentType', on_delete=models.CASCADE)
-    object_id = models.PositiveIntegerField()
+    object_id = models.UUIDField()
     content_object = GenericForeignKey('content_type', 'object_id')
     likes_count = models.IntegerField(default=0)
     dislikes_count = models.IntegerField(default=0)
@@ -105,7 +104,7 @@ class Comment(BaseModel):
         return f"Comment by {self.user.email} on {self.content_object}"
     
 
-class CommentReaction(BaseModel):
+class CommentReaction(TenantAwareModel):
     REACTION_CHOICES = [
         ('LIKE', 'Like'),
         ('DISLIKE', 'Dislike'),
@@ -122,12 +121,11 @@ class CommentReaction(BaseModel):
         return f"{self.user.email} {self.reaction_type}d comment {self.comment.id}"    
 
 
-class MediaGroup(BaseModel):
+class MediaGroup(TenantAwareModel):
     """
     A group of media items (photos and videos) that belong together.
     Used for multi-media uploads and grouped content.
     """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='media_groups')
     title = models.CharField(max_length=255, blank=True, null=True)
     description = models.TextField(blank=True, null=True)

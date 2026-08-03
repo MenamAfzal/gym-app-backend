@@ -28,17 +28,31 @@ class Userserializer(serializers.ModelSerializer):
 
 class NutritionXGoalSerializer(serializers.ModelSerializer):
     user = Userserializer(read_only=True)
+    calories_goal_kcal = serializers.FloatField(source='daily_calories', read_only=True)
+    protein_goal_g = serializers.FloatField(source='daily_protein', read_only=True)
+    carbs_goal_g = serializers.FloatField(source='daily_carbs', read_only=True)
+    fat_goal_g = serializers.FloatField(source='daily_fat', read_only=True)
 
     class Meta:
         model = UserNutritionGoal
-        fields = "__all__"
+        fields = [
+            'id', 'user', 'calories_goal_kcal', 'protein_goal_g', 
+            'carbs_goal_g', 'fat_goal_g', 'date', 'base_goal'
+        ]
 
 class NutritionGoalSerializer(serializers.ModelSerializer):
     user = serializers.PrimaryKeyRelatedField(queryset=User.objects.all())
+    calories_goal_kcal = serializers.FloatField(source='daily_calories', required=False, allow_null=True)
+    protein_goal_g = serializers.FloatField(source='daily_protein', required=False, allow_null=True)
+    carbs_goal_g = serializers.FloatField(source='daily_carbs', required=False, allow_null=True)
+    fat_goal_g = serializers.FloatField(source='daily_fat', required=False, allow_null=True)
 
     class Meta:
         model = UserNutritionGoal
-        fields = "__all__"
+        fields = [
+            'id', 'user', 'calories_goal_kcal', 'protein_goal_g', 
+            'carbs_goal_g', 'fat_goal_g', 'date', 'base_goal'
+        ]
 
 class BulkNutritionGoalSerializer(serializers.Serializer):
     goals = NutritionGoalSerializer(many=True)
@@ -88,13 +102,24 @@ class StaffRecipeSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at']
 
     def to_internal_value(self, data):
+        data = data.copy()
         if 'items' in data and isinstance(data['items'], str):
             try:
                 import json
-                data = data.copy()
                 data['items'] = json.loads(data['items'])
             except Exception:
                 pass
+
+        if 'items' not in data or not data['items']:
+            flat_item = {}
+            for field in ['name', 'calories', 'protein', 'carbs', 'fats', 'serving_qty', 'serving_info', 'serving_unit', 'serving_weight_grams', 'description', 'ingredients']:
+                if field in data:
+                    flat_item[field] = data[field]
+            if 'fat' in data and 'fats' not in data:
+                flat_item['fats'] = data['fat']
+            if flat_item:
+                data['items'] = [flat_item]
+
         return super().to_internal_value(data)
 
     def create(self, validated_data):

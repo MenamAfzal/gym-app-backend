@@ -6,7 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django.core.exceptions import ValidationError
-from apps.scheduling.permissions import IsOwnerOrManager
+from apps.scheduling.permissions import IsOwnerOrManager, IsGymStaffOrOwner
 
 from apps.users.serializers import (
     ChangePasswordSerializer,
@@ -129,7 +129,7 @@ class UserViewSet(viewsets.ModelViewSet):
         except ValidationError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-    @action(detail=False, methods=['get'], url_path='clients-detailed-scheduling', permission_classes=[IsOwnerOrManager])
+    @action(detail=False, methods=['get'], url_path='clients-detailed-scheduling', permission_classes=[IsGymStaffOrOwner])
     def clients_detailed_scheduling(self, request):
         """
         GET: Paginated list of clients with complete scheduling, packages, check-in history.
@@ -304,7 +304,7 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = StaffDetailedSchedulingSerializer(queryset, many=True)
         return Response(serializer.data)
 
-    @action(detail=True, methods=['get'], url_path='detailed-scheduling', permission_classes=[IsOwnerOrManager])
+    @action(detail=True, methods=['get'], url_path='detailed-scheduling', permission_classes=[IsGymStaffOrOwner])
     def detailed_scheduling(self, request, pk=None):
         """
         GET: Complete detailed scheduling summary for a single client or staff member by ID.
@@ -390,7 +390,7 @@ class UserViewSet(viewsets.ModelViewSet):
                     "cancelled_bookings_count": 0
                 }, status=status.HTTP_200_OK)
 
-    @action(detail=False, methods=['get'], url_path='clients-detailed-nutrition', permission_classes=[IsOwnerOrManager])
+    @action(detail=False, methods=['get'], url_path='clients-detailed-nutrition', permission_classes=[IsGymStaffOrOwner])
     def clients_detailed_nutrition(self, request):
         """
         GET: Paginated list of clients with complete detailed nutrition profiles.
@@ -474,7 +474,7 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = ClientDetailedNutritionSerializer(queryset, many=True)
         return Response(serializer.data)
 
-    @action(detail=True, methods=['get'], url_path='detailed-nutrition', permission_classes=[IsOwnerOrManager])
+    @action(detail=True, methods=['get'], url_path='detailed-nutrition', permission_classes=[IsGymStaffOrOwner])
     def detailed_nutrition(self, request, pk=None):
         """
         GET: Complete detailed nutrition profile for a single user by ID.
@@ -503,7 +503,7 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = ClientDetailedNutritionSerializer(user)
         return Response(serializer.data)
 
-    @action(detail=False, methods=['get'], url_path='clients-detailed-reflection', permission_classes=[IsOwnerOrManager])
+    @action(detail=False, methods=['get'], url_path='clients-detailed-reflection', permission_classes=[IsGymStaffOrOwner])
     def clients_detailed_reflection(self, request):
         """
         GET: Paginated list of clients with complete detailed reflection/journal logs.
@@ -592,7 +592,7 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = ClientDetailedReflectionSerializer(queryset, many=True)
         return Response(serializer.data)
 
-    @action(detail=True, methods=['get'], url_path='detailed-reflection', permission_classes=[IsOwnerOrManager])
+    @action(detail=True, methods=['get'], url_path='detailed-reflection', permission_classes=[IsGymStaffOrOwner])
     def detailed_reflection(self, request, pk=None):
         """
         GET: Complete detailed reflection profile for a single user by ID.

@@ -186,6 +186,17 @@ class StaffRecipeListCreateAPIView(APIView):
 
     def get(self, request):
         recipes = StaffRecipe.objects.all().order_by('-created_at')
+        if not recipes.exists():
+            from django.utils import timezone
+            defaults = [
+                {"id": 1, "category": "Breakfast", "created_at": timezone.now().date()},
+                {"id": 2, "category": "Lunch", "created_at": timezone.now().date()},
+                {"id": 3, "category": "Dinner", "created_at": timezone.now().date()},
+                {"id": 4, "category": "Snack", "created_at": timezone.now().date()},
+                {"id": 5, "category": "Pre Workout", "created_at": timezone.now().date()},
+                {"id": 6, "category": "Post Workout", "created_at": timezone.now().date()},
+            ]
+            return Response(defaults)
         serializer = StaffRecipeListSerializer(recipes, many=True)
         return Response(serializer.data)
 
