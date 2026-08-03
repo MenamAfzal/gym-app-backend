@@ -53,10 +53,10 @@ class CommentSerializer(serializers.ModelSerializer):
         model = Comment
         # Add new count and status fields to the list
         fields = [
-            'id', 'uuid', 'user', 'content', 'parent', 'created_at', 
+            'id', 'user', 'content', 'parent', 'created_at', 
             'likes_count', 'dislikes_count', 'has_liked', 'has_disliked', 'replies'
         ]
-        read_only_fields = ['id', 'uuid', 'user', 'created_at', 'likes_count', 'dislikes_count']
+        read_only_fields = ['id', 'user', 'created_at', 'likes_count', 'dislikes_count']
     def get_replies(self, obj):
         if obj.replies.exists():
             return CommentSerializer(obj.replies.all(), many=True).data
@@ -442,10 +442,10 @@ class CommentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Comment
         fields = [
-            'id', 'uuid', 'user', 'content', 'parent', 'created_at', 
+            'id', 'user', 'content', 'parent', 'created_at', 
             'likes_count', 'dislikes_count', 'liked_by', 'disliked_by', 'replies'
         ]
-        read_only_fields = ['id', 'uuid', 'user', 'created_at']
+        read_only_fields = ['id', 'user', 'created_at']
 
     def get_liked_by(self, obj):
         # Fetch the first 10 users who liked this comment
