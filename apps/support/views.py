@@ -18,15 +18,17 @@ class TenantTicketViewSet(viewsets.ModelViewSet):
     """
     For Gym Owners to manage tickets for their specific tenant.
     """
-    queryset = Ticket.objects.all().select_related(
-        'created_by__profile', 
-        'assigned_to__profile'
-    ).prefetch_related(
-        'comments', 
-        'comments__author__profile'
-    )
     serializer_class = TicketSerializer
     permission_classes = [IsGymOwnerOrAdmin]
+
+    def get_queryset(self):
+        return Ticket.objects.all().select_related(
+            'created_by__profile', 
+            'assigned_to__profile'
+        ).prefetch_related(
+            'comments', 
+            'comments__author__profile'
+        )
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
