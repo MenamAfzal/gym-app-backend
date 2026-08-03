@@ -235,9 +235,15 @@ class PackageSerializer(serializers.ModelSerializer):
 
 
 class BookingCreateSerializer(serializers.ModelSerializer):
+    client = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(),
+        required=False,
+        allow_null=True
+    )
+
     class Meta:
         model = Booking
-        fields = ['id', 'session', 'join_mode', 'music_preference']
+        fields = ['id', 'session', 'join_mode', 'music_preference', 'client']
 
     def validate(self, data):
         session = data['session']
@@ -262,6 +268,11 @@ class BookingEditSerializer(serializers.ModelSerializer):
 
 
 class AppointmentSerializer(serializers.ModelSerializer):
+    client = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(),
+        required=False,
+        allow_null=True
+    )
     client_email = serializers.CharField(source='client.email', read_only=True)
     provider_name = serializers.CharField(source='provider.profile.nickname', read_only=True)
     location_name = serializers.CharField(source='location.name', read_only=True)
@@ -274,7 +285,7 @@ class AppointmentSerializer(serializers.ModelSerializer):
             'location', 'location_name', 'room', 'room_name', 
             'start_at', 'end_at', 'status', 'credit_source', 'created_at'
         ]
-        read_only_fields = ['id', 'client', 'client_email', 'provider_name', 'location_name', 'room_name', 'created_at']
+        read_only_fields = ['id', 'client_email', 'provider_name', 'location_name', 'room_name', 'created_at']
 
     def validate(self, data):
         start = data.get('start_at')

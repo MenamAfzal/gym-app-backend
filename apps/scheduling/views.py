@@ -291,11 +291,15 @@ class BookingViewSet(viewsets.ModelViewSet):
         user = self.request.user
         qs = Booking.objects.select_related('session', 'session__template', 'client')
         if user.role == UserRole.CLIENT:
-            return qs.filter(client=user)
+            qs = qs.filter(client=user)
         elif user.role in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
-            return qs.filter(session__template__location__stafflocation__staff=user).distinct()
+            qs = qs.filter(session__template__location__stafflocation__staff=user).distinct()
         elif user.role == UserRole.TRAINER:
-            return qs.filter(Q(session__staff=user) | Q(session__template__location__stafflocation__staff=user)).distinct()
+            qs = qs.filter(Q(session__staff=user) | Q(session__template__location__stafflocation__staff=user)).distinct()
+        
+        client_id = self.request.query_params.get('client')
+        if client_id:
+            qs = qs.filter(client_id=client_id)
         return qs
 
     @transaction.atomic
@@ -307,6 +311,21 @@ class BookingViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         session_id = serializer.validated_data['session'].id
 
+        # Determine target booking client
+        from apps.users.models import UserRole
+        is_staff = request.user.is_staff or request.user.role != UserRole.CLIENT
+        
+        target_client = request.user
+        if is_staff:
+            if serializer.validated_data.get('client'):
+                target_client = serializer.validated_data['client']
+            else:
+                return Response({"detail": "client field is required when booking as staff."}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            # Client cannot book for someone else
+            if serializer.validated_data.get('client') and serializer.validated_data['client'] != request.user:
+                return Response({"detail": "You cannot make bookings on behalf of other clients."}, status=status.HTTP_403_FORBIDDEN)
+
         # Row lock session
         session = ClassSession.objects.select_for_update().get(id=session_id)
 
@@ -314,7 +333,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Session is not scheduled."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Check existing booking
-        if Booking.objects.filter(client=request.user, session=session, status='booked').exists():
+        if Booking.objects.filter(client=target_client, session=session, status='booked').exists():
             return Response({"detail": "Already booked this session."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Capacity Check
@@ -324,7 +343,7 @@ class BookingViewSet(viewsets.ModelViewSet):
 
         # Resolve Payment: find active Package or raise error
         package = Package.objects.select_for_update().filter(
-            client=request.user,
+            client=target_client,
             credits_remaining__gt=0,
             expires_at__gt=timezone.now()
         ).first()
@@ -339,7 +358,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         # Create Booking
         booking = Booking.objects.create(
             tenant=request.tenant,
-            client=request.user,
+            client=target_client,
             session=session,
             credit_source=package,
             status='booked',
@@ -350,7 +369,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         # Create confirmation notification
         Notification.objects.create(
             tenant=request.tenant,
-            recipient=request.user,
+            recipient=target_client,
             channel='email',
             template_key='booking_confirmation',
             related_entity_id=booking.id
@@ -426,15 +445,38 @@ class WaitlistViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Waitlist.objects.all()
+        user = self.request.user
+        qs = Waitlist.objects.all().select_related('client', 'session', 'session__template')
+        if user.role == UserRole.CLIENT:
+            qs = qs.filter(client=user)
+        
+        client_id = self.request.query_params.get('client')
+        if client_id:
+            qs = qs.filter(client_id=client_id)
+        return qs
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
         session_id = request.data.get('session')
         session = get_object_or_404(ClassSession, id=session_id)
 
+        # Determine target waitlist client
+        from apps.users.models import UserRole
+        is_staff = request.user.is_staff or request.user.role != UserRole.CLIENT
+
+        target_client = request.user
+        if is_staff:
+            client_id = request.data.get('client')
+            if client_id:
+                target_client = get_object_or_404(User, id=client_id)
+            else:
+                return Response({"detail": "client field is required when adding to waitlist as staff."}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            if request.data.get('client') and str(request.data.get('client')) != str(request.user.id):
+                return Response({"detail": "You cannot add other clients to the waitlist."}, status=status.HTTP_403_FORBIDDEN)
+
         # Check existing waitlist or booking
-        if Waitlist.objects.filter(client=request.user, session=session, status='waiting').exists():
+        if Waitlist.objects.filter(client=target_client, session=session, status='waiting').exists():
             return Response({"detail": "Already on waitlist."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Calculate position
@@ -443,7 +485,7 @@ class WaitlistViewSet(viewsets.ModelViewSet):
 
         waitlist = Waitlist.objects.create(
             tenant=request.tenant,
-            client=request.user,
+            client=target_client,
             session=session,
             position=next_pos,
             status='waiting'
@@ -461,11 +503,15 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         user = self.request.user
         qs = Appointment.objects.select_related('provider', 'client')
         if user.role == UserRole.CLIENT:
-            return qs.filter(client=user)
+            qs = qs.filter(client=user)
         elif user.role in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
-            return qs.filter(location__stafflocation__staff=user).distinct()
+            qs = qs.filter(location__stafflocation__staff=user).distinct()
         elif user.role == UserRole.TRAINER:
-            return qs.filter(Q(provider=user) | Q(location__stafflocation__staff=user)).distinct()
+            qs = qs.filter(Q(provider=user) | Q(location__stafflocation__staff=user)).distinct()
+        
+        client_id = self.request.query_params.get('client')
+        if client_id:
+            qs = qs.filter(client_id=client_id)
         return qs
 
     @action(detail=False, methods=['get'], url_path='availability')
@@ -544,6 +590,20 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         start_at = data['start_at']
         end_at = data['end_at']
 
+        # Determine target appointment client
+        from apps.users.models import UserRole
+        is_staff = request.user.is_staff or request.user.role != UserRole.CLIENT
+
+        target_client = request.user
+        if is_staff:
+            if data.get('client'):
+                target_client = data['client']
+            else:
+                return Response({"detail": "client field is required when booking appointments as staff."}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            if data.get('client') and data['client'] != request.user:
+                return Response({"detail": "You cannot book appointments on behalf of other clients."}, status=status.HTTP_403_FORBIDDEN)
+
         # Conflict check
         overlap_appt = Appointment.objects.filter(
             provider=provider,
@@ -564,7 +624,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
 
         # Check credits
         package = Package.objects.select_for_update().filter(
-            client=request.user,
+            client=target_client,
             credits_remaining__gt=0,
             expires_at__gt=timezone.now()
         ).first()
@@ -577,7 +637,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
 
         appointment = Appointment.objects.create(
             tenant=request.tenant,
-            client=request.user,
+            client=target_client,
             provider=provider,
             location=data['location'],
             room=data.get('room'),
@@ -593,7 +653,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
 class SubstituteRequestViewSet(viewsets.ModelViewSet):
     queryset = SubstituteRequest.all_objects.all()
     serializer_class = SubstituteRequestSerializer
-    permission_classes = [IsInstructor]
+    permission_classes = [IsGymStaffOrOwner]
 
     def get_queryset(self):
         return SubstituteRequest.objects.all()
@@ -603,14 +663,18 @@ class SubstituteRequestViewSet(viewsets.ModelViewSet):
         session_id = request.data.get('session')
         session = get_object_or_404(ClassSession, id=session_id)
 
-        # Only session leader can open substitution request
-        if session.staff != request.user:
+        # Determine if user is owner/manager
+        from apps.users.models import UserRole
+        is_admin = request.user.role in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER] or request.user.is_staff
+
+        # Only session leader can open substitution request (unless they are admin)
+        if not is_admin and session.staff != request.user:
             return Response({"detail": "You can only request substitution for classes you lead."}, status=status.HTTP_403_FORBIDDEN)
 
         sub_req = SubstituteRequest.objects.create(
             tenant=request.tenant,
             session=session,
-            requested_by_staff=request.user,
+            requested_by_staff=session.staff,
             status='open'
         )
 
@@ -620,7 +684,7 @@ class SubstituteRequestViewSet(viewsets.ModelViewSet):
 
         return Response(SubstituteRequestSerializer(sub_req).data, status=status.HTTP_201_CREATED)
 
-    @action(detail=True, methods=['post'], permission_classes=[IsInstructor])
+    @action(detail=True, methods=['post'], permission_classes=[IsGymStaffOrOwner])
     @transaction.atomic
     def accept(self, request, pk=None):
         sub_req = SubstituteRequest.objects.select_for_update().get(id=pk)
@@ -628,17 +692,33 @@ class SubstituteRequestViewSet(viewsets.ModelViewSet):
         if sub_req.status != 'open':
             return Response({"detail": "Request has already been filled or expired."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Determine target trainer who covers
+        from apps.users.models import UserRole
+        is_admin = request.user.role in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER] or request.user.is_staff
+
+        target_trainer = request.user
+        if is_admin:
+            if request.data.get('trainer'):
+                trainer_id = request.data.get('trainer')
+                target_trainer = get_object_or_404(User, id=trainer_id)
+            else:
+                return Response({"detail": "trainer field is required when filling substitution as admin."}, status=status.HTTP_400_BAD_REQUEST)
+        else:
+            # Normal trainer can only accept for themselves
+            if request.data.get('trainer') and str(request.data.get('trainer')) != str(request.user.id):
+                return Response({"detail": "You cannot accept substitution requests on behalf of other trainers."}, status=status.HTTP_403_FORBIDDEN)
+
         # Update substitute request
         sub_req.status = 'filled'
-        sub_req.accepted_by_staff = request.user
+        sub_req.accepted_by_staff = target_trainer
         sub_req.save()
 
         # Update session
         session = sub_req.session
-        session.staff = request.user
+        session.staff = target_trainer
         session.save()
 
-        return Response({"status": "filled", "accepted_by": request.user.email})
+        return Response({"status": "filled", "accepted_by": target_trainer.email})
 
 
 class PackageTypeViewSet(viewsets.ModelViewSet):
@@ -661,7 +741,11 @@ class PackageViewSet(viewsets.ModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        return Package.objects.all()
+        qs = Package.objects.all().select_related('package_type', 'client')
+        client_id = self.request.query_params.get('client')
+        if client_id:
+            qs = qs.filter(client_id=client_id)
+        return qs
 
     @action(detail=False, methods=['get'], url_path='my-active-packages')
     def my_active_packages(self, request):
