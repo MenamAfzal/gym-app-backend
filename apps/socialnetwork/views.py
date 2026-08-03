@@ -1519,7 +1519,7 @@ class MediaViewSet(viewsets.ModelViewSet):
             content_type=ct,
             object_id=obj.id,
             parent=None
-        ).select_related('user').prefetch_related('replies__user')
+        ).select_related('user__profile').prefetch_related('replies__user__profile')
         # 3) Serialize each comment plus the minimal user data
         results = []
         for c in top_comments:
@@ -1776,14 +1776,14 @@ class UnifiedFeedAPIView(APIView):
 
         # PHOTOS
         add_items(
-            Photo.objects.select_related('user').all(),
+            Photo.objects.select_related('user__profile').all(),
             PhotoSerializer,
             media_type='photo'
         )
 
         # VIDEOS
         add_items(
-            Video.objects.select_related('user').all(),
+            Video.objects.select_related('user__profile').all(),
             VideoSerializer,
             media_type='video'
         )
@@ -1791,7 +1791,7 @@ class UnifiedFeedAPIView(APIView):
  
 
         # POLLS (apply visibility)
-        poll_qs = Poll.objects.select_related('user').filter(
+        poll_qs = Poll.objects.select_related('user__profile').filter(
             models.Q(end_date__isnull=True) | models.Q(end_date__gt=timezone.now()))
 
         from apps.users.models import UserRole

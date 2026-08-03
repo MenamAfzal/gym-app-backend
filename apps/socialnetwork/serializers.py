@@ -36,10 +36,16 @@ class UserMinimalSerializer(serializers.ModelSerializer):
         return None
     
     def get_first_name(self, obj):
-        return obj.profile.first_name if hasattr(obj, 'profile') else None
+        first_name = getattr(obj, 'first_name', '') or ''
+        if not first_name.strip() and hasattr(obj, 'profile'):
+            first_name = obj.profile.first_name or ''
+        return first_name
     
     def get_last_name(self, obj):
-        return obj.profile.last_name if hasattr(obj, 'profile') else None
+        last_name = getattr(obj, 'last_name', '') or ''
+        if not last_name.strip() and hasattr(obj, 'profile'):
+            last_name = obj.profile.last_name or ''
+        return last_name
     
 
 class CommentSerializer(serializers.ModelSerializer):
