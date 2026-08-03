@@ -666,6 +666,7 @@ class CustomTokenObtainPairView(TokenObtainPairView):
 
 class UserRegistrationView(APIView):
     permission_classes = [permissions.AllowAny]
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
     serializer_class = CreateUserSerializer
 
     def post(self, request):
