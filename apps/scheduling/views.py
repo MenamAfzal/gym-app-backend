@@ -423,17 +423,31 @@ class BookingViewSet(viewsets.ModelViewSet):
             "detail": "Booking cancelled."
         }, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=['post'], permission_classes=[IsFrontDeskOrAdmin])
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def check_in(self, request, pk=None):
         booking = self.get_object()
+        user = request.user
+        
+        # Verify if user is staff OR the owner of the booking
+        is_staff = user.role in [UserRole.PLATFORM_ADMIN, UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.FRONT_DESK, UserRole.TRAINER]
+        if not is_staff and booking.client != user:
+            return Response({"detail": "You do not have permission to check in for this booking."}, status=status.HTTP_403_FORBIDDEN)
+
         booking.checked_in_at = timezone.now()
         booking.status = 'attended'
         booking.save()
         return Response({"detail": "Checked in successfully."})
 
-    @action(detail=True, methods=['post'], permission_classes=[IsFrontDeskOrAdmin])
+    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
     def check_out(self, request, pk=None):
         booking = self.get_object()
+        user = request.user
+        
+        # Verify if user is staff OR the owner of the booking
+        is_staff = user.role in [UserRole.PLATFORM_ADMIN, UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.FRONT_DESK, UserRole.TRAINER]
+        if not is_staff and booking.client != user:
+            return Response({"detail": "You do not have permission to check out for this booking."}, status=status.HTTP_403_FORBIDDEN)
+
         booking.checked_out_at = timezone.now()
         booking.save()
         return Response({"detail": "Checked out successfully."})
