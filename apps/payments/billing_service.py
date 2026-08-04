@@ -179,7 +179,13 @@ class FeatureBillingService:
         def _get(obj, key, default=None):
             if isinstance(obj, dict):
                 return obj.get(key, default)
-            return getattr(obj, key, default)
+            if hasattr(obj, key):
+                return getattr(obj, key)
+            try:
+                return obj[key]
+            except (KeyError, TypeError, Exception):
+                pass
+            return default
             
         metadata = _get(session_obj, "metadata", {})
         session_id = _get(session_obj, "id", "")
@@ -280,7 +286,13 @@ class FeatureBillingService:
         def _get(obj, key, default=None):
             if isinstance(obj, dict):
                 return obj.get(key, default)
-            return getattr(obj, key, default)
+            if hasattr(obj, key):
+                return getattr(obj, key)
+            try:
+                return obj[key]
+            except (KeyError, TypeError, Exception):
+                pass
+            return default
 
         stripe_sub_id = _get(subscription_obj, "id")
         raw_status = _get(subscription_obj, "status")
@@ -320,7 +332,13 @@ class FeatureBillingService:
         def _get(obj, key, default=None):
             if isinstance(obj, dict):
                 return obj.get(key, default)
-            return getattr(obj, key, default)
+            if hasattr(obj, key):
+                return getattr(obj, key)
+            try:
+                return obj[key]
+            except (KeyError, TypeError, Exception):
+                pass
+            return default
 
         stripe_sub_id = _get(subscription_obj, "id")
         try:

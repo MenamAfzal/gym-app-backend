@@ -205,7 +205,13 @@ def _handle_subscription_updated(subscription_obj):
     def _get(obj, key, default=None):
         if isinstance(obj, dict):
             return obj.get(key, default)
-        return getattr(obj, key, default)
+        if hasattr(obj, key):
+            return getattr(obj, key)
+        try:
+            return obj[key]
+        except (KeyError, TypeError, Exception):
+            pass
+        return default
 
     stripe_sub_id = _get(subscription_obj, 'id')
     status = _get(subscription_obj, 'status')
@@ -222,7 +228,13 @@ def _handle_subscription_deleted(subscription_obj):
     def _get(obj, key, default=None):
         if isinstance(obj, dict):
             return obj.get(key, default)
-        return getattr(obj, key, default)
+        if hasattr(obj, key):
+            return getattr(obj, key)
+        try:
+            return obj[key]
+        except (KeyError, TypeError, Exception):
+            pass
+        return default
 
     stripe_sub_id = _get(subscription_obj, 'id')
     try:
@@ -238,7 +250,13 @@ def _handle_invoice_payment_succeeded(invoice_obj):
     def _get(obj, key, default=None):
         if isinstance(obj, dict):
             return obj.get(key, default)
-        return getattr(obj, key, default)
+        if hasattr(obj, key):
+            return getattr(obj, key)
+        try:
+            return obj[key]
+        except (KeyError, TypeError, Exception):
+            pass
+        return default
 
     invoice_id = _get(invoice_obj, 'id')
     amount_paid = _get(invoice_obj, 'amount_paid', 0)
