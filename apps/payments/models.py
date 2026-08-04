@@ -2,6 +2,8 @@ from django.db import models
 from django.core.validators import MinValueValidator, MaxValueValidator
 from core_models.base_models import BaseModel, TenantAwareModel
 
+
+
 class PlatformSettings(BaseModel):
     """
     Global settings for the platform admin.
@@ -12,7 +14,7 @@ class PlatformSettings(BaseModel):
         decimal_places=2,
         default=10.00,
         validators=[MinValueValidator(0), MaxValueValidator(100)],
-        help_text="Default platform cut percentage (e.g., 10.00 for 10%)"
+        help_text="Default platform cut percentage (e.g., 10.00 for 10%)",
     )
 
     class Meta:
@@ -24,29 +26,217 @@ class PlatformSettings(BaseModel):
     @classmethod
     def get_settings(cls):
         """Helper to get the singleton instance or create default."""
-        settings, created = cls.objects.get_or_create(id=1)
+        settings, _ = cls.objects.get_or_create(id=1)
         return settings
+
+
+
+class BillingFeature(BaseModel):
+    """
+    Represents one of the 5 purchasable premium features on the platform.
+
+    Each BillingFeature maps 1-to-1 with a Stripe Product/Price.  The
+    ``stripe_price_id`` is used to construct Checkout Session line_items.
+
+    Examples:
+        - Advanced Analytics   (code: advanced_analytics,  price_id: price_xxx)
+        - Custom Branding       (code: custom_branding,     price_id: price_yyy)
+        - Nutrition Module      (code: nutrition_module,    price_id: price_zzz)
+        - AI Scheduling         (code: ai_scheduling,       price_id: price_aaa)
+        - Multi-Location        (code: multi_location,      price_id: price_bbb)
+    """
+
+    name = models.CharField(
+        max_length=150,
+        help_text="Human-readable feature name shown to gym owners",
+    )
+    code = models.SlugField(
+        max_length=100,
+        unique=True,
+        help_text="Internal feature identifier (e.g. 'advanced_analytics')",
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Short description shown on the billing/upgrade page",
+    )
+    stripe_price_id = models.CharField(
+        max_length=255,
+        help_text="Stripe Price ID (price_...) for this feature's recurring charge",
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Inactive features are hidden from the checkout UI",
+    )
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name = "Billing Feature"
+        verbose_name_plural = "Billing Features"
+
+    def __str__(self):
+        return f"{self.name} ({self.code})"
+
+
+class BillingPlan(BaseModel):
+    """
+    Defines the four subscription tiers and their feature-selection constraints.
+
+    Billing is 100% feature-driven; a BillingPlan only holds constraint metadata
+    and is NOT a Stripe entity itself.
+
+    Plan rules
+    ----------
+    free     – 0 features, no Stripe checkout required.
+    basic    – exactly 3 features selected from the 5 available.
+    premium  – all 5 features auto-included (no selection needed).
+    custom   – any number of features chosen freely by the gym owner.
+    """
+
+    class PlanSlug(models.TextChoices):
+        FREE = "free", "Free"
+        BASIC = "basic", "Basic"
+        PREMIUM = "premium", "Premium"
+        CUSTOM = "custom", "Custom"
+
+    name = models.CharField(max_length=100, help_text="Display name")
+    slug = models.CharField(
+        max_length=20,
+        choices=PlanSlug.choices,
+        unique=True,
+        help_text="Internal plan identifier",
+    )
+
+    allowed_feature_count = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Required feature count for this plan: "
+            "0 = none, 3 = exactly 3, None = all, -1 = any (custom)"
+        ),
+    )
+    is_public = models.BooleanField(
+        default=True,
+        help_text="Whether gym owners can self-select this plan",
+    )
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name = "Billing Plan"
+        verbose_name_plural = "Billing Plans"
+
+    def __str__(self):
+        return f"{self.name} (slug={self.slug})"
+
+
+class TenantBillingSubscription(TenantAwareModel):
+    """
+    Tracks a gym tenant's active billing subscription.
+
+    - Links the tenant to a ``BillingPlan`` (tier metadata).
+    - Stores the Stripe Subscription ID created after a successful Checkout.
+    - Uses a M2M to ``BillingFeature`` to record exactly which features the
+      tenant has unlocked and is paying for.
+
+    Lifecycle
+    ---------
+    1. Tenant is created → signal auto-creates a Free subscription (no Stripe).
+    2. Gym owner initiates upgrade → ``CreateCheckoutSessionView`` creates a
+       Stripe Checkout Session and saves a pending record here.
+    3. Stripe fires ``checkout.session.completed`` → webhook handler calls
+       ``FeatureBillingService.fulfill_checkout()`` which:
+         - Updates ``billing_plan``, ``stripe_subscription_id``, ``status``
+         - Populates ``active_features`` M2M with the purchased features.
+    """
+
+    class StatusChoices(models.TextChoices):
+        ACTIVE = "active", "Active"
+        PAST_DUE = "past_due", "Past Due"
+        CANCELED = "canceled", "Canceled"
+        INCOMPLETE = "incomplete", "Incomplete"
+
+    billing_plan = models.ForeignKey(
+        BillingPlan,
+        on_delete=models.PROTECT,
+        related_name="tenant_subscriptions",
+        help_text="The plan tier this subscription belongs to",
+    )
+    active_features = models.ManyToManyField(
+        BillingFeature,
+        blank=True,
+        related_name="subscriptions",
+        help_text="The specific premium features unlocked for this tenant",
+    )
+    stripe_subscription_id = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        unique=True,
+        db_index=True,
+        help_text="Stripe Subscription ID (sub_...) created after payment",
+    )
+    stripe_checkout_session_id = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="Stripe Checkout Session ID (cs_...) used to initiate payment",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=StatusChoices.choices,
+        default=StatusChoices.INCOMPLETE,
+        help_text="Current billing status",
+    )
+    current_period_end = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the current billing period ends (populated by webhook)",
+    )
+
+    class Meta:
+        verbose_name = "Tenant Billing Subscription"
+        verbose_name_plural = "Tenant Billing Subscriptions"
+
+    def __str__(self):
+        plan_name = self.billing_plan.name if self.billing_plan_id else "No Plan"
+        return f"{self.tenant} – {plan_name} ({self.status})"
+
 
 
 class TenantSubscription(TenantAwareModel):
     """
-    Tracks the active subscription plan for a tenant via Stripe.
+    [LEGACY] Original subscription model.  Kept to avoid breaking existing
+    code that references it (admin, serializers, webhook handlers).
+    New code should use ``TenantBillingSubscription`` instead.
     """
+
     class PlanChoices(models.TextChoices):
-        PLAN_A = 'plan_a', 'Plan A (Basic)'
-        PLAN_B = 'plan_b', 'Plan B (Pro)'
-        PLAN_C = 'plan_c', 'Plan C (Enterprise)'
+        PLAN_A = "plan_a", "Plan A (Basic)"
+        PLAN_B = "plan_b", "Plan B (Pro)"
+        PLAN_C = "plan_c", "Plan C (Enterprise)"
 
     class StatusChoices(models.TextChoices):
-        ACTIVE = 'active', 'Active'
-        PAST_DUE = 'past_due', 'Past Due'
-        CANCELED = 'canceled', 'Canceled'
-        INCOMPLETE = 'incomplete', 'Incomplete'
+        ACTIVE = "active", "Active"
+        PAST_DUE = "past_due", "Past Due"
+        CANCELED = "canceled", "Canceled"
+        INCOMPLETE = "incomplete", "Incomplete"
 
-    plan_name = models.CharField(max_length=20, choices=PlanChoices.choices, default=PlanChoices.PLAN_A)
-    stripe_subscription_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
-    status = models.CharField(max_length=20, choices=StatusChoices.choices, default=StatusChoices.INCOMPLETE)
+    plan_name = models.CharField(
+        max_length=20, choices=PlanChoices.choices, default=PlanChoices.PLAN_A
+    )
+    stripe_subscription_id = models.CharField(
+        max_length=100, blank=True, null=True, unique=True
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=StatusChoices.choices,
+        default=StatusChoices.INCOMPLETE,
+    )
     current_period_end = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Tenant Subscription (Legacy)"
+        verbose_name_plural = "Tenant Subscriptions (Legacy)"
 
     def __str__(self):
         return f"{self.tenant} - {self.plan_name} ({self.status})"
@@ -54,44 +244,69 @@ class TenantSubscription(TenantAwareModel):
 
 class FeatureToggle(TenantAwareModel):
     """
-    Tracks a-la-carte features enabled for a tenant.
+    [LEGACY] A-la-carte feature toggle.  Superseded by
+    ``TenantBillingSubscription.active_features`` M2M.  Kept for
+    backwards compatibility.
     """
+
     feature_name = models.CharField(max_length=100)
     is_enabled = models.BooleanField(default=True)
     stripe_price_id = models.CharField(max_length=100, blank=True, null=True)
-    
+
     class Meta:
-        unique_together = ('tenant', 'feature_name')
+        unique_together = ("tenant", "feature_name")
+        verbose_name = "Feature Toggle (Legacy)"
+        verbose_name_plural = "Feature Toggles (Legacy)"
 
     def __str__(self):
         return f"{self.tenant} - {self.feature_name} (Enabled: {self.is_enabled})"
 
 
+
 class PlatformLedger(TenantAwareModel):
     """
-    Central ledger tracking transactions (e.g., client bookings) and calculating the platform cut.
+    Central ledger tracking transactions (e.g., client bookings) and
+    calculating the platform cut.
     """
+
     class TransactionType(models.TextChoices):
-        CHARGE = 'charge', 'Charge'
-        REFUND = 'refund', 'Refund'
+        CHARGE = "charge", "Charge"
+        REFUND = "refund", "Refund"
 
     class StatusChoices(models.TextChoices):
-        PENDING = 'pending', 'Pending Payout'
-        PAID = 'paid', 'Paid Out'
-        FAILED = 'failed', 'Payout Failed'
+        PENDING = "pending", "Pending Payout"
+        PAID = "paid", "Paid Out"
+        FAILED = "failed", "Payout Failed"
 
-    transaction_id = models.CharField(max_length=100, unique=True, help_text="Stripe Charge ID or UUID")
-    amount_gross = models.DecimalField(max_digits=10, decimal_places=2, help_text="Total amount charged to client")
-    platform_fee = models.DecimalField(max_digits=10, decimal_places=2, help_text="Platform's cut")
-    amount_net = models.DecimalField(max_digits=10, decimal_places=2, help_text="Amount owed to tenant")
-    currency = models.CharField(max_length=3, default='usd')
-    
-    type = models.CharField(max_length=10, choices=TransactionType.choices, default=TransactionType.CHARGE)
+    transaction_id = models.CharField(
+        max_length=100, unique=True, help_text="Stripe Charge ID or UUID"
+    )
+    amount_gross = models.DecimalField(
+        max_digits=10, decimal_places=2, help_text="Total amount charged to client"
+    )
+    platform_fee = models.DecimalField(
+        max_digits=10, decimal_places=2, help_text="Platform's cut"
+    )
+    amount_net = models.DecimalField(
+        max_digits=10, decimal_places=2, help_text="Amount owed to tenant"
+    )
+    currency = models.CharField(max_length=3, default="usd")
+    type = models.CharField(
+        max_length=10,
+        choices=TransactionType.choices,
+        default=TransactionType.CHARGE,
+    )
     description = models.TextField(blank=True)
-    status = models.CharField(max_length=20, choices=StatusChoices.choices, default=StatusChoices.PENDING)
-    
-    # Optional link to payout
-    payout = models.ForeignKey('TenantPayout', on_delete=models.SET_NULL, null=True, blank=True, related_name='ledger_entries')
+    status = models.CharField(
+        max_length=20, choices=StatusChoices.choices, default=StatusChoices.PENDING
+    )
+    payout = models.ForeignKey(
+        "TenantPayout",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="ledger_entries",
+    )
 
     def __str__(self):
         return f"{self.type.capitalize()} - {self.amount_gross} {self.currency} ({self.status})"
@@ -101,16 +316,25 @@ class TenantPayout(TenantAwareModel):
     """
     Aggregated payout record for a tenant.
     """
-    class StatusChoices(models.TextChoices):
-        PENDING = 'pending', 'Pending'
-        PROCESSING = 'processing', 'Processing'
-        PAID = 'paid', 'Paid'
-        FAILED = 'failed', 'Failed'
 
-    amount = models.DecimalField(max_digits=10, decimal_places=2, help_text="Total amount transferred to tenant")
-    currency = models.CharField(max_length=3, default='usd')
-    status = models.CharField(max_length=20, choices=StatusChoices.choices, default=StatusChoices.PENDING)
-    stripe_payout_id = models.CharField(max_length=100, blank=True, null=True, unique=True)
-    
+    class StatusChoices(models.TextChoices):
+        PENDING = "pending", "Pending"
+        PROCESSING = "processing", "Processing"
+        PAID = "paid", "Paid"
+        FAILED = "failed", "Failed"
+
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Total amount transferred to tenant",
+    )
+    currency = models.CharField(max_length=3, default="usd")
+    status = models.CharField(
+        max_length=20, choices=StatusChoices.choices, default=StatusChoices.PENDING
+    )
+    stripe_payout_id = models.CharField(
+        max_length=100, blank=True, null=True, unique=True
+    )
+
     def __str__(self):
         return f"Payout - {self.amount} {self.currency} ({self.status})"
