@@ -609,7 +609,7 @@ class DailyProgressAPIView(APIView):
         if not progress:
             return Response({"message": "No progress found for this date."}, status=404)
 
-        goal = NutritionGoal.objects.filter(user=user, created_at__lte=target_date).order_by("-created_at").first()
+        goal = NutritionGoal.objects.filter(user=user, created_at__date__lte=target_date).order_by("-created_at").first()
 
         data = {
             "date": target_date,
