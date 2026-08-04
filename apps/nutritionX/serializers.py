@@ -84,7 +84,7 @@ class BulkNutritionGoalSerializer(serializers.Serializer):
             # Create new goal
             new_goal = NutritionGoal.objects.create(
                 user=user,
-                **{k: v for k, v in goal_data.items() if k != "user"},
+                **{k: v for k, v in goal_data.items() if k not in ["user", "is_active"]},
                 is_active=True
             )
             created_objs.append(new_goal)
