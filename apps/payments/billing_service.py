@@ -260,8 +260,10 @@ class FeatureBillingService:
 
         # 9. Persist a pending subscription record (pre-payment) ----------------
         with transaction.atomic():
-            # Cancel any existing incomplete sessions for this tenant
-            TenantBillingSubscription.objects.filter(
+            # Cancel any existing incomplete sessions for this tenant.
+            # Use all_objects to ensure the delete works even if tenant
+            # middleware context is not yet fully established.
+            TenantBillingSubscription.all_objects.filter(
                 tenant=tenant,
                 status=TenantBillingSubscription.StatusChoices.INCOMPLETE,
             ).delete()
@@ -378,8 +380,12 @@ class FeatureBillingService:
 
         # -- 5. Fetch or create the TenantBillingSubscription ------------------
         #    Prefer the pending record created during checkout initiation.
+        #    IMPORTANT: Must use all_objects (bypass manager) here because the
+        #    webhook handler runs with NO tenant in context — the standard
+        #    `objects` manager would return queryset.none() and never find the
+        #    pending record, silently creating a duplicate instead.
         try:
-            billing_sub = TenantBillingSubscription.objects.select_for_update().get(
+            billing_sub = TenantBillingSubscription.all_objects.select_for_update().get(
                 tenant=tenant,
                 stripe_checkout_session_id=session_id,
             )
@@ -434,7 +440,8 @@ class FeatureBillingService:
         current_period_end_ts = subscription_obj.get("current_period_end")
 
         try:
-            billing_sub = TenantBillingSubscription.objects.get(
+            # Use all_objects: webhook context has no tenant in scope
+            billing_sub = TenantBillingSubscription.all_objects.get(
                 stripe_subscription_id=stripe_sub_id
             )
         except TenantBillingSubscription.DoesNotExist:
@@ -471,7 +478,8 @@ class FeatureBillingService:
         """
         stripe_sub_id = subscription_obj.get("id")
         try:
-            billing_sub = TenantBillingSubscription.objects.get(
+            # Use all_objects: webhook context has no tenant in scope
+            billing_sub = TenantBillingSubscription.all_objects.get(
                 stripe_subscription_id=stripe_sub_id
             )
             billing_sub.status = TenantBillingSubscription.StatusChoices.CANCELED
