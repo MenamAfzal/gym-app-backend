@@ -11,13 +11,16 @@ from .models import (
 @admin.register(Tenant)
 class TenantAdmin(admin.ModelAdmin):
     """Admin for Tenant model."""
-    list_display = ['name', 'subdomain', 'is_active', 'created_at']
+    list_display = ['name', 'subdomain', 'is_active', 'stripe_customer_id', 'stripe_account_id', 'created_at']
     list_filter = ['is_active', 'created_at']
-    search_fields = ['name', 'subdomain']
+    search_fields = ['name', 'subdomain', 'stripe_customer_id', 'stripe_account_id']
     readonly_fields = ['id', 'created_at', 'updated_at']
     fieldsets = (
         ('Basic Information', {
             'fields': ('name', 'subdomain', 'is_active')
+        }),
+        ('Stripe Billing', {
+            'fields': ('stripe_customer_id', 'stripe_account_id')
         }),
         ('Branding', {
             'fields': ('branding',),
