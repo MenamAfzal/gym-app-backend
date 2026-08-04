@@ -12,19 +12,11 @@ from .models import (
 
 
 class TenantAdminMixin:
-    """
-    Mixin to allow Superusers to see all records across tenants in Django Admin.
-    """
-
     def get_queryset(self, request):
         if request.user.is_superuser:
             return self.model.all_objects.all()
         return super().get_queryset(request)
 
-
-# ---------------------------------------------------------------------------
-# Platform / legacy model admins (unchanged)
-# ---------------------------------------------------------------------------
 
 @admin.register(PlatformSettings)
 class PlatformSettingsAdmin(admin.ModelAdmin):
@@ -59,16 +51,8 @@ class TenantPayoutAdmin(TenantAdminMixin, admin.ModelAdmin):
     search_fields = ('stripe_payout_id', 'tenant__name')
 
 
-# ---------------------------------------------------------------------------
-# Feature-based billing model admins
-# ---------------------------------------------------------------------------
-
 @admin.register(BillingFeature)
 class BillingFeatureAdmin(admin.ModelAdmin):
-    """
-    Admin for the 5 premium features.  Shows stripe_price_id for
-    platform admins who need to verify the Stripe configuration.
-    """
     list_display = ('name', 'code', 'stripe_price_id', 'is_active', 'created_at')
     list_filter = ('is_active',)
     search_fields = ('name', 'code', 'stripe_price_id')
@@ -79,10 +63,6 @@ class BillingFeatureAdmin(admin.ModelAdmin):
         }),
         ('Stripe Configuration', {
             'fields': ('stripe_price_id',),
-            'description': (
-                'Enter the Stripe Price ID (price_...) for this feature. '
-                'This must match a recurring Price object in your Stripe dashboard.'
-            ),
         }),
         ('Metadata', {
             'fields': ('id', 'created_at', 'updated_at'),
@@ -93,9 +73,6 @@ class BillingFeatureAdmin(admin.ModelAdmin):
 
 @admin.register(BillingPlan)
 class BillingPlanAdmin(admin.ModelAdmin):
-    """
-    Admin for the 4 plan tiers.
-    """
     list_display = ('name', 'slug', 'allowed_feature_count', 'is_public', 'created_at')
     list_filter = ('slug', 'is_public')
     search_fields = ('name', 'slug')
@@ -106,10 +83,6 @@ class BillingPlanAdmin(admin.ModelAdmin):
         }),
         ('Feature Constraints', {
             'fields': ('allowed_feature_count',),
-            'description': (
-                'Controls how many features a tenant must select for this plan. '
-                'Values: 0=none (Free), 3=exactly 3 (Basic), None=all (Premium), -1=any (Custom).'
-            ),
         }),
         ('Metadata', {
             'fields': ('id', 'created_at', 'updated_at'),
@@ -119,9 +92,6 @@ class BillingPlanAdmin(admin.ModelAdmin):
 
 
 class ActiveFeaturesInline(admin.TabularInline):
-    """
-    Inline for managing the M2M active features on a subscription.
-    """
     model = TenantBillingSubscription.active_features.through
     extra = 0
     verbose_name = 'Unlocked Feature'
@@ -130,10 +100,6 @@ class ActiveFeaturesInline(admin.TabularInline):
 
 @admin.register(TenantBillingSubscription)
 class TenantBillingSubscriptionAdmin(TenantAdminMixin, admin.ModelAdmin):
-    """
-    Admin for the primary billing subscription model.
-    Shows all key fields including the M2M feature breakdown.
-    """
     list_display = (
         'tenant',
         'billing_plan',
@@ -152,9 +118,10 @@ class TenantBillingSubscriptionAdmin(TenantAdminMixin, admin.ModelAdmin):
         'updated_at',
     )
     inlines = [ActiveFeaturesInline]
+    filter_horizontal = ('active_features',)
     fieldsets = (
         ('Subscription Details', {
-            'fields': ('tenant', 'billing_plan', 'status', 'current_period_end'),
+            'fields': ('tenant', 'billing_plan', 'status', 'active_features', 'current_period_end'),
         }),
         ('Stripe IDs', {
             'fields': ('stripe_subscription_id', 'stripe_checkout_session_id'),
@@ -164,4 +131,6 @@ class TenantBillingSubscriptionAdmin(TenantAdminMixin, admin.ModelAdmin):
             'classes': ('collapse',),
         }),
     )
+
+
 

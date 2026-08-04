@@ -3,12 +3,7 @@ from django.core.validators import MinValueValidator, MaxValueValidator
 from core_models.base_models import BaseModel, TenantAwareModel
 
 
-
 class PlatformSettings(BaseModel):
-    """
-    Global settings for the platform admin.
-    Usually only one instance of this model should exist.
-    """
     platform_fee_percentage = models.DecimalField(
         max_digits=5,
         decimal_places=2,
@@ -25,27 +20,11 @@ class PlatformSettings(BaseModel):
 
     @classmethod
     def get_settings(cls):
-        """Helper to get the singleton instance or create default."""
         settings, _ = cls.objects.get_or_create(id=1)
         return settings
 
 
-
 class BillingFeature(BaseModel):
-    """
-    Represents one of the 5 purchasable premium features on the platform.
-
-    Each BillingFeature maps 1-to-1 with a Stripe Product/Price.  The
-    ``stripe_price_id`` is used to construct Checkout Session line_items.
-
-    Examples:
-        - Advanced Analytics   (code: advanced_analytics,  price_id: price_xxx)
-        - Custom Branding       (code: custom_branding,     price_id: price_yyy)
-        - Nutrition Module      (code: nutrition_module,    price_id: price_zzz)
-        - AI Scheduling         (code: ai_scheduling,       price_id: price_aaa)
-        - Multi-Location        (code: multi_location,      price_id: price_bbb)
-    """
-
     name = models.CharField(
         max_length=150,
         help_text="Human-readable feature name shown to gym owners",
@@ -78,20 +57,6 @@ class BillingFeature(BaseModel):
 
 
 class BillingPlan(BaseModel):
-    """
-    Defines the four subscription tiers and their feature-selection constraints.
-
-    Billing is 100% feature-driven; a BillingPlan only holds constraint metadata
-    and is NOT a Stripe entity itself.
-
-    Plan rules
-    ----------
-    free     – 0 features, no Stripe checkout required.
-    basic    – exactly 3 features selected from the 5 available.
-    premium  – all 5 features auto-included (no selection needed).
-    custom   – any number of features chosen freely by the gym owner.
-    """
-
     class PlanSlug(models.TextChoices):
         FREE = "free", "Free"
         BASIC = "basic", "Basic"
@@ -105,7 +70,6 @@ class BillingPlan(BaseModel):
         unique=True,
         help_text="Internal plan identifier",
     )
-
     allowed_feature_count = models.IntegerField(
         null=True,
         blank=True,
@@ -129,25 +93,6 @@ class BillingPlan(BaseModel):
 
 
 class TenantBillingSubscription(TenantAwareModel):
-    """
-    Tracks a gym tenant's active billing subscription.
-
-    - Links the tenant to a ``BillingPlan`` (tier metadata).
-    - Stores the Stripe Subscription ID created after a successful Checkout.
-    - Uses a M2M to ``BillingFeature`` to record exactly which features the
-      tenant has unlocked and is paying for.
-
-    Lifecycle
-    ---------
-    1. Tenant is created → signal auto-creates a Free subscription (no Stripe).
-    2. Gym owner initiates upgrade → ``CreateCheckoutSessionView`` creates a
-       Stripe Checkout Session and saves a pending record here.
-    3. Stripe fires ``checkout.session.completed`` → webhook handler calls
-       ``FeatureBillingService.fulfill_checkout()`` which:
-         - Updates ``billing_plan``, ``stripe_subscription_id``, ``status``
-         - Populates ``active_features`` M2M with the purchased features.
-    """
-
     class StatusChoices(models.TextChoices):
         ACTIVE = "active", "Active"
         PAST_DUE = "past_due", "Past Due"
@@ -202,14 +147,7 @@ class TenantBillingSubscription(TenantAwareModel):
         return f"{self.tenant} – {plan_name} ({self.status})"
 
 
-
 class TenantSubscription(TenantAwareModel):
-    """
-    [LEGACY] Original subscription model.  Kept to avoid breaking existing
-    code that references it (admin, serializers, webhook handlers).
-    New code should use ``TenantBillingSubscription`` instead.
-    """
-
     class PlanChoices(models.TextChoices):
         PLAN_A = "plan_a", "Plan A (Basic)"
         PLAN_B = "plan_b", "Plan B (Pro)"
@@ -243,12 +181,6 @@ class TenantSubscription(TenantAwareModel):
 
 
 class FeatureToggle(TenantAwareModel):
-    """
-    [LEGACY] A-la-carte feature toggle.  Superseded by
-    ``TenantBillingSubscription.active_features`` M2M.  Kept for
-    backwards compatibility.
-    """
-
     feature_name = models.CharField(max_length=100)
     is_enabled = models.BooleanField(default=True)
     stripe_price_id = models.CharField(max_length=100, blank=True, null=True)
@@ -262,13 +194,7 @@ class FeatureToggle(TenantAwareModel):
         return f"{self.tenant} - {self.feature_name} (Enabled: {self.is_enabled})"
 
 
-
 class PlatformLedger(TenantAwareModel):
-    """
-    Central ledger tracking transactions (e.g., client bookings) and
-    calculating the platform cut.
-    """
-
     class TransactionType(models.TextChoices):
         CHARGE = "charge", "Charge"
         REFUND = "refund", "Refund"
@@ -313,10 +239,6 @@ class PlatformLedger(TenantAwareModel):
 
 
 class TenantPayout(TenantAwareModel):
-    """
-    Aggregated payout record for a tenant.
-    """
-
     class StatusChoices(models.TextChoices):
         PENDING = "pending", "Pending"
         PROCESSING = "processing", "Processing"
@@ -338,3 +260,4 @@ class TenantPayout(TenantAwareModel):
 
     def __str__(self):
         return f"Payout - {self.amount} {self.currency} ({self.status})"
+

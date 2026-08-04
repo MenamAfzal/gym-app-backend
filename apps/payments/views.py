@@ -227,18 +227,7 @@ def _handle_invoice_payment_succeeded(invoice_obj):
     logger.info(f"Invoice {invoice_id} paid for amount {amount_paid}")
 
 
-# =============================================================================
-# Feature-Based Billing Views
-# =============================================================================
-
 class BillingFeatureListView(APIView):
-    """
-    GET /api/v1/payments/billing/features/
-
-    Returns all active premium features available for purchase.
-    Used by the frontend to populate the plan-selection dropdown / checklist.
-    stripe_price_id is intentionally excluded from the response.
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -248,12 +237,6 @@ class BillingFeatureListView(APIView):
 
 
 class BillingPlanListView(APIView):
-    """
-    GET /api/v1/payments/billing/plans/
-
-    Returns all publicly available plan tiers and their feature constraints.
-    Used by the frontend to render the pricing/upgrade UI.
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -263,12 +246,6 @@ class BillingPlanListView(APIView):
 
 
 class TenantBillingSubscriptionView(APIView):
-    """
-    GET /api/v1/payments/billing/subscription/
-
-    Returns the current active TenantBillingSubscription for the requesting
-    gym owner's tenant, including the unlocked features.
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
@@ -280,17 +257,12 @@ class TenantBillingSubscriptionView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Fetch most recent active sub; fall back to any latest sub
         billing_sub = (
             TenantBillingSubscription.objects
             .filter(tenant=tenant)
             .select_related('billing_plan')
             .prefetch_related('active_features')
-            .order_by(
-                # Active first, then by recency
-                '-status',
-                '-created_at',
-            )
+            .order_by('-status', '-created_at')
             .first()
         )
 
@@ -305,37 +277,11 @@ class TenantBillingSubscriptionView(APIView):
 
 
 class CreateCheckoutSessionView(APIView):
-    """
-    POST /api/v1/payments/billing/checkout/
-
-    Initiates a Stripe Checkout Session for a feature-based subscription upgrade.
-
-    Request body
-    ------------
-    {
-        "plan": "basic" | "premium" | "custom",
-        "feature_ids": ["<uuid>", "<uuid>", ...]   // required for basic/custom
-    }
-
-    Response (200)
-    --------------
-    {
-        "checkout_url": "https://checkout.stripe.com/pay/cs_...",
-        "session_id": "cs_..."
-    }
-
-    Errors
-    ------
-    400  – Validation failure (wrong feature count, unknown plan, etc.)
-    403  – Caller is not a Gym Owner
-    502  – Stripe API error
-    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         user = request.user
 
-        # Only Gym Owners may initiate a checkout
         if user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
             return Response(
                 {"error": "Only Gym Owners can initiate a subscription checkout."},
@@ -349,7 +295,6 @@ class CreateCheckoutSessionView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Validate request body ---------------------------------------------------
         serializer = CheckoutRequestSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -357,7 +302,6 @@ class CreateCheckoutSessionView(APIView):
         plan_slug = serializer.validated_data['plan']
         feature_ids = serializer.validated_data['feature_ids']
 
-        # Delegate to service layer -----------------------------------------------
         try:
             result = FeatureBillingService.create_checkout_session(
                 tenant=tenant,
@@ -395,35 +339,19 @@ class CreateCheckoutSessionView(APIView):
 @csrf_exempt
 @require_POST
 def stripe_checkout_webhook(request):
-    """
-    POST /api/v1/payments/webhook/stripe/checkout/
-
-    Dedicated webhook endpoint for ``checkout.session.completed`` events.
-    Verifies the Stripe-Signature header and delegates to
-    ``FeatureBillingService.fulfill_checkout()`` to upgrade the tenant's
-    subscription atomically.
-
-    Security
-    --------
-    - Signature verification is enforced in production (STRIPE_WEBHOOK_SECRET
-      must be set to a real whsec_ value).
-    - In development, if STRIPE_WEBHOOK_SECRET == 'whsec_mock', signature
-      verification is skipped so you can use the Stripe CLI / test events.
-    """
     payload = request.body
     sig_header = request.META.get('HTTP_STRIPE_SIGNATURE')
     event = None
 
     try:
         if stripe_webhook_secret == 'whsec_mock':
-            # Development / test mode: skip signature verification
             event = json.loads(payload)
         else:
             event = stripe.Webhook.construct_event(
                 payload, sig_header, stripe_webhook_secret
             )
     except ValueError:
-        logger.error("Checkout webhook: invalid payload (not valid JSON).")
+        logger.error("Checkout webhook: invalid payload.")
         return HttpResponse(status=400)
     except stripe.error.SignatureVerificationError:
         logger.error("Checkout webhook: invalid Stripe signature.")
@@ -450,12 +378,9 @@ def stripe_checkout_webhook(request):
                 billing_sub.tenant_id,
             )
         except ValueError as exc:
-            # Metadata / DB lookup errors -- log and return 200 to prevent Stripe
-            # from retrying (the error is non-recoverable without data fix).
             logger.error("Checkout fulfillment error: %s", str(exc))
         except Exception as exc:
             logger.exception("Unexpected error fulfilling checkout: %s", exc)
-            # Return 500 so Stripe retries (transient DB / network error)
             return HttpResponse(status=500)
     else:
         logger.info("Checkout webhook: unhandled event type '%s'", event_type)
