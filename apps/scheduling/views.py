@@ -409,9 +409,8 @@ class BookingViewSet(viewsets.ModelViewSet):
                 pkg.credits_remaining += 1
                 pkg.save()
         else:
-            # Late cancellation: Forfeit credit or charge fee (represented by recording late status)
-            booking.status = 'no_show'
-            booking.save()
+            # Late cancellation: Forfeit credit (we keep the booking status as 'cancelled' but do not refund package credit)
+            pass
 
         # Trigger WaitlistPromotionJob
         from .tasks import process_waitlist_promotion_job
