@@ -48,7 +48,7 @@ for s in sessions:
 # 5. Simulate ViewSet get_queryset
 qs = ClassSession.objects.select_related('template', 'room', 'staff')
 if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
-    qs = qs.filter(template__location__stafflocation__staff=user).distinct()
+    qs = qs.filter(template__location__location_staff__staff=user).distinct()
 
 print(f"Simulated get_queryset count: {qs.count()}")
 for s in qs:
