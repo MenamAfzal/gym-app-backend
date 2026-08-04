@@ -265,9 +265,14 @@ class FeatureBillingService:
 
     @classmethod
     def handle_subscription_updated(cls, subscription_obj: dict) -> None:
-        stripe_sub_id = subscription_obj.get("id")
-        raw_status = subscription_obj.get("status")
-        current_period_end_ts = subscription_obj.get("current_period_end")
+        def _get(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        stripe_sub_id = _get(subscription_obj, "id")
+        raw_status = _get(subscription_obj, "status")
+        current_period_end_ts = _get(subscription_obj, "current_period_end")
 
         try:
             billing_sub = TenantBillingSubscription.all_objects.get(
@@ -300,7 +305,12 @@ class FeatureBillingService:
 
     @classmethod
     def handle_subscription_deleted(cls, subscription_obj: dict) -> None:
-        stripe_sub_id = subscription_obj.get("id")
+        def _get(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        stripe_sub_id = _get(subscription_obj, "id")
         try:
             billing_sub = TenantBillingSubscription.all_objects.get(
                 stripe_subscription_id=stripe_sub_id

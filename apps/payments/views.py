@@ -202,8 +202,13 @@ def stripe_webhook(request):
     return HttpResponse(status=200)
 
 def _handle_subscription_updated(subscription_obj):
-    stripe_sub_id = subscription_obj.get('id')
-    status = subscription_obj.get('status')
+    def _get(obj, key, default=None):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    stripe_sub_id = _get(subscription_obj, 'id')
+    status = _get(subscription_obj, 'status')
     # Optional logic to update local TenantSubscription
     try:
         sub = TenantSubscription.objects.get(stripe_subscription_id=stripe_sub_id)
@@ -214,7 +219,12 @@ def _handle_subscription_updated(subscription_obj):
         logger.warning(f"Subscription {stripe_sub_id} not found in local DB.")
 
 def _handle_subscription_deleted(subscription_obj):
-    stripe_sub_id = subscription_obj.get('id')
+    def _get(obj, key, default=None):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    stripe_sub_id = _get(subscription_obj, 'id')
     try:
         sub = TenantSubscription.objects.get(stripe_subscription_id=stripe_sub_id)
         sub.status = TenantSubscription.StatusChoices.CANCELED
@@ -225,8 +235,13 @@ def _handle_subscription_deleted(subscription_obj):
 
 def _handle_invoice_payment_succeeded(invoice_obj):
     # Depending on the billing architecture, you might record this as a ledger charge.
-    invoice_id = invoice_obj.get('id')
-    amount_paid = invoice_obj.get('amount_paid', 0)
+    def _get(obj, key, default=None):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    invoice_id = _get(invoice_obj, 'id')
+    amount_paid = _get(invoice_obj, 'amount_paid', 0)
     logger.info(f"Invoice {invoice_id} paid for amount {amount_paid}")
 
 
