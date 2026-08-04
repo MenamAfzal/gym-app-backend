@@ -178,9 +178,12 @@ def stripe_webhook(request):
         logger.error(f"Webhook processing error: {str(e)}")
         return HttpResponse(status=400)
 
-    # Handle the event
-    event_type = event.get('type')
-    data_object = event.get('data', {}).get('object', {})
+    if isinstance(event, dict):
+        event_type = event.get('type')
+        data_object = event.get('data', {}).get('object', {})
+    else:
+        event_type = event.type
+        data_object = event.data.object
 
     logger.info(f"Received Stripe webhook event: {event_type}")
 
@@ -360,12 +363,12 @@ def stripe_checkout_webhook(request):
         logger.exception("Checkout webhook: unexpected parse error: %s", exc)
         return HttpResponse(status=400)
 
-    event_type = event.get('type') if isinstance(event, dict) else event.get('type')
-    data_object = (
-        event.get('data', {}).get('object', {})
-        if isinstance(event, dict)
-        else event['data']['object']
-    )
+    if isinstance(event, dict):
+        event_type = event.get('type')
+        data_object = event.get('data', {}).get('object', {})
+    else:
+        event_type = event.type
+        data_object = event.data.object
 
     logger.info("Checkout webhook received event: %s", event_type)
 
