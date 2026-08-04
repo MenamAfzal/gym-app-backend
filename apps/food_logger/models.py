@@ -76,6 +76,7 @@ class UserNutritionGoal(models.Model):
     daily_protein = models.FloatField(default=0, null=True, blank=True)
     daily_carbs = models.FloatField(default=0, null=True, blank=True)
     daily_fat = models.FloatField(default=0, null=True, blank=True)
+    daily_water = models.FloatField(default=0, null=True, blank=True, help_text="Daily water goal in ml")
     date = models.DateField(default=timezone.localdate)
     base_goal = models.FloatField(default=0, null=True, blank=True)
 

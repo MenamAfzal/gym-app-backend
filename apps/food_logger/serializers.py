@@ -32,12 +32,13 @@ class NutritionXGoalSerializer(serializers.ModelSerializer):
     protein_goal_g = serializers.FloatField(source='daily_protein', read_only=True)
     carbs_goal_g = serializers.FloatField(source='daily_carbs', read_only=True)
     fat_goal_g = serializers.FloatField(source='daily_fat', read_only=True)
+    water_goal_ml = serializers.FloatField(source='daily_water', read_only=True)
 
     class Meta:
         model = UserNutritionGoal
         fields = [
             'id', 'user', 'calories_goal_kcal', 'protein_goal_g', 
-            'carbs_goal_g', 'fat_goal_g', 'date', 'base_goal'
+            'carbs_goal_g', 'fat_goal_g', 'water_goal_ml', 'date', 'base_goal'
         ]
 
 class NutritionGoalSerializer(serializers.ModelSerializer):
@@ -46,12 +47,13 @@ class NutritionGoalSerializer(serializers.ModelSerializer):
     protein_goal_g = serializers.FloatField(source='daily_protein', required=False, allow_null=True)
     carbs_goal_g = serializers.FloatField(source='daily_carbs', required=False, allow_null=True)
     fat_goal_g = serializers.FloatField(source='daily_fat', required=False, allow_null=True)
+    water_goal_ml = serializers.FloatField(source='daily_water', required=False, allow_null=True)
 
     class Meta:
         model = UserNutritionGoal
         fields = [
             'id', 'user', 'calories_goal_kcal', 'protein_goal_g', 
-            'carbs_goal_g', 'fat_goal_g', 'date', 'base_goal'
+            'carbs_goal_g', 'fat_goal_g', 'water_goal_ml', 'date', 'base_goal'
         ]
 
 class BulkNutritionGoalSerializer(serializers.Serializer):
