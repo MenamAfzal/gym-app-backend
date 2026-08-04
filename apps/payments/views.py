@@ -108,6 +108,31 @@ class StripeConnectOnboardingView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+class TriggerPayoutView(APIView):
+    """
+    Endpoint for Platform Admins to manually trigger the payout aggregation job.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        
+        # Only allow Platform Admins to trigger payouts
+        if user.role != UserRole.PLATFORM_ADMIN:
+            return Response({"error": "Only Platform Admins can trigger payouts."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            from .tasks import process_scheduled_payouts
+            payouts_created = process_scheduled_payouts()
+            return Response({
+                "detail": f"Payout process triggered successfully. Created {payouts_created} payouts."
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Error triggering payouts manually: {str(e)}")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
 @csrf_exempt
 @require_POST
 def stripe_webhook(request):
