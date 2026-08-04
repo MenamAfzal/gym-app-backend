@@ -36,6 +36,7 @@ urlpatterns = [
     path('api/v1/support/', include('apps.support.urls')),
     path('api/v1/inventory/', include('apps.inventory.urls')),
     path("api/v1/socialnetwork/", include("apps.socialnetwork.urls")),
+    path('api/v1/payments/', include('apps.payments.urls')),
 ]
 
 if settings.DEBUG:

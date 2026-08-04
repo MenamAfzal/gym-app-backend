@@ -274,22 +274,15 @@ class Payment(UUIDMixin, TimestampMixin, TenantMixin):
         is_new = self._state.adding
         super().save(*args, **kwargs)
         
-        # Automatically generate PlatformLedger on successful payment
+        # Automatically generate PlatformLedger on successful payment using LedgerService
         if self.status == 'completed' and not hasattr(self, 'ledger_entry'):
-            from django.conf import settings
-            import decimal
-            
-            fee_percentage = decimal.Decimal(getattr(settings, 'PLATFORM_FEE_PERCENTAGE', 10.0))
-            amount_decimal = decimal.Decimal(str(self.amount))
-            platform_fee = (amount_decimal * fee_percentage) / decimal.Decimal(100.0)
-            net_payout = amount_decimal - platform_fee
-            
-            PlatformLedger.objects.create(
+            from apps.payments.services import LedgerService
+            LedgerService.record_transaction(
                 tenant=self.tenant,
-                payment=self,
-                gross_amount=amount_decimal,
-                platform_fee=platform_fee,
-                net_payout_amount=net_payout
+                amount_gross=self.amount,
+                transaction_id=str(self.id),
+                payment_instance=self,
+                description=f"Payment for {self.type}"
             )
 
     def __str__(self):
@@ -372,26 +365,3 @@ class FacilityAccessLog(UUIDMixin, TimestampMixin, TenantMixin):
     def __str__(self):
         return f"{self.client.email} at {self.location.name} (In: {self.checked_in_at})"
 
-class PayoutRun(UUIDMixin, TimestampMixin, TenantMixin):
-    """
-    A batch of payouts transferred to the gym owner's bank account.
-    """
-    status = models.CharField(max_length=50, default='pending')
-    total_amount = models.DecimalField(max_digits=10, decimal_places=2)
-    stripe_payout_id = models.CharField(max_length=255, blank=True, null=True)
-
-    def __str__(self):
-        return f"Payout {self.id} for {self.total_amount} ({self.status})"
-
-class PlatformLedger(UUIDMixin, TimestampMixin, TenantMixin):
-    """
-    Splits the gross revenue of a transaction into the platform fee and net payout.
-    """
-    payment = models.OneToOneField('Payment', on_delete=models.CASCADE, related_name='ledger_entry')
-    gross_amount = models.DecimalField(max_digits=10, decimal_places=2)
-    platform_fee = models.DecimalField(max_digits=10, decimal_places=2)
-    net_payout_amount = models.DecimalField(max_digits=10, decimal_places=2)
-    payout_run = models.ForeignKey(PayoutRun, on_delete=models.SET_NULL, null=True, blank=True, related_name='ledger_entries')
-
-    def __str__(self):
-        return f"Ledger for {self.payment.id} (Net: {self.net_payout_amount})"

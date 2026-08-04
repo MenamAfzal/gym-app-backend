@@ -39,7 +39,14 @@ class Tenant(UUIDMixin, TimestampMixin):
         db_index=True,
         help_text="Stripe Customer ID (cus_...)"
     )
-    
+    stripe_account_id = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        db_index=True,
+        help_text="Stripe Connect Account ID (acct_...)"
+    )
+
     referred_by = models.ForeignKey(
         'self', 
         on_delete=models.SET_NULL, 

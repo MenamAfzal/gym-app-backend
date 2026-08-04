@@ -7,7 +7,7 @@ from .models import (
     Location, Room, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
-    Notification, StaffClientAssignment, FacilityAccessLog, PayoutRun, PlatformLedger
+    Notification, StaffClientAssignment, FacilityAccessLog
 )
 from apps.users.models import User
 
@@ -370,14 +370,4 @@ class FacilityAccessLogSerializer(serializers.ModelSerializer):
         fields = ['id', 'client', 'client_email', 'location', 'location_name', 'checked_in_at', 'checked_out_at']
         read_only_fields = ['id', 'checked_in_at', 'checked_out_at']
 
-class PayoutRunSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = PayoutRun
-        fields = ['id', 'status', 'total_amount', 'stripe_payout_id', 'created_at']
-        read_only_fields = ['id', 'created_at']
-
-class PlatformLedgerSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = PlatformLedger
-        fields = ['id', 'payment', 'gross_amount', 'platform_fee', 'net_payout_amount', 'payout_run', 'created_at']
-        read_only_fields = ['id', 'created_at']
+        read_only_fields = ['id', 'checked_in_at', 'checked_out_at']

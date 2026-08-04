@@ -33,9 +33,14 @@ LOCAL_APPS = [
     'apps.support',
     'apps.inventory',
     'apps.socialnetwork',
+    'apps.payments',
 ]
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
+# Stripe Configuration
+STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY', 'sk_test_mock')
+STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET', 'whsec_mock')
+STRIPE_PUBLIC_KEY = os.environ.get('STRIPE_PUBLIC_KEY', 'pk_test_mock')
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
