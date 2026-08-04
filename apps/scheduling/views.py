@@ -56,7 +56,7 @@ class LocationViewSet(viewsets.ModelViewSet):
         qs = Location.objects.all()
         user = self.request.user
         if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
-            qs = qs.filter(stafflocation__staff=user).distinct()
+            qs = qs.filter(location_staff__staff=user).distinct()
         return qs
 
 
@@ -76,7 +76,7 @@ class RoomViewSet(viewsets.ModelViewSet):
         
         # Staff location segregation
         if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
-            qs = qs.filter(location__stafflocation__staff=user).distinct()
+            qs = qs.filter(location__location_staff__staff=user).distinct()
             
         location_id = self.request.query_params.get('location')
         if location_id:
@@ -202,7 +202,7 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         
         # Staff location segregation
         if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
-            qs = qs.filter(template__location__stafflocation__staff=user).distinct()
+            qs = qs.filter(template__location__location_staff__staff=user).distinct()
             
         params = self.request.query_params
         
@@ -293,9 +293,9 @@ class BookingViewSet(viewsets.ModelViewSet):
         if user.role == UserRole.CLIENT:
             qs = qs.filter(client=user)
         elif user.role in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
-            qs = qs.filter(session__template__location__stafflocation__staff=user).distinct()
+            qs = qs.filter(session__template__location__location_staff__staff=user).distinct()
         elif user.role == UserRole.TRAINER:
-            qs = qs.filter(Q(session__staff=user) | Q(session__template__location__stafflocation__staff=user)).distinct()
+            qs = qs.filter(Q(session__staff=user) | Q(session__template__location__location_staff__staff=user)).distinct()
         
         client_id = self.request.query_params.get('client')
         if client_id:
@@ -505,9 +505,9 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if user.role == UserRole.CLIENT:
             qs = qs.filter(client=user)
         elif user.role in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
-            qs = qs.filter(location__stafflocation__staff=user).distinct()
+            qs = qs.filter(location__location_staff__staff=user).distinct()
         elif user.role == UserRole.TRAINER:
-            qs = qs.filter(Q(provider=user) | Q(location__stafflocation__staff=user)).distinct()
+            qs = qs.filter(Q(provider=user) | Q(location__location_staff__staff=user)).distinct()
         
         client_id = self.request.query_params.get('client')
         if client_id:
@@ -949,7 +949,7 @@ class FacilityAccessViewSet(viewsets.ModelViewSet):
         qs = self.queryset.select_related('client', 'location')
         user = self.request.user
         if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
-            qs = qs.filter(location__stafflocation__staff=user).distinct()
+            qs = qs.filter(location__location_staff__staff=user).distinct()
         return qs
 
     @action(detail=True, methods=['post'])
