@@ -248,6 +248,18 @@ class FeatureBillingService:
         billing_sub.billing_plan = billing_plan
         billing_sub.stripe_subscription_id = stripe_subscription_id
         billing_sub.status = TenantBillingSubscription.StatusChoices.ACTIVE
+
+        if stripe_subscription_id:
+            try:
+                sub_obj = stripe.Subscription.retrieve(stripe_subscription_id)
+                current_period_end_ts = getattr(sub_obj, "current_period_end", None)
+                if current_period_end_ts:
+                    billing_sub.current_period_end = timezone.datetime.fromtimestamp(
+                        current_period_end_ts, tz=timezone.utc
+                    )
+            except Exception as e:
+                logger.error("Failed to retrieve subscription %s: %s", stripe_subscription_id, e)
+
         billing_sub.save()
         billing_sub.active_features.set(features)
 
