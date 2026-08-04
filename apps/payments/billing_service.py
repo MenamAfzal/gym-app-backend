@@ -176,14 +176,19 @@ class FeatureBillingService:
     @classmethod
     @transaction.atomic
     def fulfill_checkout(cls, session_obj: dict) -> TenantBillingSubscription:
-        metadata = session_obj.get("metadata", {})
-        session_id = session_obj.get("id", "")
-        stripe_subscription_id = session_obj.get("subscription")
-        stripe_customer_id = session_obj.get("customer")
+        def _get(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+            
+        metadata = _get(session_obj, "metadata", {})
+        session_id = _get(session_obj, "id", "")
+        stripe_subscription_id = _get(session_obj, "subscription")
+        stripe_customer_id = _get(session_obj, "customer")
 
-        tenant_id = metadata.get("tenant_id")
-        plan_slug = metadata.get("plan_slug")
-        feature_ids_raw = metadata.get("feature_ids", "")
+        tenant_id = _get(metadata, "tenant_id")
+        plan_slug = _get(metadata, "plan_slug")
+        feature_ids_raw = _get(metadata, "feature_ids", "")
 
         if not tenant_id or not plan_slug:
             raise ValueError(
