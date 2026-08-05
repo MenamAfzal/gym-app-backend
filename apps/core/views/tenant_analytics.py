@@ -40,11 +40,11 @@ class TenantAnalyticsPagination(PageNumberPagination):
 class TenantAnalyticsFilter(FilterSet):
     is_active = BooleanFilter(field_name='is_active')
     billing_plan = CharFilter(
-        field_name='billing_subscriptions__billing_plan__slug',
+        field_name='tenantbillingsubscriptions__billing_plan__slug',
         lookup_expr='iexact'
     )
     billing_status = CharFilter(
-        field_name='billing_subscriptions__status',
+        field_name='tenantbillingsubscriptions__status',
         lookup_expr='iexact'
     )
 
@@ -121,11 +121,11 @@ class TenantAnalyticsSerializer(serializers.Serializer):
     def _active_billing_sub(self, obj):
         """
         Returns the first billing subscription prefetched on the tenant.
-        Avoids extra DB hits because the queryset prefetches billing_subscriptions.
+        Avoids extra DB hits because the queryset prefetches tenantbillingsubscriptions.
         """
         subs = getattr(obj, '_prefetched_billing_subs', None)
         if subs is None:
-            subs = list(obj.billing_subscriptions.all())
+            subs = list(obj.tenantbillingsubscriptions.all())
             obj._prefetched_billing_subs = subs
         return subs[0] if subs else None
 
@@ -225,7 +225,7 @@ def _build_analytics_queryset():
     ).select_related(
         'referred_by',
     ).prefetch_related(
-        'billing_subscriptions__billing_plan',
+        'tenantbillingsubscriptions__billing_plan',
     ).order_by('-created_at')
 
     return qs
