@@ -1,11 +1,17 @@
 from django.core.management.base import BaseCommand
+from apps.core.tenants.models import Tenant
 from apps.reflection_logger.models import SymptomCategory, SymptomTag
 
 class Command(BaseCommand):
-    help = 'Seeds initial symptom categories and tags based on the provided UI designs'
+    help = 'Seeds initial symptom categories and tags based on the provided UI designs for all tenants'
 
     def handle(self, *args, **options):
         self.stdout.write("Seeding Symptom Data...")
+
+        tenants = Tenant.objects.all()
+        if not tenants.exists():
+            self.stdout.write(self.style.WARNING("No tenants found in the database. Please create a tenant first."))
+            return
 
         # 1. Define the Data Structure
         # Format: "Category Name": (Order, [List of Tags])
@@ -97,31 +103,33 @@ class Command(BaseCommand):
             ])
         }
 
-        # 2. Iterate and Create
-        for cat_name, (order, tags) in data.items():
-            # Create Category
-            category, created = SymptomCategory.objects.get_or_create(
-                name=cat_name,
-                defaults={'order': order, 'is_active': True}
-            )
-            
-            if created:
-                self.stdout.write(self.style.SUCCESS(f"Created Category: {cat_name}"))
-            else:
-                self.stdout.write(f"Category already exists: {cat_name}")
-
-            # Create Tags for this Category
-            for tag_name in tags:
-                # We use user=None to indicate these are SYSTEM (Global) tags
-                tag, tag_created = SymptomTag.objects.get_or_create(
-                    category=category,
-                    name=tag_name,
-                    user=None,  # Explicitly set to None for global tags
-                    defaults={'is_active': True}
+        # 2. Iterate and Create for each tenant
+        for tenant in tenants:
+            self.stdout.write(f"Seeding Symptom Data for tenant: {tenant.name} ({tenant.id})")
+            for cat_name, (order, tags) in data.items():
+                # Create Category
+                category, created = SymptomCategory.all_objects.get_or_create(
+                    tenant=tenant,
+                    name=cat_name,
+                    defaults={'order': order, 'is_active': True}
                 )
+                
+                if created:
+                    self.stdout.write(self.style.SUCCESS(f"  Created Category: {cat_name}"))
 
-                if tag_created:
-                    self.stdout.write(self.style.SUCCESS(f"  - Added Tag: {tag_name}"))
+                # Create Tags for this Category
+                for tag_name in tags:
+                    # We use user=None to indicate these are SYSTEM (Global) tags
+                    tag, tag_created = SymptomTag.all_objects.get_or_create(
+                        tenant=tenant,
+                        category=category,
+                        name=tag_name,
+                        user=None,  # Explicitly set to None for global tags
+                        defaults={'is_active': True}
+                    )
+
+                    if tag_created:
+                        self.stdout.write(self.style.SUCCESS(f"    - Added Tag: {tag_name}"))
 
         self.stdout.write(self.style.SUCCESS("-----------------------------------"))
         self.stdout.write(self.style.SUCCESS("Seeding Completed Successfully!"))
