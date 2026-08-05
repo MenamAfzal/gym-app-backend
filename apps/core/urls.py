@@ -18,11 +18,10 @@ router.register(r'billing', BillingViewSet, basename='tenant-billing')
 router.register(r'referrals', PlatformReferralRewardViewSet, basename='platform-referral-rewards')
 
 urlpatterns = [
-    # Specific paths MUST come before the router include, otherwise the
-    # router's tenants/{pk}/ pattern swallows tenants/analytics/.
+
     path('tenants/analytics/', TenantAnalyticsListView.as_view(), name='tenant-analytics'),
     path('webhooks/stripe/', StripeWebhookView.as_view(), name='stripe-webhook'),
 
-    # Router URLs (tenants/, plans/, features/, billing/, referrals/)
+
     path('', include(router.urls)),
 ]
