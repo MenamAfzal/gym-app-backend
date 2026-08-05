@@ -198,7 +198,7 @@ class PlatformLedger(TenantAwareModel):
     class TransactionType(models.TextChoices):
         CHARGE = "charge", "Charge"
         REFUND = "refund", "Refund"
-        SUBSCRIPTION = "subscription", "Tenant Subscription"
+        SUBSCRIPTION = "sub", "Tenant Subscription"
 
     class StatusChoices(models.TextChoices):
         PENDING = "pending", "Pending Payout"
