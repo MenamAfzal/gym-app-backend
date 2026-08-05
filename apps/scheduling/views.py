@@ -333,7 +333,8 @@ class BookingViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Session is not scheduled."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Check existing booking
-        if Booking.objects.filter(client=target_client, session=session, status='booked').exists():
+        existing_booking = Booking.objects.filter(client=target_client, session=session).first()
+        if existing_booking and existing_booking.status == 'booked':
             return Response({"detail": "Already booked this session."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Capacity Check
@@ -355,16 +356,25 @@ class BookingViewSet(viewsets.ModelViewSet):
         package.credits_remaining -= 1
         package.save()
 
-        # Create Booking
-        booking = Booking.objects.create(
-            tenant=request.tenant,
-            client=target_client,
-            session=session,
-            credit_source=package,
-            status='booked',
-            join_mode=serializer.validated_data.get('join_mode', 'physical'),
-            music_preference=serializer.validated_data.get('music_preference', '')
-        )
+        if existing_booking:
+            # Reactivate existing booking row to satisfy unique_together constraint
+            existing_booking.status = 'booked'
+            existing_booking.credit_source = package
+            existing_booking.join_mode = serializer.validated_data.get('join_mode', 'physical')
+            existing_booking.music_preference = serializer.validated_data.get('music_preference', '')
+            existing_booking.save()
+            booking = existing_booking
+        else:
+            # Create Booking
+            booking = Booking.objects.create(
+                tenant=request.tenant,
+                client=target_client,
+                session=session,
+                credit_source=package,
+                status='booked',
+                join_mode=serializer.validated_data.get('join_mode', 'physical'),
+                music_preference=serializer.validated_data.get('music_preference', '')
+            )
 
         # Create confirmation notification
         Notification.objects.create(
