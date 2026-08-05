@@ -1929,10 +1929,13 @@ class UnifiedMediaUploadAPIView(APIView):
         return handle_poll_upload(request, user)
     
 class CommentViewSet(mixins.DestroyModelMixin, viewsets.GenericViewSet):
-    queryset = Comment.objects.all()
+    queryset = Comment.all_objects.all()
     # Ensure you are using the correct serializer for retrieval/deletion
     serializer_class = CommentSerializer 
     permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return Comment.objects.all()
 
     def destroy(self, request, *args, **kwargs):
         comment = self.get_object()
