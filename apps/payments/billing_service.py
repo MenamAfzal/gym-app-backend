@@ -120,7 +120,7 @@ class FeatureBillingService:
         }
 
         checkout_kwargs: dict = {
-            "mode": "subscription",
+            "mode": "payment",
             "line_items": line_items,
             "metadata": metadata,
             "success_url": (
@@ -128,7 +128,7 @@ class FeatureBillingService:
                 "?session_id={CHECKOUT_SESSION_ID}"
             ),
             "cancel_url": f"{settings.FRONTEND_URL}/billing/cancel",
-            "subscription_data": {
+            "payment_intent_data": {
                 "metadata": metadata,
             },
         }
