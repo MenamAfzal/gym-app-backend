@@ -57,7 +57,14 @@ def _handle_checkout_completed(session):
         tenant.stripe_customer_id = stripe_customer_id
         tenant.save()
 
-    # 4. Create Subscription via Service (Handles old sub cancellation)
+    # 4. Update the new TenantBillingSubscription
+    from apps.payments.billing_service import FeatureBillingService
+    try:
+        FeatureBillingService.fulfill_checkout(session)
+    except Exception as e:
+        logger.error(f"Failed to fulfill FeatureBillingService checkout: {e}")
+
+    # 5. Create Subscription via Service (Handles old sub cancellation)
     # We use the internal service but explicitly set the Stripe ID
     subscription = TenantAdministrationService.assign_plan(tenant, plan)
     
@@ -103,6 +110,13 @@ def _handle_subscription_updated(subscription_data):
     except TenantSubscription.DoesNotExist:
         logger.warning(f"Subscription {stripe_id} not found in DB.")
 
+    # Forward to FeatureBillingService for Phase 2 billing
+    from apps.payments.billing_service import FeatureBillingService
+    try:
+        FeatureBillingService.handle_subscription_updated(subscription_data)
+    except Exception as e:
+        logger.error(f"Failed to forward subscription updated to FeatureBillingService: {e}")
+
 def _handle_subscription_deleted(subscription_data):
     """
     Occurs when a subscription is explicitly canceled.
@@ -116,6 +130,13 @@ def _handle_subscription_deleted(subscription_data):
         logger.info(f"Canceled subscription {stripe_id}")
     except TenantSubscription.DoesNotExist:
         pass
+
+    # Forward to FeatureBillingService for Phase 2 billing
+    from apps.payments.billing_service import FeatureBillingService
+    try:
+        FeatureBillingService.handle_subscription_deleted(subscription_data)
+    except Exception as e:
+        logger.error(f"Failed to forward subscription deleted to FeatureBillingService: {e}")
 
 def _handle_payment_failed(invoice):
     """
