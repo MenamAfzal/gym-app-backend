@@ -244,6 +244,7 @@ class BookingCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Booking
         fields = ['id', 'session', 'join_mode', 'music_preference', 'client']
+        validators = []  # Clear default UniqueTogetherValidator to prevent DRF from requiring client field
 
     def validate(self, data):
         session = data['session']
