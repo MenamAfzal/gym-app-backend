@@ -40,6 +40,7 @@ def diagnose():
         exists_in_tenant = Comment.objects.filter(id=comment_id).exists()
         print(f"Exists in all_objects: {exists_in_all}")
         print(f"Exists in default objects (filtered by tenant): {exists_in_tenant}")
+        print(f"SQL for Comment.objects.all(): {Comment.objects.all().query}")
     finally:
         from apps.core.tenants.context import reset_current_tenant
         reset_current_tenant(token)
@@ -56,6 +57,21 @@ def diagnose():
     # Set credentials
     force_authenticate(request, user=user)
     
+    # Instantiate view instance to inspect its query
+    view_instance = CommentViewSet()
+    view_instance.request = request
+    view_instance.format_kwarg = None
+    
+    token = set_current_tenant(tenant)
+    try:
+        qs = view_instance.get_queryset()
+        filtered_qs = view_instance.filter_queryset(qs)
+        print("ViewSet get_queryset() SQL:", qs.query)
+        print("ViewSet filter_queryset() SQL:", filtered_qs.query)
+        print("ViewSet filtered queryset exists:", filtered_qs.filter(pk=comment_id).exists())
+    finally:
+        reset_current_tenant(token)
+
     # Instantiate view
     view = CommentViewSet.as_view({'post': 'react'})
     
