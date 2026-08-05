@@ -130,114 +130,97 @@ class TenantAnalyticsSerializer(serializers.Serializer):
         return subs[0] if subs else None
 
 
+# ── Subquery Helper Functions to Avoid Cartesian Product Joins ───────────
+
+def SQCount(model, filter_q=None):
+    """
+    Subquery helper to return the Count of related items for a given tenant.
+    Avoids multi-join cartesian product.
+    """
+    queryset = model.all_objects.filter(tenant=OuterRef('pk'))
+    if filter_q:
+        queryset = queryset.filter(filter_q)
+    sub = queryset.order_by().values('tenant').annotate(cnt=Count('id')).values('cnt')
+    return Coalesce(Subquery(sub[:1]), Value(0, output_field=IntegerField()))
+
+def UserSQCount(filter_q=None):
+    """
+    Subquery helper to return Count of Users for a given tenant.
+    User does not inherit from TenantMixin but has a direct nullable tenant field.
+    """
+    queryset = User.objects.filter(tenant=OuterRef('pk'))
+    if filter_q:
+        queryset = queryset.filter(filter_q)
+    sub = queryset.order_by().values('tenant').annotate(cnt=Count('id')).values('cnt')
+    return Coalesce(Subquery(sub[:1]), Value(0, output_field=IntegerField()))
+
+def ReferralSQCount():
+    """
+    Subquery helper to count referrals pointing back to the referrer tenant.
+    """
+    queryset = Tenant.objects.filter(referred_by=OuterRef('pk'))
+    sub = queryset.order_by().values('referred_by').annotate(cnt=Count('id')).values('cnt')
+    return Coalesce(Subquery(sub[:1]), Value(0, output_field=IntegerField()))
+
+def SQSum(model, field_name, filter_q=None):
+    """
+    Subquery helper to return the Sum of a field on a related model for a tenant.
+    """
+    queryset = model.all_objects.filter(tenant=OuterRef('pk'))
+    if filter_q:
+        queryset = queryset.filter(filter_q)
+    sub = queryset.order_by().values('tenant').annotate(total=Sum(field_name)).values('total')
+    return Coalesce(Subquery(sub[:1], output_field=DecimalField()), Value(0, output_field=DecimalField()))
+
+
 def _build_analytics_queryset():
     """
     Returns a fully annotated Tenant queryset.
-    Every metric is a single DB-level expression — the ORM generates
-    one round-trip per page, not one per tenant.
+    Every metric is computed via a SELECT subquery, avoiding joins.
     """
     from apps.scheduling.models import Payment, Package, Booking, Appointment, Location, ClassTemplate
     from apps.payments.models import PlatformLedger, TenantPayout
 
     qs = Tenant.objects.annotate(
-        total_clients=Count(
-            'users',
-            filter=Q(users__role='client'),
-            distinct=True
-        ),
-        active_clients=Count(
-            'users',
-            filter=Q(users__role='client', users__is_active=True),
-            distinct=True
-        ),
-        inactive_clients=Count(
-            'users',
-            filter=Q(users__role='client', users__is_active=False),
-            distinct=True
-        ),
-        total_staff=Count(
-            'users',
-            filter=Q(users__role__in=STAFF_ROLES),
-            distinct=True
-        ),
-        active_staff=Count(
-            'users',
-            filter=Q(users__role__in=STAFF_ROLES, users__is_active=True),
-            distinct=True
-        ),
-        inactive_staff=Count(
-            'users',
-            filter=Q(users__role__in=STAFF_ROLES, users__is_active=False),
-            distinct=True
-        ),
-        gym_owners=Count(
-            'users',
-            filter=Q(users__role='gym_owner'),
-            distinct=True
-        ),
-        trainers=Count(
-            'users',
-            filter=Q(users__role='trainer'),
-            distinct=True
-        ),
+        # ── People ────────────────────────────────────────────────────────
+        total_clients=UserSQCount(Q(role='client')),
+        active_clients=UserSQCount(Q(role='client', is_active=True)),
+        inactive_clients=UserSQCount(Q(role='client', is_active=False)),
+        
+        total_staff=UserSQCount(Q(role__in=STAFF_ROLES)),
+        active_staff=UserSQCount(Q(role__in=STAFF_ROLES, is_active=True)),
+        inactive_staff=UserSQCount(Q(role__in=STAFF_ROLES, is_active=False)),
+        
+        gym_owners=UserSQCount(Q(role='gym_owner')),
+        trainers=UserSQCount(Q(role='trainer')),
 
-        referral_count=Count('referrals', distinct=True),
+        # ── Referrals ─────────────────────────────────────────────────────
+        referral_count=ReferralSQCount(),
 
-        total_revenue_gross=Coalesce(
-            Sum(
-                'payments__amount',
-                filter=Q(payments__status='completed'),
-                output_field=DecimalField()
-            ),
-            Value(0, output_field=DecimalField())
-        ),
-        total_package_purchases=Count(
-            'payments',
-            filter=Q(payments__type='package_purchase'),
-            distinct=True
-        ),
+        # ── Financials ────────────────────────────────────────────────────
+        total_revenue_gross=SQSum(Payment, 'amount', Q(status='completed')),
+        total_package_purchases=SQCount(Payment, Q(type='package_purchase')),
+        
+        total_platform_fees=SQSum(PlatformLedger, 'platform_fee'),
+        total_revenue_net=SQSum(PlatformLedger, 'amount_net'),
+        
+        pending_payouts=SQSum(TenantPayout, 'amount', Q(status='pending')),
 
-        # ── Financial — payments.PlatformLedger ───────────────────────────
-        # TenantMixin related_name='%(class)ss' → reverse = 'platformledgers'
-        total_platform_fees=Coalesce(
-            Sum('platformledgers__platform_fee', output_field=DecimalField()),
-            Value(0, output_field=DecimalField())
-        ),
-        total_revenue_net=Coalesce(
-            Sum('platformledgers__amount_net', output_field=DecimalField()),
-            Value(0, output_field=DecimalField())
-        ),
-        pending_payouts=Coalesce(
-            Sum(
-                'tenantpayouts__amount',
-                filter=Q(tenantpayouts__status='pending'),
-                output_field=DecimalField()
-            ),
-            Value(0, output_field=DecimalField())
-        ),
+        # ── Packages ──────────────────────────────────────────────────────
+        total_packages_sold=SQCount(Package),
 
-        total_packages_sold=Count('packages', distinct=True),
-        total_bookings=Count('bookings', distinct=True),
-        attended_bookings=Count(
-            'bookings',
-            filter=Q(bookings__status='attended'),
-            distinct=True
-        ),
-        cancelled_bookings=Count(
-            'bookings',
-            filter=Q(bookings__status='cancelled'),
-            distinct=True
-        ),
-        no_show_bookings=Count(
-            'bookings',
-            filter=Q(bookings__status='no_show'),
-            distinct=True
-        ),
+        # ── Bookings ──────────────────────────────────────────────────────
+        total_bookings=SQCount(Booking),
+        attended_bookings=SQCount(Booking, Q(status='attended')),
+        cancelled_bookings=SQCount(Booking, Q(status='cancelled')),
+        no_show_bookings=SQCount(Booking, Q(status='no_show')),
 
-        total_appointments=Count('appointments', distinct=True),
+        # ── Appointments ──────────────────────────────────────────────────
+        total_appointments=SQCount(Appointment),
 
-        total_locations=Count('locations', distinct=True),
-        total_classes=Count('classtemplates', distinct=True),
+        # ── Locations & Classes ───────────────────────────────────────────
+        total_locations=SQCount(Location),
+        total_classes=SQCount(ClassTemplate),
 
     ).select_related(
         'referred_by',
