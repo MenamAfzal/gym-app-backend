@@ -983,3 +983,36 @@ class FacilityAccessViewSet(viewsets.ModelViewSet):
         access_log.checked_out_at = timezone.now()
         access_log.save()
         return Response({"detail": "Checked out successfully."})
+
+
+class UpdateBookingAttributesAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        booking_id = request.data.get('booking_id') or request.data.get('booking')
+        if not booking_id:
+            return Response({"error": "booking_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            booking = Booking.objects.get(id=booking_id)
+        except (Booking.DoesNotExist, ValueError):
+            return Response({"error": "Booking not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        from apps.users.models import UserRole
+        if request.user.role == UserRole.CLIENT and booking.client != request.user:
+            return Response({"error": "You do not have permission to modify this booking."}, status=status.HTTP_403_FORBIDDEN)
+
+        # Edit join_mode / attendance type
+        if 'join_mode' in request.data:
+            booking.join_mode = request.data['join_mode']
+        elif 'attendance_type' in request.data:
+            booking.join_mode = request.data['attendance_type']
+
+        # Edit music preference
+        if 'music_preference' in request.data:
+            booking.music_preference = request.data['music_preference']
+
+        booking.save()
+
+        from .serializers import BookingReadSerializer
+        return Response(BookingReadSerializer(booking, context={'request': request}).data, status=status.HTTP_200_OK)

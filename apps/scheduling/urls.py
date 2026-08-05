@@ -5,7 +5,7 @@ from .views import (
     ClassTemplateViewSet, RecurrenceRuleViewSet, ClassSessionViewSet, BookingViewSet,
     AppointmentViewSet, WaitlistViewSet, SubstituteRequestViewSet, PackageTypeViewSet,
     PackageViewSet, ReportsView, StaffAssignmentViewSet, ViewAllClientsAPIView,
-    FacilityAccessViewSet
+    FacilityAccessViewSet, UpdateBookingAttributesAPIView
 )
 
 router = DefaultRouter()
@@ -29,6 +29,7 @@ router.register(r'facility-access', FacilityAccessViewSet, basename='facility-ac
 
 urlpatterns = [
     path('api/view-all-clients/', ViewAllClientsAPIView.as_view(), name='view-all-clients'),
+    path('update-booking-attributes/', UpdateBookingAttributesAPIView.as_view(), name='update-booking-attributes'),
     path('', include(router.urls)),
     path('reports/', ReportsView.as_view(), name='reports'),
 ]
