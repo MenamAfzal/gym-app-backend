@@ -216,7 +216,7 @@ class TenantAdministrationService:
 
     @staticmethod
     @transaction.atomic
-    def onboard_tenant(gym_name, subdomain, owner_email, owner_password, initial_plan_id=None, branding=None, referred_by_id=None):
+    def onboard_tenant(gym_name, subdomain, owner_email, owner_password, initial_plan_id=None, logo=None, branding=None, referred_by_id=None):
         """
         Creates Tenant (with branding), Plan, and Owner.
         """
@@ -236,6 +236,7 @@ class TenantAdministrationService:
         tenant = Tenant.objects.create(
             name=gym_name, 
             subdomain=subdomain,
+            logo=logo,
             branding=branding_data,
             referred_by=referred_by
         )

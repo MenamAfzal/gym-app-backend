@@ -364,11 +364,18 @@ class StaffAssignClientSerializer(serializers.ModelSerializer):
 
 class FacilityAccessLogSerializer(serializers.ModelSerializer):
     client_email = serializers.CharField(source='client.email', read_only=True)
+    client_name = serializers.SerializerMethodField()
     location_name = serializers.CharField(source='location.name', read_only=True)
 
     class Meta:
         model = FacilityAccessLog
-        fields = ['id', 'client', 'client_email', 'location', 'location_name', 'checked_in_at', 'checked_out_at']
+        fields = ['id', 'client', 'client_name', 'client_email', 'location', 'location_name', 'checked_in_at', 'checked_out_at']
         read_only_fields = ['id', 'checked_in_at', 'checked_out_at']
 
-        read_only_fields = ['id', 'checked_in_at', 'checked_out_at']
+    def get_client_name(self, obj):
+        try:
+            profile = obj.client.profile
+            name = f"{profile.first_name} {profile.last_name}".strip()
+            return name if name else obj.client.email
+        except Exception:
+            return obj.client.email

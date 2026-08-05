@@ -11,7 +11,8 @@ from apps.core.tenants.serializers import (
     FeatureSerializer,
     OnboardTenantSerializer,
     TenantEntitlementOverrideSerializer,
-    ReferralRewardSerializer
+    ReferralRewardSerializer,
+    TenantLogoSerializer
 )
 
 class IsPlatformAdmin(permissions.BasePermission):
@@ -39,7 +40,7 @@ class PlatformTenantViewSet(viewsets.ModelViewSet):
         allow public retrieval of a single tenant (e.g. public directory/profile),
         but restrict creation/management to Platform Admins.
         """
-        if self.action in ('list', 'retrieve'):
+        if self.action in ('list', 'retrieve', 'logos'):
             return [permissions.AllowAny()]
         return [IsPlatformAdmin()]
     
@@ -58,6 +59,7 @@ class PlatformTenantViewSet(viewsets.ModelViewSet):
                 owner_email=data['owner_email'],
                 owner_password=data['owner_password'],
                 initial_plan_id=data.get('initial_plan_id'),
+                logo=data.get('logo'),
                 branding=data.get('branding'),
                 referred_by_id=data.get('referred_by_id')
             )
@@ -67,6 +69,15 @@ class PlatformTenantViewSet(viewsets.ModelViewSet):
             )
         except ValidationError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['get'])
+    def logos(self, request):
+        """
+        Public endpoint to get a lightweight list of all gym logos.
+        """
+        tenants = Tenant.objects.filter(is_active=True).only('id', 'name', 'subdomain', 'logo')
+        serializer = TenantLogoSerializer(tenants, many=True, context={'request': request})
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def assign_plan(self, request, pk=None):

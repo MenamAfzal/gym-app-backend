@@ -22,6 +22,12 @@ class Tenant(UUIDMixin, TimestampMixin):
         unique=True, 
         help_text="Unique subdomain (e.g., 'gym1' in gym1.example.com)"
     )
+    logo = models.ImageField(
+        upload_to='tenant_logos/',
+        blank=True,
+        null=True,
+        help_text="Gym/Tenant logo image"
+    )
     branding = models.JSONField(
         default=dict, 
         blank=True,

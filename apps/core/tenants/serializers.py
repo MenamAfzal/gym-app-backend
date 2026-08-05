@@ -11,6 +11,11 @@ class FeatureSerializer(serializers.ModelSerializer):
         model = Feature
         fields = ['id', 'key', 'description', 'data_type', 'created_at']
 
+class TenantLogoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Tenant
+        fields = ['id', 'name', 'subdomain', 'logo']
+
 class PlanEntitlementSerializer(serializers.ModelSerializer):
     feature_key = serializers.ReadOnlyField(source='feature.key')
     
@@ -77,7 +82,7 @@ class TenantSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = Tenant
-        fields = ['id', 'name', 'subdomain', 'branding', 'is_active', 'created_at', 'current_subscription']
+        fields = ['id', 'name', 'subdomain', 'logo', 'branding', 'is_active', 'created_at', 'current_subscription']
         read_only_fields = ['id', 'created_at']
 
     def get_current_subscription(self, obj):
@@ -93,6 +98,7 @@ class OnboardTenantSerializer(serializers.Serializer):
     owner_email = serializers.EmailField()
     owner_password = serializers.CharField(write_only=True, min_length=8)
     initial_plan_id = serializers.UUIDField(required=False)
+    logo = serializers.ImageField(required=False)
     branding = serializers.JSONField(required=False, default=dict)
     referred_by_id = serializers.UUIDField(required=False, allow_null=True)
 
@@ -103,7 +109,7 @@ class TenantSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tenant
         fields = [
-            'id', 'name', 'subdomain', 'branding', 
+            'id', 'name', 'subdomain', 'logo', 'branding', 
             'is_active', 'created_at', 
             'current_subscription', 'entitlements'
         ]
