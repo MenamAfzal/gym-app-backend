@@ -61,11 +61,28 @@ class PlatformTransactionSerializer(serializers.ModelSerializer):
             except Exception:
                 name = f"{payment.client.first_name} {payment.client.last_name}".strip()
                 return name if name else payment.client.email
+        
+        if obj.type == 'sub' and obj.tenant:
+            owner = obj.tenant.users.filter(role='tenant_admin').first()
+            if owner:
+                try:
+                    profile = owner.profile
+                    name = f"{profile.first_name} {profile.last_name}".strip()
+                    return name if name else owner.email
+                except Exception:
+                    return owner.email
         return None
 
     def get_client_email(self, obj):
         payment = self.context.get('payments_map', {}).get(obj.transaction_id)
-        return payment.client.email if payment else None
+        if payment:
+            return payment.client.email
+            
+        if obj.type == 'sub' and obj.tenant:
+            owner = obj.tenant.users.filter(role='tenant_admin').first()
+            if owner:
+                return owner.email
+        return None
 
 
 class PlatformTransactionListView(generics.ListAPIView):
