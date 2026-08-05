@@ -2,7 +2,7 @@ from django.shortcuts import get_object_or_404
 from django.db import transaction, models
 from django.db.models import Q, Count, F
 from django.utils import timezone
-from django.core.exceptions import ValidationError
+from rest_framework.exceptions import ValidationError
 from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
