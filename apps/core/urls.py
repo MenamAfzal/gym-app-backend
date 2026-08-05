@@ -8,6 +8,7 @@ from apps.core.views.platform_views import (
     PlatformReferralRewardViewSet
 )
 from apps.core.views.webhook_views import StripeWebhookView
+from apps.core.views.tenant_analytics import TenantAnalyticsListView
 
 router = DefaultRouter()
 router.register(r'tenants', PlatformTenantViewSet, basename='platform-tenants')
@@ -21,4 +22,5 @@ urlpatterns = [
     path('', include(router.urls)), 
 
     path('webhooks/stripe/', StripeWebhookView.as_view(), name='stripe-webhook'),
+    path('tenants/analytics/', TenantAnalyticsListView.as_view(), name='tenant-analytics'),
 ]
