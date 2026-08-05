@@ -269,6 +269,24 @@ class FeatureBillingService:
         billing_sub.save()
         billing_sub.active_features.set(features)
 
+
+        amount_total = _get(session_obj, "amount_total")
+        if amount_total:
+            import decimal
+            from apps.payments.models import PlatformLedger
+            amount_decimal = decimal.Decimal(amount_total) / decimal.Decimal(100)
+            if not PlatformLedger.all_objects.filter(transaction_id=session_id).exists():
+                PlatformLedger.objects.create(
+                    tenant=tenant,
+                    transaction_id=session_id,
+                    amount_gross=amount_decimal,
+                    platform_fee=amount_decimal,
+                    amount_net=decimal.Decimal("0.00"),
+                    type=PlatformLedger.TransactionType.SUBSCRIPTION,
+                    status=PlatformLedger.StatusChoices.PAID,
+                    description=f"Tenant Subscription: {billing_plan.name}"
+                )
+
         # IMPORTANT: Cancel any old active subscriptions to prevent double billing
         old_subs = TenantBillingSubscription.all_objects.filter(
             tenant=tenant,
