@@ -293,12 +293,21 @@ class TenantBillingSubscriptionView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        from django.db.models import Case, When, Value, IntegerField
+        
         billing_sub = (
             TenantBillingSubscription.objects
             .filter(tenant=tenant)
             .select_related('billing_plan')
             .prefetch_related('active_features')
-            .order_by('-status', '-created_at')
+            .annotate(
+                is_active_sort=Case(
+                    When(status=TenantBillingSubscription.StatusChoices.ACTIVE, then=Value(1)),
+                    default=Value(0),
+                    output_field=IntegerField()
+                )
+            )
+            .order_by('-is_active_sort', '-created_at')
             .first()
         )
 
