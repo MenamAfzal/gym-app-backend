@@ -35,7 +35,9 @@ LOCAL_APPS = [
     'apps.socialnetwork',
     'apps.payments',
     'apps.notifications',
+    'apps.workout',
 ]
+
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 
 # Stripe Configuration

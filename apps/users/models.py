@@ -135,6 +135,19 @@ class UserProfile(UUIDMixin, TimestampMixin):
     height = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, help_text="Height in cm")
     weight = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, help_text="Weight in kg")
     
+    # Workout level
+    RX_LEVELS = [
+        ('RX1', 'RX1'),
+        ('RX2', 'RX2'),
+        ('RX3', 'RX3'),
+    ]
+    level = models.CharField(
+        max_length=10,
+        choices=RX_LEVELS,
+        default='RX1',
+        help_text="The client's RX level (RX1, RX2, or RX3)"
+    )
+    
     # Address Information
     address = models.CharField(max_length=255, blank=True, help_text="Street address")
     city = models.CharField(max_length=100, blank=True, help_text="City")
@@ -219,6 +232,12 @@ class PendingRegistration(models.Model):
     gender = models.CharField(max_length=20, choices=GenderChoices.choices, blank=True)
     height = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     weight = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    
+    level = models.CharField(
+        max_length=10,
+        choices=[('RX1', 'RX1'), ('RX2', 'RX2'), ('RX3', 'RX3')],
+        default='RX1'
+    )
     
     # Address Information
     address = models.CharField(max_length=255, blank=True)

@@ -21,17 +21,20 @@ class IsOwnerOrManager(permissions.BasePermission):
 
 class IsGymStaffOrOwner(permissions.BasePermission):
     """
-    Allows access to Gym Owners, Managers, Trainers, and Front Desk staff.
+    Allows access to Gym Owners, Managers, Trainers, Front Desk staff, and system staff/superusers.
     """
     def has_permission(self, request, view):
-        if not request.user or not request.user.is_authenticated or not request.user.tenant:
+        if not request.user or not request.user.is_authenticated:
             return False
-        return request.user.role in [
+        if request.user.is_staff or request.user.is_superuser:
+            return True
+        return getattr(request.user, "role", None) in [
             UserRole.GYM_OWNER, 
             UserRole.GYM_MANAGER, 
             UserRole.TRAINER, 
             UserRole.FRONT_DESK
         ]
+
 
 
 class IsFrontDeskOrAdmin(permissions.BasePermission):

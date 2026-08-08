@@ -122,6 +122,21 @@ class ClassSession(UUIDMixin, TimestampMixin, TenantMixin):
     def is_full(self):
         return self.bookings.filter(status='booked').count() >= self.capacity
 
+    @property
+    def name(self):
+        # Legacy compat
+        return self.template.name if self.template_id else ""
+
+    @property
+    def start_time(self):
+        # Legacy compat
+        return self.start_at
+
+    @property
+    def end_time(self):
+        # Legacy compat
+        return self.end_at
+
 
 class PackageType(UUIDMixin, TimestampMixin, TenantMixin):
     """
@@ -174,8 +189,7 @@ class Booking(UUIDMixin, TimestampMixin, TenantMixin):
     credit_source = models.ForeignKey(Package, on_delete=models.PROTECT, related_name='bookings', null=True, blank=True)
     checked_in_at = models.DateTimeField(null=True, blank=True)
     checked_out_at = models.DateTimeField(null=True, blank=True)
-    
-    # Metadata fields from original schema
+     
     join_mode = models.CharField(max_length=20, default='physical')
     music_preference = models.CharField(max_length=100, blank=True)
 

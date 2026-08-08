@@ -37,7 +37,10 @@ urlpatterns = [
     path('api/v1/inventory/', include('apps.inventory.urls')),
     path("api/v1/socialnetwork/", include("apps.socialnetwork.urls")),
     path('api/v1/payments/', include('apps.payments.urls')),
+    path('api/v1/workout/', include('apps.workout.urls')),
+    path('api/v1/workouts/', include('apps.workout.urls')),
 ]
+
 
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

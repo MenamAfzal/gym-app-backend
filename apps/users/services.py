@@ -78,6 +78,7 @@ class UserService:
             'gender': profile_data.get('gender', ''),
             'height': profile_data.get('height'),
             'weight': profile_data.get('weight'),
+            'level': profile_data.get('level', 'RX1'),
             # Address Information
             'address': profile_data.get('address', ''),
             'city': profile_data.get('city', ''),
@@ -180,6 +181,7 @@ class AuthService:
             "gender": validated_data.get("gender", ""),
             "height": validated_data.get("height"),
             "weight": validated_data.get("weight"),
+            "level": validated_data.get("level", "RX1"),
             # Address Information
             "address": validated_data.get("address", ""),
             "city": validated_data.get("city", ""),
@@ -309,6 +311,7 @@ class AuthService:
         profile.gender = pending.gender
         profile.height = pending.height
         profile.weight = pending.weight
+        profile.level = pending.level
         
         # Address Information
         profile.address = pending.address

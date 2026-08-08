@@ -38,7 +38,7 @@ class TenantMixin(models.Model):
     tenant = models.ForeignKey(
         'tenants.Tenant', 
         on_delete=models.CASCADE,
-        related_name='%(class)ss', # e.g. tenant.workouts
+        related_name='%(app_label)s_%(class)ss', # e.g. tenant.workout_workouts
         help_text="The tenant this record belongs to"
     )
 
