@@ -38,20 +38,20 @@ class UserAdmin(BaseUserAdmin):
 @admin.register(UserProfile)
 class UserProfileAdmin(admin.ModelAdmin):
     list_display = [
-        'user', 'nickname', 'first_name', 'last_name', 
+        'user', 'nickname', 'first_name', 'last_name', 'level',
         'phone_number', 'city', 'country', 'created_at'
     ]
     search_fields = [
         'user__email', 'nickname', 'first_name', 'last_name',
         'phone_number', 'city', 'country', 'bio'
     ]
-    list_filter = ['created_at', 'country', 'gender']
+    list_filter = ['created_at', 'country', 'gender', 'level']
     
     fieldsets = (
         ('User', {'fields': ('user',)}),
         ('Basic Info', {'fields': ('nickname', 'bio', 'profile_image')}),
         ('Personal Information', {
-            'fields': ('first_name', 'last_name', 'phone_number', 'date_of_birth', 'gender'),
+            'fields': ('first_name', 'last_name', 'level', 'phone_number', 'date_of_birth', 'gender'),
         }),
         ('Address', {
             'fields': ('address', 'city', 'country', 'postal_code'),
