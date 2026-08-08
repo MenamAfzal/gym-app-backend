@@ -117,7 +117,9 @@ class WorkoutAPIView(APIView):
     def get(self, request):
         """List all workouts (staff: all, client: filtered by level)"""
         user = request.user
-        if user.is_staff:
+        # Anyone who is superuser, django is_staff, or has a gym staff role gets all workouts
+        is_gym_staff = user.is_staff or user.is_superuser or user.role in ['gym_owner', 'gym_manager', 'trainer', 'front_desk']
+        if is_gym_staff:
             workouts = Workout.objects.all()
         else:
             user_rx_level = getattr(user.profile, "level", None)
@@ -555,7 +557,8 @@ class WorkoutEditAPIView(APIView):
     def get(self, request, pk):
         """Get workout details for editing (same as WorkoutDetailAPIView but accessible to workout creator)"""
         workout = get_object_or_404(Workout, pk=pk)
-        if not request.user.is_staff or workout.created_by != request.user:
+        is_admin_staff = request.user.is_staff or request.user.is_superuser or request.user.role in ['gym_owner', 'gym_manager']
+        if not is_admin_staff and workout.created_by != request.user:
             return Response(
                 {"detail": "You are not authorized to edit this workout."}, 
                 status=status.HTTP_403_FORBIDDEN
@@ -565,7 +568,8 @@ class WorkoutEditAPIView(APIView):
     def put(self, request, pk):
         """Update an existing workout with exercises and groups"""
         workout = get_object_or_404(Workout, pk=pk)
-        if not request.user.is_staff or workout.created_by != request.user:
+        is_admin_staff = request.user.is_staff or request.user.is_superuser or request.user.role in ['gym_owner', 'gym_manager']
+        if not is_admin_staff and workout.created_by != request.user:
             return Response(
                 {"detail": "You are not authorized to edit this workout."}, 
                 status=status.HTTP_403_FORBIDDEN
@@ -581,7 +585,8 @@ class WorkoutEditAPIView(APIView):
     def patch(self, request, pk):
         """Partially update an existing workout"""
         workout = get_object_or_404(Workout, pk=pk)
-        if not request.user.is_staff or workout.created_by != request.user:
+        is_admin_staff = request.user.is_staff or request.user.is_superuser or request.user.role in ['gym_owner', 'gym_manager']
+        if not is_admin_staff and workout.created_by != request.user:
             return Response(
                 {"detail": "You are not authorized to edit this workout."}, 
                 status=status.HTTP_403_FORBIDDEN
