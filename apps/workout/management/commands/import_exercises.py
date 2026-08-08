@@ -65,10 +65,6 @@ class Command(BaseCommand):
             name = exercise_data.get("title") or exercise_data.get("titleAllCaps") or f"Exercise {doc_id}"
 
             description = exercise_data.get("benefits", "")
-            video_url = None
-            if exercise_data.get("media") and len(exercise_data["media"]) > 0:
-                video_url = exercise_data["media"][0]
-
             coaching_cues = exercise_data.get("trainerCues", "")
 
             exercise, created_flag = Exercise.objects.get_or_create(
@@ -76,7 +72,7 @@ class Command(BaseCommand):
                 tenant=tenant,
                 defaults={
                     "description": description.strip() if description else "",
-                    "video_url": video_url,
+                    "video_url": None,
                     "coaching_cues": coaching_cues.strip() if coaching_cues else "",
                 }
             )
@@ -85,9 +81,6 @@ class Command(BaseCommand):
                 needs_update = False
                 if not exercise.description and description:
                     exercise.description = description.strip()
-                    needs_update = True
-                if not exercise.video_url and video_url:
-                    exercise.video_url = video_url
                     needs_update = True
                 if not exercise.coaching_cues and coaching_cues:
                     exercise.coaching_cues = coaching_cues.strip()
