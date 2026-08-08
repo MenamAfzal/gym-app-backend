@@ -28,7 +28,9 @@ urlpatterns = [
     
     # Standard JWT Helper Routes (Refresh/Verify)
     path('auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh_alt'),
     path('auth/verify/', TokenVerifyView.as_view(), name='token_verify'),
+    path('auth/token/verify/', TokenVerifyView.as_view(), name='token_verify_alt'),
 
     # Change Password Route
     path('auth/change-password/', ChangePasswordView.as_view(), name='change_password'),
