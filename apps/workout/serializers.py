@@ -317,7 +317,7 @@ class SongSerializer(serializers.ModelSerializer):
 
 
 class MusicPlaylistSerializer(serializers.ModelSerializer):
-    songs = SongSerializer(many=True)
+    songs = SongSerializer(many=True, required=False)
 
     class Meta:
         model = MusicPlaylist
@@ -325,13 +325,18 @@ class MusicPlaylistSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at']
 
     def create(self, validated_data):
+        request = self.context.get('request')
+        tenant = getattr(request, 'tenant', None) if request else None
+        if not tenant and request:
+            tenant = getattr(request.user, 'tenant', None)
+
         songs_data = validated_data.pop('songs', [])
-        playlist = MusicPlaylist.objects.create(**validated_data)
+        playlist = MusicPlaylist.objects.create(tenant=tenant, **validated_data)
         
         for index, song_data in enumerate(songs_data):
             if 'order' not in song_data:
                 song_data['order'] = index + 1
-            Song.objects.create(playlist=playlist, **song_data)
+            Song.objects.create(playlist=playlist, tenant=tenant, **song_data)
             
         return playlist
 

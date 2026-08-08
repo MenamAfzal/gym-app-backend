@@ -365,7 +365,7 @@ class PlaylistAPIView(APIView):
         playlist_id = request.data.get('playlist_id')
         songs_data = request.data.get('songs', [])
         if not playlist_id:
-            serializer = MusicPlaylistSerializer(data=request.data)
+            serializer = MusicPlaylistSerializer(data=request.data, context={'request': request})
             if serializer.is_valid():
                 serializer.save(created_by=request.user)
                 return Response({'message': 'Playlist created', 'playlist': serializer.data}, status=status.HTTP_201_CREATED)
@@ -374,7 +374,8 @@ class PlaylistAPIView(APIView):
         if len(songs_data) == 0:
             return Response({'message': 'Song must be added when you add in playlist'}, status=status.HTTP_400_BAD_REQUEST)
         for song_data in songs_data:
-            Song.objects.create(playlist=playlist, **song_data)
+            tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+            Song.objects.create(playlist=playlist, tenant=tenant, **song_data)
         detail = {
             "playlist": playlist.name,
             "songs": songs_data
@@ -928,7 +929,7 @@ class MusicPlaylistListCreateView(APIView):
         serializer = MusicPlaylistSerializer(playlists, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
     def post(self, request):
-        serializer = MusicPlaylistSerializer(data=request.data)
+        serializer = MusicPlaylistSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             serializer.save(created_by=request.user)
             return Response({
