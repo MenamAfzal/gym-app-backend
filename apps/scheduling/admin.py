@@ -3,7 +3,7 @@ from .models import (
     Location, Room, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
-    Notification, StaffClientAssignment
+    StaffClientAssignment
 )
 
 class TenantAdminMixin:
@@ -101,11 +101,6 @@ class PaymentAdmin(TenantAdminMixin, admin.ModelAdmin):
 class CancellationPolicyAdmin(TenantAdminMixin, admin.ModelAdmin):
     list_display = ('scope_type', 'template', 'membership_tier', 'cutoff_hours', 'late_fee_amount', 'tenant')
     list_filter = ('scope_type', 'tenant')
-
-@admin.register(Notification)
-class NotificationAdmin(TenantAdminMixin, admin.ModelAdmin):
-    list_display = ('recipient', 'channel', 'template_key', 'sent_at', 'tenant')
-    list_filter = ('channel', 'tenant')
 
 @admin.register(StaffClientAssignment)
 class StaffClientAssignmentAdmin(TenantAdminMixin, admin.ModelAdmin):

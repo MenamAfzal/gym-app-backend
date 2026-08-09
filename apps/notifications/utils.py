@@ -3,9 +3,10 @@ import json
 import logging
 import requests
 from django.conf import settings
-from .models import Notification, FCMDevice
+from .models import FCMDevice
 
 logger = logging.getLogger(__name__)
+
 
 class FirebaseNotificationService:
     """
@@ -54,37 +55,25 @@ class FirebaseNotificationService:
 
     def send_notification_to_user(self, user, title, body, data=None):
         """
-        Main method to send a notification to a specific user.
-        1. Saves the notification in the database.
-        2. Sends the push notification to all active devices.
+        Deprecated: Use NotificationService.handle_event() instead.
+
+        This method is retained for backward compatibility only.
+        Sends push to all active devices for the user.
+        Does NOT create NotificationInbox records — that is the responsibility of NotificationService.
         """
         if data is None:
             data = {}
 
-        # 1. Save in database
-        notification = Notification.objects.create(
-            user=user,
-            title=title,
-            body=body,
-            data=data
-        )
-
-        # 2. Find active devices
-        devices = FCMDevice.objects.filter(user=user, active=True)
+        devices = FCMDevice.all_objects.filter(user=user, active=True)
         if not devices.exists():
-            return notification
+            return False
 
-        # 3. Send Push Notification
         success_count = 0
         for device in devices:
             if self.send_fcm_message(device.registration_id, title, body, data):
                 success_count += 1
 
-        if success_count > 0:
-            notification.push_sent = True
-            notification.save()
-
-        return notification
+        return success_count > 0
 
     def send_fcm_message(self, token, title, body, data=None):
         """

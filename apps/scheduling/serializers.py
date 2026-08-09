@@ -7,7 +7,7 @@ from .models import (
     Location, Room, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
-    Notification, StaffClientAssignment, FacilityAccessLog
+    StaffClientAssignment, FacilityAccessLog
 )
 from apps.users.models import User
 
@@ -336,15 +336,6 @@ class CancellationPolicySerializer(serializers.ModelSerializer):
         model = CancellationPolicy
         fields = ['id', 'scope_type', 'template', 'template_name', 'membership_tier', 'cutoff_hours', 'late_fee_amount', 'created_at']
         read_only_fields = ['id', 'template_name', 'created_at']
-
-
-class NotificationSerializer(serializers.ModelSerializer):
-    recipient_email = serializers.CharField(source='recipient.email', read_only=True)
-
-    class Meta:
-        model = Notification
-        fields = ['id', 'recipient', 'recipient_email', 'channel', 'template_key', 'related_entity_id', 'sent_at', 'created_at']
-        read_only_fields = ['id', 'recipient_email', 'created_at']
 
 
 class StaffAssignClientSerializer(serializers.ModelSerializer):

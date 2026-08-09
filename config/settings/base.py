@@ -120,6 +120,19 @@ CELERY_TIMEZONE = "UTC"
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60
 
+from celery.schedules import crontab
+
+CELERY_BEAT_SCHEDULE = {
+    'process-scheduled-campaigns': {
+        'task': 'notifications.process_scheduled_campaigns',
+        'schedule': crontab(minute='*'),  # Every minute
+    },
+    'process-time-based-automations': {
+        'task': 'notifications.process_time_based_automations',
+        'schedule': crontab(minute='*/5'),  # Every 5 minutes
+    },
+}
+
 # Session Configuration
 # Use Redis for sessions to offload the database
 SESSION_ENGINE = "django.contrib.sessions.backends.cache"

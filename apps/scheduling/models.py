@@ -322,25 +322,6 @@ class CancellationPolicy(UUIDMixin, TimestampMixin, TenantMixin):
         return f"Policy {self.scope_type} - {self.cutoff_hours}h cutoff"
 
 
-class Notification(UUIDMixin, TimestampMixin, TenantMixin):
-    """
-    Inbox buffer for decoupled message transmissions.
-    """
-    CHANNEL_CHOICES = [
-        ('push', 'Push'),
-        ('sms', 'SMS'),
-        ('email', 'Email'),
-    ]
-    recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications')
-    channel = models.CharField(max_length=20, choices=CHANNEL_CHOICES)
-    template_key = models.CharField(max_length=100)
-    related_entity_id = models.UUIDField(null=True, blank=True)
-    sent_at = models.DateTimeField(null=True, blank=True)
-
-    def __str__(self):
-        return f"Notification to {self.recipient.email} via {self.channel}"
-
-
 class StaffClientAssignment(UUIDMixin, TimestampMixin, TenantMixin):
     """
     Mapping linking trainer to client.

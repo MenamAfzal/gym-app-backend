@@ -17,7 +17,7 @@ from .models import (
     Location, Room, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
-    Notification, StaffClientAssignment
+    StaffClientAssignment
 )
 from .serializers import (
     LocationSerializer, RoomSerializer, StaffLocationSerializer,
@@ -25,7 +25,7 @@ from .serializers import (
     ClassSessionSerializer, BookingCreateSerializer, BookingReadSerializer,
     BookingEditSerializer, AppointmentSerializer, WaitlistSerializer,
     SubstituteRequestSerializer, PackageTypeSerializer, PackageSerializer,
-    PaymentSerializer, CancellationPolicySerializer, NotificationSerializer,
+    PaymentSerializer, CancellationPolicySerializer,
     StaffAssignClientSerializer
 )
 from .permissions import (
@@ -377,13 +377,19 @@ class BookingViewSet(viewsets.ModelViewSet):
             )
 
         # Create confirmation notification
-        Notification.objects.create(
-            tenant=request.tenant,
-            recipient=target_client,
-            channel='email',
-            template_key='booking_confirmation',
-            related_entity_id=booking.id
-        )
+        from apps.notifications.services import NotificationService
+        from apps.notifications.events import BookingConfirmedEvent
+        NotificationService.handle_event(BookingConfirmedEvent(
+            tenant_id=request.tenant.id,
+            recipient_id=target_client.id,
+            entity_id=booking.id,
+            context_data={
+                'client_name': target_client.profile.first_name if hasattr(target_client, 'profile') else target_client.email,
+                'class_name': session.template.name,
+                'class_time': str(session.start_at),
+                'gym_name': request.tenant.name,
+            }
+        ))
 
         return Response(BookingReadSerializer(booking).data, status=status.HTTP_201_CREATED)
 

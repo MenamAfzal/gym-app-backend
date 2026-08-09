@@ -6,82 +6,11 @@ import logging
 
 from .models import (
     ClassSession, Booking, Waitlist, SubstituteRequest, Package,
-    Notification, Location, StaffLocation
+    Location, StaffLocation
 )
 from apps.users.models import User, UserRole
 
 logger = logging.getLogger(__name__)
-
-@shared_task
-def run_reminder_job():
-    """
-    Scheduled task (runs e.g. every 5-15 mins).
-    Scans upcoming sessions and sends reminders at 24h and 1h offsets.
-    """
-    logger.info("Running ReminderJob...")
-    now = timezone.now()
-    from apps.core.tenants.context import set_current_tenant, reset_current_tenant
-
-    # 1. 24-hour Reminders
-    target_24h_start = now + timedelta(hours=23, minutes=45)
-    target_24h_end = now + timedelta(hours=24, minutes=15)
-    sessions_24h = ClassSession.all_objects.filter(
-        start_at__gte=target_24h_start,
-        start_at__lte=target_24h_end,
-        status='scheduled'
-    )
-    for session in sessions_24h:
-        token = set_current_tenant(session.tenant)
-        try:
-            bookings = session.bookings.filter(status='booked')
-            for booking in bookings:
-                # Check if reminder already sent to prevent duplicate
-                exists = Notification.objects.filter(
-                    recipient=booking.client,
-                    template_key='session_reminder_24h',
-                    related_entity_id=booking.id
-                ).exists()
-                if not exists:
-                    Notification.objects.create(
-                        tenant=booking.tenant,
-                        recipient=booking.client,
-                        channel='email',
-                        template_key='session_reminder_24h',
-                        related_entity_id=booking.id
-                    )
-                    logger.info(f"Generated 24h reminder for {booking.client.email} for session {session}")
-        finally:
-            reset_current_tenant(token)
-
-    # 2. 1-hour Reminders
-    target_1h_start = now + timedelta(minutes=45)
-    target_1h_end = now + timedelta(minutes=75)
-    sessions_1h = ClassSession.all_objects.filter(
-        start_at__gte=target_1h_start,
-        start_at__lte=target_1h_end,
-        status='scheduled'
-    )
-    for session in sessions_1h:
-        token = set_current_tenant(session.tenant)
-        try:
-            bookings = session.bookings.filter(status='booked')
-            for booking in bookings:
-                exists = Notification.objects.filter(
-                    recipient=booking.client,
-                    template_key='session_reminder_1h',
-                    related_entity_id=booking.id
-                ).exists()
-                if not exists:
-                    Notification.objects.create(
-                        tenant=booking.tenant,
-                        recipient=booking.client,
-                        channel='sms',
-                        template_key='session_reminder_1h',
-                        related_entity_id=booking.id
-                    )
-                    logger.info(f"Generated 1h reminder for {booking.client.email} for session {session}")
-        finally:
-            reset_current_tenant(token)
 
 
 @shared_task
@@ -142,13 +71,18 @@ def process_waitlist_promotion_job(session_id):
                 next_waitlist.save()
 
                 # Enqueue offer notification
-                Notification.objects.create(
-                    tenant=next_waitlist.tenant,
-                    recipient=next_waitlist.client,
-                    channel='push',
-                    template_key='waitlist_spot_offered',
-                    related_entity_id=next_waitlist.id
-                )
+                from apps.notifications.services import NotificationService
+                from apps.notifications.events import WaitlistOfferedEvent
+                NotificationService.handle_event(WaitlistOfferedEvent(
+                    tenant_id=next_waitlist.tenant_id,
+                    recipient_id=next_waitlist.client_id,
+                    entity_id=next_waitlist.id,
+                    context_data={
+                        'client_name': next_waitlist.client.profile.first_name if hasattr(next_waitlist.client, 'profile') else next_waitlist.client.email,
+                        'class_name': session_locked.template.name,
+                        'class_time': str(session_locked.start_at),
+                    }
+                ))
                 logger.info(f"Promoted client {next_waitlist.client.email} to offered status for session {session_id}")
     finally:
         reset_current_tenant(token)
@@ -222,14 +156,18 @@ def process_credit_refund_job(session_id):
                     pkg.save()
                     logger.info(f"Refunded credit to package {pkg.id} for client {booking.client.email}")
 
-
-                Notification.objects.create(
-                    tenant=booking.tenant,
-                    recipient=booking.client,
-                    channel='email',
-                    template_key='session_cancelled_refund',
-                    related_entity_id=booking.id
-                )
+                from apps.notifications.services import NotificationService
+                from apps.notifications.events import SessionCancelledEvent
+                NotificationService.handle_event(SessionCancelledEvent(
+                    tenant_id=booking.tenant_id,
+                    recipient_id=booking.client_id,
+                    entity_id=booking.id,
+                    context_data={
+                        'client_name': booking.client.profile.first_name if hasattr(booking.client, 'profile') else booking.client.email,
+                        'class_name': session.template.name,
+                        'class_time': str(session.start_at),
+                    }
+                ))
     finally:
         reset_current_tenant(token)
 
@@ -260,13 +198,20 @@ def process_substitute_broadcast_job(substitute_request_id):
         ).exclude(id=sub_req.requested_by_staff.id)
 
         for staff in eligible_staff:
-            Notification.objects.create(
-                tenant=sub_req.tenant,
-                recipient=staff,
-                channel='push',
-                template_key='substitute_request_broadcast',
-                related_entity_id=sub_req.id
-            )
+            from apps.notifications.services import NotificationService
+            from apps.notifications.events import NotificationEvent
+            NotificationService.handle_event(NotificationEvent(
+                tenant_id=sub_req.tenant_id,
+                event_type='substitute_request_broadcast',
+                recipient_id=staff.id,
+                entity_id=sub_req.id,
+                context_data={
+                    'staff_name': staff.profile.first_name if hasattr(staff, 'profile') else staff.email,
+                    'class_name': session.template.name,
+                    'class_time': str(session.start_at),
+                    'room_name': location.name,
+                }
+            ))
             logger.info(f"Substitute notification sent to {staff.email} for request {sub_req.id}")
     finally:
         reset_current_tenant(token)
