@@ -26,6 +26,16 @@ def assign_free_plan_on_tenant_creation(sender, instance, created, **kwargs):
     if not created:
         return
 
+    # 1. Seed reflection_logger data
+    from apps.reflection_logger.services.seeder import seed_symptoms_for_tenant, seed_focus_for_tenant
+    try:
+        seed_symptoms_for_tenant(instance)
+        seed_focus_for_tenant(instance)
+        logger.info("Auto-seeded reflection logger data for tenant '%s'.", instance.name)
+    except Exception as e:
+        logger.exception("Failed to auto-seed reflection logger data for tenant '%s': %s", instance.name, e)
+
+    # 2. Assign free plan
     from apps.payments.models import BillingPlan, TenantBillingSubscription
 
     try:
