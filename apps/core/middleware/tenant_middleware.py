@@ -70,6 +70,12 @@ class TenantMiddleware(MiddlewareMixin):
         # Set Context
         request.tenant = tenant
         request._tenant_context_token = set_current_tenant(tenant)
+
+        # Bypass tenant isolation for Django Admin (Platform Admin Control Tower)
+        if request.path.startswith('/admin/'):
+            from apps.core.tenants.context import _bypass_isolation
+            request._bypass_isolation_token = _bypass_isolation.set(True)
+
         print(f"TenantMiddleware: Path={request.path} | Resolved Tenant={tenant} (ID={getattr(tenant, 'id', None)})")
         
         return None
@@ -78,5 +84,11 @@ class TenantMiddleware(MiddlewareMixin):
         token = getattr(request, '_tenant_context_token', None)
         if token:
             reset_current_tenant(token)
+
+        bypass_token = getattr(request, '_bypass_isolation_token', None)
+        if bypass_token:
+            from apps.core.tenants.context import _bypass_isolation
+            _bypass_isolation.reset(bypass_token)
+
         return response
     
