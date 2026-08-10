@@ -390,11 +390,13 @@ class CycleDailyLogListCreateView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     def post(self, request):
+        logger.info(f"CycleDailyLogListCreateView POST payload: {request.data}")
         serializer = CycleDailyLogSerializer(data=request.data)
         if serializer.is_valid():
             # Check if log already exists for this date to prevent duplicates
             date = serializer.validated_data.get('date')
             if CycleDailyLog.objects.filter(user=request.user, date=date).exists():
+                 logger.warning(f"CycleDailyLogListCreateView POST duplicate date: {date}")
                  return Response(
                      {"error": "A log for this date already exists. Use PUT to update it."},
                      status=status.HTTP_400_BAD_REQUEST
@@ -402,6 +404,7 @@ class CycleDailyLogListCreateView(APIView):
 
             serializer.save(user=request.user)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
+        logger.error(f"CycleDailyLogListCreateView POST validation failed: {serializer.errors} | Payload: {request.data}")
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
