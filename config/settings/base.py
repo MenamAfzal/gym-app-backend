@@ -57,6 +57,7 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'apps.core.middleware.tenant_middleware.TenantMiddleware',  # Tenant resolution
+    'apps.core.middleware.logging_middleware.RequestResponseLoggingMiddleware',  # Request/Response Logging
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -215,10 +216,23 @@ LOGGING = {
             'backupCount': 5,
             'formatter': 'verbose',
         },
+        'file_api_requests': {
+            'level': 'INFO',
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': str(LOGS_DIR / 'api_requests.log'),
+            'maxBytes': 1024 * 1024 * 10,  # 10 MB
+            'backupCount': 5,
+            'formatter': 'verbose',
+        },
     },
     'loggers': {
         'django': {
             'handlers': ['console', 'file_general', 'file_error'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'apps.request_logger': {
+            'handlers': ['console', 'file_api_requests'],
             'level': 'INFO',
             'propagate': False,
         },
