@@ -18,48 +18,47 @@ class TenantMiddleware(MiddlewareMixin):
         tenant = None
         
         # ------------------------------------------------------------------
-        # STRATEGY 1: Subdomain Resolution (Preferred for Web/Public)
+        # STRATEGY 1: JWT Resolution (Highest priority for authenticated API requests)
         # ------------------------------------------------------------------
-        host = request.get_host().split(':')[0]
-        subdomain = None
-        
-        if not (host.replace('.', '').isnumeric() or host == 'localhost'):
-            host_parts = host.split('.')
-            if len(host_parts) >= 2 and host_parts[0] != 'www':
-                subdomain = host_parts[0]
-
-        if subdomain:
+        auth_header = request.headers.get('Authorization')
+        if auth_header and auth_header.startswith('Bearer '):
+            token = auth_header.split(' ')[1]
             try:
-                tenant = Tenant.objects.get(subdomain=subdomain)
-            except Tenant.DoesNotExist:
-                raise Http404(f"Tenant '{subdomain}' not found")
+                # We decode purely to read the claim. 
+                # DRF will verify signature/expiry later in the view.
+                payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+                tenant_id = payload.get('tenant_id')
+                
+                if tenant_id:
+                    try:
+                        tenant = Tenant.objects.get(id=tenant_id)
+                    except Tenant.DoesNotExist:
+                        pass # Token refers to deleted tenant? Ignore.
+                        
+            except jwt.ExpiredSignatureError as e:
+                print("TenantMiddleware: JWT ExpiredSignatureError:", e)
+            except jwt.DecodeError as e:
+                print("TenantMiddleware: JWT DecodeError:", e)
+            except Exception as e:
+                print("TenantMiddleware: General exception:", e)
 
         # ------------------------------------------------------------------
-        # STRATEGY 2: JWT Resolution (Fallback for API/IP/Postman)
+        # STRATEGY 2: Subdomain Resolution (Fallback for Web/Public/Public APIs)
         # ------------------------------------------------------------------
         if not tenant:
-            auth_header = request.headers.get('Authorization')
-            if auth_header and auth_header.startswith('Bearer '):
-                token = auth_header.split(' ')[1]
+            host = request.get_host().split(':')[0]
+            subdomain = None
+            
+            if not (host.replace('.', '').isnumeric() or host == 'localhost'):
+                host_parts = host.split('.')
+                if len(host_parts) >= 2 and host_parts[0] != 'www':
+                    subdomain = host_parts[0]
+
+            if subdomain:
                 try:
-                    # We decode purely to read the claim. 
-                    # DRF will verify signature/expiry later in the view.
-                    # Ideally, use settings.SECRET_KEY to verify signature here too for safety.
-                    payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-                    tenant_id = payload.get('tenant_id')
-                    
-                    if tenant_id:
-                        try:
-                            tenant = Tenant.objects.get(id=tenant_id)
-                        except Tenant.DoesNotExist:
-                            pass # Token refers to deleted tenant? Ignore.
-                            
-                except jwt.ExpiredSignatureError as e:
-                    print("TenantMiddleware: JWT ExpiredSignatureError:", e)
-                except jwt.DecodeError as e:
-                    print("TenantMiddleware: JWT DecodeError:", e)
-                except Exception as e:
-                    print("TenantMiddleware: General exception:", e)
+                    tenant = Tenant.objects.get(subdomain=subdomain)
+                except Tenant.DoesNotExist:
+                    raise Http404(f"Tenant '{subdomain}' not found")
         
         # ------------------------------------------------------------------
         # Final Validation
