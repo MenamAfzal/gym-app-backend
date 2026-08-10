@@ -1,7 +1,10 @@
+import logging
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework import status
+
+logger = logging.getLogger(__name__)
 from django.shortcuts import get_object_or_404
 from datetime import datetime, date
 
@@ -37,19 +40,31 @@ class DailyReflectionAPIView(APIView):
         return Response(serializer.data)
 
     def post(self, request):
-        serializer = DailyReflectionSerializer(data=request.data, context={"request": request})
-        serializer.is_valid(raise_exception=True)
-        reflection = serializer.save()
-        out = DailyReflectionSerializer(reflection, context={"request": request})
-        return Response(out.data, status=status.HTTP_201_CREATED)
+        logger.info(f"DailyReflectionAPIView POST payload: {request.data}")
+        try:
+            serializer = DailyReflectionSerializer(data=request.data, context={"request": request})
+            serializer.is_valid(raise_exception=True)
+            reflection = serializer.save()
+            out = DailyReflectionSerializer(reflection, context={"request": request})
+            return Response(out.data, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            logger.error(f"DailyReflectionAPIView POST failed. Error: {e} | Payload: {request.data}", exc_info=True)
+            raise
+    
     
     def patch(self, request, pk):
-        reflection = get_object_or_404(DailyReflection, pk=pk)
-        # partial=True allows omitting 'date' if you just want to update 'morning'
-        serializer = DailyReflectionSerializer(reflection, data=request.data, partial=True, context={"request": request})
-        serializer.is_valid(raise_exception=True)
-        reflection = serializer.save()
-        return Response(DailyReflectionSerializer(reflection, context={"request": request}).data)
+        logger.info(f"DailyReflectionAPIView PATCH payload: {request.data} | pk: {pk}")
+        try:
+            reflection = get_object_or_404(DailyReflection, pk=pk)
+            # partial=True allows omitting 'date' if you just want to update 'morning'
+            serializer = DailyReflectionSerializer(reflection, data=request.data, partial=True, context={"request": request})
+            serializer.is_valid(raise_exception=True)
+            reflection = serializer.save()
+            return Response(DailyReflectionSerializer(reflection, context={"request": request}).data)
+        except Exception as e:
+            logger.error(f"DailyReflectionAPIView PATCH failed. Error: {e} | pk: {pk} | Payload: {request.data}", exc_info=True)
+            raise
+    
     
 
 
@@ -62,12 +77,18 @@ class DailyReflectionDetailAPIView(APIView):
         return Response(serializer.data)
 
     def post(self, request, pk):
-        reflection = get_object_or_404(DailyReflection, pk=pk)
-        serializer = DailyReflectionSerializer(reflection, data=request.data, context={"request": request})
-        serializer.is_valid(raise_exception=True)
-        reflection = serializer.save()
-        out = DailyReflectionSerializer(reflection, context={"request": request})
-        return Response(out.data)
+        logger.info(f"DailyReflectionDetailAPIView POST payload: {request.data} | pk: {pk}")
+        try:
+            reflection = get_object_or_404(DailyReflection, pk=pk)
+            serializer = DailyReflectionSerializer(reflection, data=request.data, context={"request": request})
+            serializer.is_valid(raise_exception=True)
+            reflection = serializer.save()
+            out = DailyReflectionSerializer(reflection, context={"request": request})
+            return Response(out.data)
+        except Exception as e:
+            logger.error(f"DailyReflectionDetailAPIView POST failed. Error: {e} | pk: {pk} | Payload: {request.data}", exc_info=True)
+            raise
+    
 
 
 # ============================
