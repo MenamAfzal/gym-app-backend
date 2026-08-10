@@ -23,7 +23,7 @@ class ExerciseSerializer(serializers.ModelSerializer):
 
 
 class WorkoutExerciseCreateSerializer(serializers.ModelSerializer):
-    exercise = serializers.PrimaryKeyRelatedField(queryset=Exercise.objects.all())
+    exercise = serializers.PrimaryKeyRelatedField(queryset=Exercise.objects.none())
 
     class Meta:
         model = WorkoutExercise
@@ -31,6 +31,10 @@ class WorkoutExerciseCreateSerializer(serializers.ModelSerializer):
             "exercise", "order", "sets", "reps", "is_superset",
             "video_url", "custom_cues", "superset_group"
         ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["exercise"].queryset = Exercise.objects.all()
 
     def create(self, validated_data):
         return WorkoutExercise.objects.create(**validated_data)
@@ -1112,14 +1116,19 @@ class Saveserializer(serializers.ModelSerializer):
 class ExerciseUpdateSerializer(serializers.ModelSerializer):
     tags = serializers.PrimaryKeyRelatedField(
         many=True,
-        queryset=WorkoutTag.objects.all(),
+        queryset=WorkoutTag.objects.none(),
         required=False
     )
     equipment = serializers.PrimaryKeyRelatedField(
         many=True,
-        queryset=Equipment.objects.all(),
+        queryset=Equipment.objects.none(),
         required=False
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["tags"].queryset = WorkoutTag.objects.all()
+        self.fields["equipment"].queryset = Equipment.objects.all()
 
     class Meta:
         model = Exercise
@@ -1143,7 +1152,7 @@ class ExerciseUpdateSerializer(serializers.ModelSerializer):
 
 class ExerciseSaveSerializer(serializers.ModelSerializer):
     tags = serializers.PrimaryKeyRelatedField(
-        queryset=WorkoutTag.objects.all(),
+        queryset=WorkoutTag.objects.none(),
         many=True,
         error_messages={
             'does_not_exist': 'The tag with id={pk_value} does not exist.',
@@ -1151,12 +1160,17 @@ class ExerciseSaveSerializer(serializers.ModelSerializer):
         }
     )
     equipment = serializers.PrimaryKeyRelatedField(
-        many=True, queryset=Equipment.objects.all(), required=False,
+        many=True, queryset=Equipment.objects.none(), required=False,
         error_messages={
             'does_not_exist': 'The equipment with id={pk_value} does not exist.',
             'incorrect_type': 'equipment IDs must be integers.'
         }
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["tags"].queryset = WorkoutTag.objects.all()
+        self.fields["equipment"].queryset = Equipment.objects.all()
 
     class Meta:
         model = Exercise

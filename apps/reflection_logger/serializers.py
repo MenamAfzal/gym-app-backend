@@ -38,7 +38,7 @@ class MorningFocusSelectionSerializer(serializers.ModelSerializer):
     
     # Make focus_id optional to allow creating new focus options via name
     focus_id = serializers.PrimaryKeyRelatedField(
-        queryset=FocusOption.objects.filter(is_active=True),
+        queryset=FocusOption.objects.none(),
         source="focus",
         write_only=True,
         required=False,
@@ -53,6 +53,10 @@ class MorningFocusSelectionSerializer(serializers.ModelSerializer):
         model = MorningFocusSelection
         fields = ("id", "focus", "focus_id", "focus_name", "focus_icon", "action_plan")
         list_serializer_class = MorningFocusSelectionListSerializer
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["focus_id"].queryset = FocusOption.objects.filter(is_active=True)
 
     def validate(self, attrs):
         focus_obj = attrs.get("focus")
@@ -95,7 +99,7 @@ class EveningFocusReflectionSerializer(serializers.ModelSerializer):
     
     # Make focus_id optional
     focus_id = serializers.PrimaryKeyRelatedField(
-        queryset=FocusOption.objects.filter(is_active=True), 
+        queryset=FocusOption.objects.none(), 
         source="focus", 
         write_only=True,
         required=False,
@@ -109,6 +113,10 @@ class EveningFocusReflectionSerializer(serializers.ModelSerializer):
     class Meta:
         model = EveningFocusReflection
         fields = ("id", "focus", "focus_id", "focus_name", "focus_icon", "effort", "improvement")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["focus_id"].queryset = FocusOption.objects.filter(is_active=True)
 
     def validate(self, attrs):
         focus_obj = attrs.get("focus")
@@ -377,7 +385,7 @@ class CreateCustomTagSerializer(serializers.ModelSerializer):
 class CycleDailyLogSerializer(serializers.ModelSerializer):
     symptoms = serializers.PrimaryKeyRelatedField(
         many=True, 
-        queryset=SymptomTag.objects.all(),
+        queryset=SymptomTag.objects.none(),
         required=False
     )
     
@@ -388,6 +396,10 @@ class CycleDailyLogSerializer(serializers.ModelSerializer):
         model = CycleDailyLog
         fields = ['id', 'date', 'flow_intensity', 'notes', 'symptoms', 'symptom_details', 'created_at']
         read_only_fields = ['id', 'created_at']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["symptoms"].queryset = SymptomTag.objects.all()
 
     def get_symptom_details(self, obj):
         """
