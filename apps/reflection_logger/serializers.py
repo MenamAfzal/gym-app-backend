@@ -399,7 +399,11 @@ class CycleDailyLogSerializer(serializers.ModelSerializer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["symptoms"].queryset = SymptomTag.objects.all()
+        self.fields["symptoms"] = serializers.PrimaryKeyRelatedField(
+            many=True,
+            queryset=SymptomTag.objects.all(),
+            required=False
+        )
 
     def get_symptom_details(self, obj):
         """
