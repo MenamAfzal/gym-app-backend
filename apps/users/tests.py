@@ -537,3 +537,89 @@ class ClientDetailedReflectionAPITest(TestCase):
         self.assertEqual(response_detail.data['id'], str(self.client_user.id))
         self.assertEqual(response_detail.data['stats']['average_sleep_quality'], 8.0)
 
+
+class ClientNutritionGoalAPITest(TestCase):
+    def setUp(self):
+        self.tenant = Tenant.objects.create(name="Padel Gym", subdomain="padel")
+        self.owner = User.objects.create_user(
+            email="owner@padel.com", password="password123", role=UserRole.GYM_OWNER, tenant=self.tenant
+        )
+        self.client_user = User.objects.create_user(
+            email="client@padel.com", password="password123", role=UserRole.CLIENT, tenant=self.tenant
+        )
+        self.api_client = APIClient()
+
+    def test_client_set_get_history_goals(self):
+        # 1. Initially, getting active goal should return 404
+        self.api_client.force_authenticate(user=self.client_user)
+        url = reverse('client-nutrition-goals')
+        response = self.api_client.get(url, HTTP_HOST='padel.testserver')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+        # 2. Set new active goal
+        payload = {
+            "calories_goal_kcal": 2000,
+            "protein_goal_g": 150,
+            "carbs_goal_g": 200,
+            "fat_goal_g": 70,
+            "water_intake_goal_ml": 2500,
+            "base_water_intake_goal_ml": 2500
+        }
+        response = self.api_client.post(url, payload, format='json', HTTP_HOST='padel.testserver')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['calories_goal_kcal'], "2000")
+        self.assertEqual(response.data['is_active'], True)
+
+        # 3. Get active goal
+        response = self.api_client.get(url, HTTP_HOST='padel.testserver')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['calories_goal_kcal'], "2000")
+
+        # 4. Set another active goal (which should deactivate the first one)
+        payload2 = {
+            "calories_goal_kcal": 2200,
+            "protein_goal_g": 160,
+            "carbs_goal_g": 220,
+            "fat_goal_g": 75,
+            "water_intake_goal_ml": 3000
+        }
+        response = self.api_client.post(url, payload2, format='json', HTTP_HOST='padel.testserver')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['calories_goal_kcal'], "2200")
+
+        # 5. Get active goal (should be the new one)
+        response = self.api_client.get(url, HTTP_HOST='padel.testserver')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['calories_goal_kcal'], "2200")
+
+        # 6. Get history (should return both goals, sorted by creation date)
+        response = self.api_client.get(url + "?history=true", HTTP_HOST='padel.testserver')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response.data), 2)
+        self.assertEqual(response.data[0]['calories_goal_kcal'], "2200")
+        self.assertEqual(response.data[0]['is_active'], True)
+        self.assertEqual(response.data[1]['calories_goal_kcal'], "2000")
+        self.assertEqual(response.data[1]['is_active'], False)
+
+    def test_staff_set_get_client_goals(self):
+        # 1. Staff sets goal for client using client_id in POST body
+        self.api_client.force_authenticate(user=self.owner)
+        url = reverse('client-nutrition-goals')
+        payload = {
+            "client_id": str(self.client_user.id),
+            "calories_goal_kcal": 2500,
+            "protein_goal_g": 180,
+            "carbs_goal_g": 240,
+            "fat_goal_g": 80,
+            "water_intake_goal_ml": 3200
+        }
+        response = self.api_client.post(url, payload, format='json', HTTP_HOST='padel.testserver')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data['calories_goal_kcal'], "2500")
+
+        # 2. Staff gets active goal for client using client_id query param
+        response = self.api_client.get(url + f"?client_id={self.client_user.id}", HTTP_HOST='padel.testserver')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['calories_goal_kcal'], "2500")
+
+

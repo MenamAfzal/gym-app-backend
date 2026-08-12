@@ -782,4 +782,71 @@ class ClientMacroHistoryListView(generics.ListAPIView):
         ).prefetch_related(
             all_goals_prefetch
         )
+
+
+class ClientNutritionGoalAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = resolve_target_user(request)
+        history = request.query_params.get("history", "false").lower() == "true"
+
+        qs = NutritionGoal.objects.filter(user=user)
+        if not history:
+            active_goal = qs.filter(is_active=True).order_by("-created_at").first()
+            if not active_goal:
+                return Response({"message": "No active nutrition goal found."}, status=status.HTTP_404_NOT_FOUND)
+            serializer = NutritionGoalSerializer(active_goal)
+            return Response(serializer.data)
+        
+        # History
+        qs = qs.order_by("-created_at")
+        serializer = NutritionGoalSerializer(qs, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        from apps.users.models import UserRole
+        user = resolve_target_user(request)
+
+        # Support passing client/user ID in body if request user is staff
+        if request.user.role in [UserRole.TRAINER, UserRole.GYM_MANAGER, UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
+            target_id = request.data.get("user") or request.data.get("client_id") or request.data.get("user_id")
+            if target_id:
+                from django.contrib.auth import get_user_model
+                User = get_user_model()
+                user = get_object_or_404(User, id=target_id)
+
+        # Deactivate current active goal(s) if any
+        NutritionGoal.objects.filter(user=user, is_active=True).update(is_active=False)
+
+        # Retrieve macro/water goals from payload
+        calories_goal_kcal = request.data.get("calories_goal_kcal")
+        protein_goal_g = request.data.get("protein_goal_g")
+        carbs_goal_g = request.data.get("carbs_goal_g")
+        fat_goal_g = request.data.get("fat_goal_g")
+        water_intake_goal_ml = request.data.get("water_intake_goal_ml")
+        base_water_intake_goal_ml = request.data.get("base_water_intake_goal_ml")
+
+        # Basic validations
+        if not all([calories_goal_kcal, protein_goal_g, carbs_goal_g, fat_goal_g, water_intake_goal_ml]):
+            return Response(
+                {"error": "All fields (calories_goal_kcal, protein_goal_g, carbs_goal_g, fat_goal_g, water_intake_goal_ml) are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Create new goal
+        new_goal = NutritionGoal.objects.create(
+            user=user,
+            calories_goal_kcal=str(calories_goal_kcal),
+            protein_goal_g=str(protein_goal_g),
+            carbs_goal_g=str(carbs_goal_g),
+            fat_goal_g=str(fat_goal_g),
+            water_intake_goal_ml=str(water_intake_goal_ml),
+            base_water_intake_goal_ml=str(base_water_intake_goal_ml or water_intake_goal_ml),
+            is_active=True
+        )
+
+        serializer = NutritionGoalSerializer(new_goal)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
     

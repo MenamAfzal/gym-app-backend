@@ -1,5 +1,10 @@
 from django.urls import path
-from apps.nutritionX.views import AddFoodToMealView, ClientMacroHistoryListView, CustomBeverageAPIView, DailyProgressAPIView, NutritionGoalBulkCreateAPIView, UserDailyMealsView, CustomFoodEntryAPIView, UserDrinkHistoryAPIView, WaterIntakeAPIView
+from apps.nutritionX.views import (
+    AddFoodToMealView, ClientMacroHistoryListView, CustomBeverageAPIView,
+    DailyProgressAPIView, NutritionGoalBulkCreateAPIView, UserDailyMealsView,
+    CustomFoodEntryAPIView, UserDrinkHistoryAPIView, WaterIntakeAPIView,
+    ClientNutritionGoalAPIView
+)
 
 urlpatterns = [
     path("add-food/", AddFoodToMealView.as_view(), name="add-food"),
@@ -8,6 +13,7 @@ urlpatterns = [
 
     path("water-intake/", WaterIntakeAPIView.as_view(), name="water-intake"),
     path("goals/", NutritionGoalBulkCreateAPIView.as_view(), name="nutrition-goals"),
+    path("goals/client/", ClientNutritionGoalAPIView.as_view(), name="client-nutrition-goals"),
     path("add-custom-beverage/", CustomBeverageAPIView.as_view(), name="add-custom-beverage"),
     path('custom-beverages/<int:pk>/', CustomBeverageAPIView.as_view(), name='custom-beverage-detail'),
     path('user-drink-history/', UserDrinkHistoryAPIView.as_view(), name='user-drink-history'),
