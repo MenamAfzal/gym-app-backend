@@ -5,6 +5,7 @@ from apps.core.tenants.models import (
 )
 from django.db import transaction
 from apps.core.tenants.services import TenantEntitlementService
+from apps.payments.models import TenantBillingSubscription
 
 class FeatureSerializer(serializers.ModelSerializer):
     class Meta:
@@ -116,19 +117,42 @@ class TenantSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at']
 
     def get_current_subscription(self, obj):
-        # OPTIMIZATION: Use Python-side filtering if prefetch_related was used.
-        # This prevents 1 query per tenant in the list view.
+
+        
+        if hasattr(obj, '_prefetched_billing_subs'):
+            billing_sub = next(
+                (s for s in obj._prefetched_billing_subs
+                 if s.status == TenantBillingSubscription.StatusChoices.ACTIVE),
+                None
+            )
+        else: 
+            # Fallback for single-instance retrieval (detail endpoint)
+            billing_sub = (
+                TenantBillingSubscription.all_objects
+                .filter(tenant=obj, status=TenantBillingSubscription.StatusChoices.ACTIVE)
+                .select_related('billing_plan')
+                .order_by('-created_at')
+                .first()
+            )
+
+        if billing_sub:
+            return {
+                'plan_name': billing_sub.billing_plan.name,
+                'plan_slug': billing_sub.billing_plan.slug,
+                'status': billing_sub.status,
+                'current_period_end': billing_sub.current_period_end,
+            }
+ 
         if hasattr(obj, '_prefetched_objects_cache') and 'subscriptions' in obj._prefetched_objects_cache:
-            # Find the active one in memory
             active_sub = next(
-                (s for s in obj.subscriptions.all() if s.status == 'active'), 
+                (s for s in obj.subscriptions.all() if s.status == 'active'),
                 None
             )
             return TenantSubscriptionSerializer(active_sub).data if active_sub else None
-        
-        # Fallback for single instance retrieval
+
         sub = obj.subscriptions.filter(status='active').first()
         return TenantSubscriptionSerializer(sub).data if sub else None
+
 
     def get_entitlements(self, obj):
         # Returns the resolved list of features this tenant has access to

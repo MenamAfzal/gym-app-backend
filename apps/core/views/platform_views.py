@@ -27,13 +27,24 @@ class IsPlatformAdmin(permissions.BasePermission):
             request.user.tenant is None
         )
 
+from django.db.models import Prefetch
+from apps.payments.models import TenantBillingSubscription as _TBS
+
 class PlatformTenantViewSet(viewsets.ModelViewSet):
     """
     API for Managing Gyms (Tenants).
     Only accessible by Platform Admins.
     """
-    queryset = Tenant.objects.all().prefetch_related('subscriptions').order_by('-created_at')
+    queryset = Tenant.objects.all().prefetch_related(
+        'subscriptions',
+        Prefetch(
+            'payments_tenantbillingsubscriptions',
+            queryset=_TBS.all_objects.select_related('billing_plan').order_by('-created_at'),
+            to_attr='_prefetched_billing_subs',
+        ),
+    ).order_by('-created_at')
     serializer_class = TenantSerializer
+
     def get_permissions(self):
         """
         Allow anyone to list tenants (e.g. for a directory),

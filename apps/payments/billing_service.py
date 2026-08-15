@@ -255,21 +255,11 @@ class FeatureBillingService:
         billing_sub.stripe_subscription_id = stripe_subscription_id
         billing_sub.status = TenantBillingSubscription.StatusChoices.ACTIVE
 
-        if stripe_subscription_id:
-            try:
-                sub_obj = stripe.Subscription.retrieve(stripe_subscription_id)
-                current_period_end_ts = _get(sub_obj, "current_period_end")
-                if current_period_end_ts:
-                    billing_sub.current_period_end = timezone.datetime.fromtimestamp(
-                        current_period_end_ts, tz=timezone.utc
-                    )
-            except Exception as e:
-                logger.error("Failed to retrieve subscription %s: %s", stripe_subscription_id, e)
 
         billing_sub.save()
         billing_sub.active_features.set(features)
 
-
+        # Record the payment in the platform ledger
         amount_total = _get(session_obj, "amount_total")
         if amount_total:
             import decimal
@@ -357,6 +347,16 @@ class FeatureBillingService:
         if current_period_end_ts:
             billing_sub.current_period_end = timezone.datetime.fromtimestamp(
                 current_period_end_ts, tz=timezone.utc
+            )
+            logger.info(
+                "Set current_period_end for subscription %s: %s",
+                stripe_sub_id,
+                billing_sub.current_period_end,
+            )
+        else:
+            logger.warning(
+                "customer.subscription.updated for %s had no current_period_end.",
+                stripe_sub_id,
             )
 
         billing_sub.save(update_fields=["status", "current_period_end"])

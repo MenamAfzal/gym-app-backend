@@ -427,6 +427,18 @@ def stripe_checkout_webhook(request):
         except Exception as exc:
             logger.exception("Unexpected error fulfilling checkout: %s", exc)
             return HttpResponse(status=500)
+    elif event_type == 'customer.subscription.updated':
+        try:
+            FeatureBillingService.handle_subscription_updated(data_object)
+            logger.info("customer.subscription.updated handled in checkout webhook.")
+        except Exception as exc:
+            logger.exception("Error handling subscription.updated in checkout webhook: %s", exc)
+    elif event_type == 'customer.subscription.deleted':
+        try:
+            FeatureBillingService.handle_subscription_deleted(data_object)
+            logger.info("customer.subscription.deleted handled in checkout webhook.")
+        except Exception as exc:
+            logger.exception("Error handling subscription.deleted in checkout webhook: %s", exc)
     else:
         logger.info("Checkout webhook: unhandled event type '%s'", event_type)
 
