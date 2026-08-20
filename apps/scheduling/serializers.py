@@ -204,8 +204,24 @@ class PackageTypeSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PackageType
-        fields = ['id', 'location', 'location_name', 'name', 'credit_count', 'price', 'validity_days', 'created_at']
-        read_only_fields = ['id', 'location_name', 'created_at']
+        fields = [
+            'id', 'location', 'location_name', 'name', 'credit_count', 
+            'price', 'validity_days', 'billing_cycle', 'is_active',
+            'stripe_product_id', 'stripe_price_id', 'created_at'
+        ]
+        read_only_fields = ['id', 'location_name', 'stripe_product_id', 'stripe_price_id', 'created_at']
+
+    def create(self, validated_data):
+        from apps.payments.stripe_package_service import StripePackageService
+        instance = super().create(validated_data)
+        StripePackageService.sync_package_to_stripe(instance)
+        return instance
+
+    def update(self, instance, validated_data):
+        from apps.payments.stripe_package_service import StripePackageService
+        instance = super().update(instance, validated_data)
+        StripePackageService.sync_package_to_stripe(instance)
+        return instance
 
 
 class PackageSerializer(serializers.ModelSerializer):

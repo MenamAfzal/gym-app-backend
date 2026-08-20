@@ -415,27 +415,39 @@ def stripe_checkout_webhook(request):
     logger.info("Checkout webhook received event: %s", event_type)
 
     if event_type == 'checkout.session.completed':
-        try:
-            billing_sub = FeatureBillingService.fulfill_checkout(data_object)
-            logger.info(
-                "checkout.session.completed fulfilled: sub_id=%s tenant=%s",
-                billing_sub.stripe_subscription_id,
-                billing_sub.tenant_id,
-            )
-        except ValueError as exc:
-            logger.error("Checkout fulfillment error: %s", str(exc))
-        except Exception as exc:
-            logger.exception("Unexpected error fulfilling checkout: %s", exc)
-            return HttpResponse(status=500)
+        metadata = data_object.get('metadata', {})
+        if metadata.get('type') == 'package_purchase':
+            try:
+                from apps.payments.stripe_package_service import StripePackageService
+                StripePackageService.handle_checkout_session_completed(data_object)
+            except Exception as exc:
+                logger.exception("Error handling package checkout session: %s", exc)
+        else:
+            try:
+                billing_sub = FeatureBillingService.fulfill_checkout(data_object)
+                logger.info(
+                    "checkout.session.completed fulfilled: sub_id=%s tenant=%s",
+                    billing_sub.stripe_subscription_id,
+                    billing_sub.tenant_id,
+                )
+            except ValueError as exc:
+                logger.error("Checkout fulfillment error: %s", str(exc))
+            except Exception as exc:
+                logger.exception("Unexpected error fulfilling checkout: %s", exc)
+                return HttpResponse(status=500)
     elif event_type == 'customer.subscription.updated':
         try:
             FeatureBillingService.handle_subscription_updated(data_object)
+            from apps.payments.stripe_package_service import StripePackageService
+            StripePackageService.handle_subscription_updated(data_object)
             logger.info("customer.subscription.updated handled in checkout webhook.")
         except Exception as exc:
             logger.exception("Error handling subscription.updated in checkout webhook: %s", exc)
     elif event_type == 'customer.subscription.deleted':
         try:
             FeatureBillingService.handle_subscription_deleted(data_object)
+            from apps.payments.stripe_package_service import StripePackageService
+            StripePackageService.handle_subscription_deleted(data_object)
             logger.info("customer.subscription.deleted handled in checkout webhook.")
         except Exception as exc:
             logger.exception("Error handling subscription.deleted in checkout webhook: %s", exc)
@@ -443,3 +455,80 @@ def stripe_checkout_webhook(request):
         logger.info("Checkout webhook: unhandled event type '%s'", event_type)
 
     return HttpResponse(status=200)
+
+class PackageCheckoutView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        if user.role != UserRole.CLIENT:
+            return Response({"error": "Only clients can purchase packages."}, status=status.HTTP_403_FORBIDDEN)
+
+        package_type_id = request.data.get('package_type_id')
+        if not package_type_id:
+            return Response({"error": "package_type_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.scheduling.models import PackageType
+        try:
+            package_type = PackageType.objects.get(id=package_type_id, tenant=user.tenant)
+        except PackageType.DoesNotExist:
+            return Response({"error": "Package not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if not package_type.is_active or not package_type.stripe_price_id:
+            return Response({"error": "This package is not available for purchase."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            success_url = request.data.get('success_url', 'https://fit-plus-gym-portal.vercel.app/dashboard/billing/success')
+            cancel_url = request.data.get('cancel_url', 'https://fit-plus-gym-portal.vercel.app/dashboard/billing/cancel')
+
+            session = stripe.checkout.Session.create(
+                payment_method_types=['card'],
+                line_items=[{
+                    'price': package_type.stripe_price_id,
+                    'quantity': 1,
+                }],
+                mode='subscription',
+                customer_email=user.email,
+                metadata={
+                    "type": "package_purchase",
+                    "tenant_id": str(user.tenant.id),
+                    "client_id": str(user.id),
+                    "package_type_id": str(package_type.id)
+                },
+                success_url=success_url,
+                cancel_url=cancel_url,
+            )
+            return Response({"url": session.url}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Error creating checkout session for package {package_type_id}: {str(e)}")
+            return Response({"error": "Failed to create checkout session."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+class PackageCancelView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, package_id):
+        user = request.user
+        if user.role != UserRole.CLIENT:
+            return Response({"error": "Only clients can cancel packages."}, status=status.HTTP_403_FORBIDDEN)
+
+        from apps.scheduling.models import Package
+        try:
+            package = Package.objects.get(id=package_id, client=user, tenant=user.tenant)
+        except Package.DoesNotExist:
+            return Response({"error": "Package not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        if not package.stripe_subscription_id:
+            return Response({"error": "Package does not have an active subscription."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            stripe.Subscription.modify(
+                package.stripe_subscription_id,
+                cancel_at_period_end=True
+            )
+            package.cancel_at_period_end = True
+            package.save(update_fields=['cancel_at_period_end'])
+            return Response({"detail": "Subscription will be canceled at the end of the billing period."}, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"Error canceling subscription for package {package_id}: {str(e)}")
+            return Response({"error": "Failed to cancel subscription."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+

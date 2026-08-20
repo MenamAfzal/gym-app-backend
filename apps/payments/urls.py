@@ -13,6 +13,8 @@ from .views import (
     BillingFeatureListView,
     BillingPlanListView,
     TenantBillingSubscriptionView,
+    PackageCheckoutView,
+    PackageCancelView,
 )
 
 router = DefaultRouter()
@@ -56,5 +58,15 @@ urlpatterns = [
         'billing/subscription/',
         TenantBillingSubscriptionView.as_view(),
         name='billing-subscription',
+    ),
+    path(
+        'packages/checkout/',
+        PackageCheckoutView.as_view(),
+        name='package-checkout',
+    ),
+    path(
+        'packages/<uuid:package_id>/cancel/',
+        PackageCancelView.as_view(),
+        name='package-cancel',
     ),
 ]

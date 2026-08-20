@@ -758,6 +758,19 @@ class PackageTypeViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return PackageType.objects.all()
 
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        from apps.payments.stripe_package_service import StripePackageService
+         
+        StripePackageService.archive_package_on_stripe(instance)
+
+        if instance.purchased_packages.exists():
+            instance.is_active = False
+            instance.save(update_fields=['is_active'])
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        else:
+            return super().destroy(request, *args, **kwargs)
+
 
 class PackageViewSet(viewsets.ModelViewSet):
     queryset = Package.all_objects.all()

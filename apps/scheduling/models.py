@@ -142,11 +142,36 @@ class PackageType(UUIDMixin, TimestampMixin, TenantMixin):
     """
     Purchasable credit package (e.g. '10-class pack').
     """
+    BILLING_CYCLE_CHOICES = [
+        ('weekly', 'Weekly'),
+        ('monthly', 'Monthly'),
+        ('yearly', 'Yearly'),
+    ]
+
     location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='package_types')
     name = models.CharField(max_length=100)
     credit_count = models.PositiveIntegerField()
     price = models.DecimalField(max_digits=10, decimal_places=2)
     validity_days = models.PositiveIntegerField(help_text="Validity period in days after purchase")
+    
+    stripe_product_id = models.CharField(
+        max_length=255, blank=True, null=True,
+        help_text="Stripe Product ID on the Platform account"
+    )
+    stripe_price_id = models.CharField(
+        max_length=255, blank=True, null=True,
+        help_text="Stripe Price ID on the Platform account"
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Whether this package is active and purchaseable"
+    )
+    billing_cycle = models.CharField(
+        max_length=20,
+        choices=BILLING_CYCLE_CHOICES,
+        default='monthly',
+        help_text="Billing frequency for the package subscription"
+    )
 
     def __str__(self):
         return f"{self.name} - {self.credit_count} credits"
@@ -156,14 +181,34 @@ class Package(UUIDMixin, TimestampMixin, TenantMixin):
     """
     An active instance of a purchased PackageType for a client.
     """
+    STATUS_CHOICES = [
+        ('active', 'Active'),
+        ('past_due', 'Past Due'),
+        ('canceled', 'Canceled'),
+    ]
+
     client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='packages')
     package_type = models.ForeignKey(PackageType, on_delete=models.PROTECT, related_name='purchased_packages')
     credits_remaining = models.PositiveIntegerField()
     purchased_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
+    
+    stripe_subscription_id = models.CharField(
+        max_length=255, blank=True, null=True, unique=True,
+        help_text="Stripe Subscription ID (sub_...) for the package"
+    )
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default='active',
+        help_text="Subscription status"
+    )
+    cancel_at_period_end = models.BooleanField(
+        default=False,
+        help_text="Whether the client has requested cancellation at the end of the billing period"
+    )
 
     def __str__(self):
         return f"{self.package_type.name} for {self.client.email} ({self.credits_remaining} left)"
+
 
     def is_valid_for_date(self, target_date):
         target_d = target_date.date() if hasattr(target_date, 'date') else target_date
