@@ -5,8 +5,20 @@ from .models import BillingFeature, BillingPlan, TenantBillingSubscription
 class BillingFeatureSerializer(serializers.ModelSerializer):
     class Meta:
         model = BillingFeature
-        fields = ["id", "name", "code", "description", "is_active"]
-        read_only_fields = fields
+        fields = [
+            "id",
+            "name",
+            "code",
+            "description",
+            "price",
+            "billing_cycle",
+            "stripe_product_id",
+            "stripe_price_id",
+            "is_active",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "stripe_product_id", "stripe_price_id", "created_at", "updated_at"]
 
 
 class BillingPlanSerializer(serializers.ModelSerializer):

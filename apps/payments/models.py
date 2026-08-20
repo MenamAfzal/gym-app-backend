@@ -38,9 +38,29 @@ class BillingFeature(BaseModel):
         blank=True,
         help_text="Short description shown on the billing/upgrade page",
     )
+    stripe_product_id = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        help_text="Stripe Product ID for this feature",
+    )
     stripe_price_id = models.CharField(
         max_length=255,
+        blank=True,
+        null=True,
         help_text="Stripe Price ID (price_...) for this feature's recurring charge",
+    )
+    price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0.00,
+        help_text="Recurring price of the feature subscription",
+    )
+    billing_cycle = models.CharField(
+        max_length=20,
+        choices=[('weekly', 'Weekly'), ('monthly', 'Monthly')],
+        default='monthly',
+        help_text="Billing frequency for this feature",
     )
     is_active = models.BooleanField(
         default=True,

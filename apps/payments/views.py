@@ -268,9 +268,136 @@ class BillingFeatureListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        features = BillingFeature.objects.filter(is_active=True).order_by('name')
+        is_platform_admin = (
+            request.user.is_staff and 
+            getattr(request.user, 'tenant', None) is None
+        )
+        if is_platform_admin:
+            features = BillingFeature.objects.all().order_by('name')
+        else:
+            features = BillingFeature.objects.filter(is_active=True).order_by('name')
         serializer = BillingFeatureSerializer(features, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        is_platform_admin = (
+            request.user.is_staff and 
+            getattr(request.user, 'tenant', None) is None
+        )
+        if not is_platform_admin:
+            return Response({"detail": "Only platform administrators can create features."}, status=status.HTTP_403_FORBIDDEN)
+            
+        serializer = BillingFeatureSerializer(data=request.data)
+        if serializer.is_valid():
+            feature = serializer.save()
+            try:
+                FeatureBillingService.sync_feature_to_stripe(feature)
+                feature.save()
+            except Exception as e:
+                feature.delete()
+                return Response({"error": f"Stripe integration failed: {str(e)}"}, status=status.HTTP_502_BAD_GATEWAY)
+                
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BillingFeatureDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_object(self, pk):
+        try:
+            return BillingFeature.objects.get(pk=pk)
+        except BillingFeature.DoesNotExist:
+            return None
+
+    def get(self, request, pk):
+        feature = self.get_object(pk)
+        if not feature:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        serializer = BillingFeatureSerializer(feature)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def put(self, request, pk):
+        is_platform_admin = (
+            request.user.is_staff and 
+            getattr(request.user, 'tenant', None) is None
+        )
+        if not is_platform_admin:
+            return Response({"detail": "Only platform administrators can edit features."}, status=status.HTTP_403_FORBIDDEN)
+            
+        feature = self.get_object(pk)
+        if not feature:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+            
+        old_price = feature.price
+        old_cycle = feature.billing_cycle
+        
+        serializer = BillingFeatureSerializer(feature, data=request.data, partial=False)
+        if serializer.is_valid():
+            updated_feature = serializer.save()
+            try:
+                FeatureBillingService.sync_feature_to_stripe(
+                    updated_feature,
+                    old_price=old_price,
+                    old_cycle=old_cycle
+                )
+                updated_feature.save()
+            except Exception as e:
+                return Response({"error": f"Stripe update failed: {str(e)}"}, status=status.HTTP_502_BAD_GATEWAY)
+                
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def patch(self, request, pk):
+        is_platform_admin = (
+            request.user.is_staff and 
+            getattr(request.user, 'tenant', None) is None
+        )
+        if not is_platform_admin:
+            return Response({"detail": "Only platform administrators can edit features."}, status=status.HTTP_403_FORBIDDEN)
+            
+        feature = self.get_object(pk)
+        if not feature:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+            
+        old_price = feature.price
+        old_cycle = feature.billing_cycle
+        
+        serializer = BillingFeatureSerializer(feature, data=request.data, partial=True)
+        if serializer.is_valid():
+            updated_feature = serializer.save()
+            try:
+                FeatureBillingService.sync_feature_to_stripe(
+                    updated_feature,
+                    old_price=old_price,
+                    old_cycle=old_cycle
+                )
+                updated_feature.save()
+            except Exception as e:
+                return Response({"error": f"Stripe update failed: {str(e)}"}, status=status.HTTP_502_BAD_GATEWAY)
+                
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        is_platform_admin = (
+            request.user.is_staff and 
+            getattr(request.user, 'tenant', None) is None
+        )
+        if not is_platform_admin:
+            return Response({"detail": "Only platform administrators can delete features."}, status=status.HTTP_403_FORBIDDEN)
+            
+        feature = self.get_object(pk)
+        if not feature:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+            
+        try:
+            FeatureBillingService.delete_feature_from_stripe(feature)
+            feature.delete()
+        except Exception as e:
+            return Response({"error": f"Stripe delete failed: {str(e)}"}, status=status.HTTP_502_BAD_GATEWAY)
+            
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class BillingPlanListView(APIView):

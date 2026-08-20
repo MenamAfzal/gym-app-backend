@@ -11,6 +11,7 @@ from .views import (
     CreateCheckoutSessionView,
     stripe_checkout_webhook,
     BillingFeatureListView,
+    BillingFeatureDetailView,
     BillingPlanListView,
     TenantBillingSubscriptionView,
     PackageCheckoutView,
@@ -47,6 +48,11 @@ urlpatterns = [
         'billing/features/',
         BillingFeatureListView.as_view(),
         name='billing-feature-list',
+    ),
+    path(
+        'billing/features/<uuid:pk>/',
+        BillingFeatureDetailView.as_view(),
+        name='billing-feature-detail',
     ),
     path(
         'billing/plans/',

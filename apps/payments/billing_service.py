@@ -388,3 +388,75 @@ class FeatureBillingService:
                 "No TenantBillingSubscription for deleted Stripe sub %s.", stripe_sub_id
             )
 
+    @classmethod
+    def sync_feature_to_stripe(cls, feature: BillingFeature, old_price=None, old_cycle=None) -> None:
+        """
+        Creates or updates the product & price on Stripe, and saves IDs to DB.
+        """
+        # 1. Product creation / update
+        if not feature.stripe_product_id:
+            try:
+                product = stripe.Product.create(
+                    name=feature.name,
+                    description=feature.description,
+                    metadata={"code": feature.code, "type": "billing_feature"}
+                )
+                feature.stripe_product_id = product.id
+            except Exception as e:
+                logger.error(f"Failed to create Stripe product for {feature.name}: {e}")
+                raise
+        else:
+            try:
+                stripe.Product.modify(
+                    feature.stripe_product_id,
+                    name=feature.name,
+                    description=feature.description
+                )
+            except Exception as e:
+                logger.warning(f"Failed to modify Stripe product {feature.stripe_product_id}: {e}")
+
+        # 2. Price creation / update
+        # Stripe prices are immutable. If price value or billing cycle changes, or if stripe_price_id is missing, create a new one.
+        price_changed = old_price is not None and feature.price != old_price
+        cycle_changed = old_cycle is not None and feature.billing_cycle != old_cycle
+        
+        if not feature.stripe_price_id or price_changed or cycle_changed:
+            try:
+                # Deactivate the old price if it exists
+                if feature.stripe_price_id:
+                    try:
+                        stripe.Price.modify(feature.stripe_price_id, active=False)
+                    except Exception as old_err:
+                        logger.warning(f"Could not deactivate old Stripe price {feature.stripe_price_id}: {old_err}")
+
+                price_in_cents = int(feature.price * 100)
+                interval_map = {'monthly': 'month', 'weekly': 'week'}
+                stripe_interval = interval_map.get(feature.billing_cycle, 'month')
+                price = stripe.Price.create(
+                    product=feature.stripe_product_id,
+                    unit_amount=price_in_cents,
+                    currency="usd",
+                    recurring={"interval": stripe_interval},
+                    metadata={"code": feature.code}
+                )
+                feature.stripe_price_id = price.id
+            except Exception as e:
+                logger.error(f"Failed to create Stripe price for {feature.name}: {e}")
+                raise
+
+    @classmethod
+    def delete_feature_from_stripe(cls, feature: BillingFeature) -> None:
+        """
+        Deactivates product and price on Stripe.
+        """
+        if feature.stripe_price_id:
+            try:
+                stripe.Price.modify(feature.stripe_price_id, active=False)
+            except Exception as e:
+                logger.warning(f"Could not deactivate Stripe price {feature.stripe_price_id}: {e}")
+        if feature.stripe_product_id:
+            try:
+                stripe.Product.modify(feature.stripe_product_id, active=False)
+            except Exception as e:
+                logger.warning(f"Could not deactivate Stripe product {feature.stripe_product_id}: {e}")
+

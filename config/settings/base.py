@@ -1,9 +1,11 @@
 from pathlib import Path
 import os
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 # Adjusted for moving settings one level deeper: config/settings/base.py -> config/settings/ -> config/ -> root
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+load_dotenv(BASE_DIR / '.env', override=True)
 
 # Application definition
 DJANGO_APPS = [
