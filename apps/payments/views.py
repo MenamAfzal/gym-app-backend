@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 stripe.api_key = settings.STRIPE_SECRET_KEY
 stripe_webhook_secret = settings.STRIPE_WEBHOOK_SECRET
+stripe_checkout_webhook_secret = getattr(settings, 'STRIPE_CHECKOUT_WEBHOOK_SECRET', stripe_webhook_secret)
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -389,11 +390,11 @@ def stripe_checkout_webhook(request):
     event = None
 
     try:
-        if stripe_webhook_secret == 'whsec_mock':
+        if stripe_checkout_webhook_secret == 'whsec_mock':
             event = json.loads(payload)
         else:
             event = stripe.Webhook.construct_event(
-                payload, sig_header, stripe_webhook_secret
+                payload, sig_header, stripe_checkout_webhook_secret
             )
     except ValueError:
         logger.error("Checkout webhook: invalid payload.")
