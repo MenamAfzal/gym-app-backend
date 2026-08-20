@@ -117,11 +117,14 @@ class StripePackageService:
             pass
 
     @staticmethod
-    def handle_checkout_session_completed(session: dict) -> None:
+    def handle_checkout_session_completed(session) -> None:
         """
         Handles successful package purchase checkout session.
         Creates the local Package and Payment records.
         """
+        if not isinstance(session, dict):
+            session = session.to_dict()
+
         metadata = session.get('metadata', {})
         package_type_id = metadata.get('package_type_id')
         client_id = metadata.get('client_id')
@@ -180,10 +183,13 @@ class StripePackageService:
             logger.info(f"Created Package {package.id} and Payment for checkout session {session.get('id')}")
 
     @staticmethod
-    def handle_subscription_updated(subscription: dict) -> None:
+    def handle_subscription_updated(subscription) -> None:
         """
         Handles package subscription renewals or status updates.
         """
+        if not isinstance(subscription, dict):
+            subscription = subscription.to_dict()
+
         subscription_id = subscription.get('id')
         status = subscription.get('status')
         cancel_at_period_end = subscription.get('cancel_at_period_end', False)
@@ -204,10 +210,13 @@ class StripePackageService:
                 pass
 
     @staticmethod
-    def handle_subscription_deleted(subscription: dict) -> None:
+    def handle_subscription_deleted(subscription) -> None:
         """
         Handles package subscription cancellations.
         """
+        if not isinstance(subscription, dict):
+            subscription = subscription.to_dict()
+
         subscription_id = subscription.get('id')
         
         from apps.scheduling.models import Package

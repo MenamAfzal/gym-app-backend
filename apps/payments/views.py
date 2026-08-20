@@ -416,16 +416,17 @@ def stripe_checkout_webhook(request):
     logger.info("Checkout webhook received event: %s", event_type)
 
     if event_type == 'checkout.session.completed':
-        metadata = data_object.get('metadata', {})
+        session_dict = data_object if isinstance(data_object, dict) else data_object.to_dict()
+        metadata = session_dict.get('metadata', {})
         if metadata.get('type') == 'package_purchase':
             try:
                 from apps.payments.stripe_package_service import StripePackageService
-                StripePackageService.handle_checkout_session_completed(data_object)
+                StripePackageService.handle_checkout_session_completed(session_dict)
             except Exception as exc:
                 logger.exception("Error handling package checkout session: %s", exc)
         else:
             try:
-                billing_sub = FeatureBillingService.fulfill_checkout(data_object)
+                billing_sub = FeatureBillingService.fulfill_checkout(session_dict)
                 logger.info(
                     "checkout.session.completed fulfilled: sub_id=%s tenant=%s",
                     billing_sub.stripe_subscription_id,
