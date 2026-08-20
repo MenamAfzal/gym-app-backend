@@ -104,6 +104,13 @@ class FeatureBillingService:
             plan, feature_ids, active_features
         )
 
+        billing_cycles = {f.billing_cycle for f in selected_features}
+        if len(billing_cycles) > 1:
+            raise BillingValidationError(
+                "You cannot purchase monthly and weekly features in the same transaction. "
+                "Please checkout weekly and monthly features separately."
+            )
+
         line_items = [
             {
                 "price": feature.stripe_price_id,
