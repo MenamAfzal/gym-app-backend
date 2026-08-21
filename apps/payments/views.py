@@ -50,7 +50,24 @@ class TenantLedgerViewSet(viewsets.ReadOnlyModelViewSet):
         user = self.request.user
         if user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
             return PlatformLedger.objects.none()
-        return PlatformLedger.objects.all()
+            
+        queryset = PlatformLedger.objects.all()
+        
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        tx_type = self.request.query_params.get('type')
+        status_param = self.request.query_params.get('status')
+        
+        if start_date:
+            queryset = queryset.filter(created_at__gte=start_date)
+        if end_date:
+            queryset = queryset.filter(created_at__lte=end_date)
+        if tx_type:
+            queryset = queryset.filter(type=tx_type)
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+            
+        return queryset.order_by('-created_at')
 
 class PlatformLedgerViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -67,8 +84,26 @@ class PlatformLedgerViewSet(viewsets.ReadOnlyModelViewSet):
             
         from apps.core.tenants.context import bypass_tenant_isolation
         with bypass_tenant_isolation():
-            # Use all_objects to bypass tenant isolation
-            return PlatformLedger.all_objects.all()
+            queryset = PlatformLedger.all_objects.all()
+            
+            tenant_id = self.request.query_params.get('tenant') or self.request.query_params.get('tenant_id')
+            start_date = self.request.query_params.get('start_date')
+            end_date = self.request.query_params.get('end_date')
+            tx_type = self.request.query_params.get('type')
+            status_param = self.request.query_params.get('status')
+            
+            if tenant_id:
+                queryset = queryset.filter(tenant_id=tenant_id)
+            if start_date:
+                queryset = queryset.filter(created_at__gte=start_date)
+            if end_date:
+                queryset = queryset.filter(created_at__lte=end_date)
+            if tx_type:
+                queryset = queryset.filter(type=tx_type)
+            if status_param:
+                queryset = queryset.filter(status=status_param)
+                
+            return queryset.order_by('-created_at')
 
 class StripeConnectOnboardingView(APIView):
     """
@@ -678,22 +713,39 @@ class TenantFinanceSummaryAPIView(APIView):
         if not tenant:
             return Response({"error": "No tenant associated with your account."}, status=status.HTTP_400_BAD_REQUEST)
 
-        from django.db.models import Sum
+        from django.db.models import Sum, Q
         import decimal
 
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+
+        # Base filters
+        charges_filter = Q(type=PlatformLedger.TransactionType.CHARGE)
+        payouts_filter = Q()
+        subs_filter = Q(type=PlatformLedger.TransactionType.SUBSCRIPTION)
+
+        if start_date:
+            charges_filter &= Q(created_at__gte=start_date)
+            payouts_filter &= Q(created_at__gte=start_date)
+            subs_filter &= Q(created_at__gte=start_date)
+        if end_date:
+            charges_filter &= Q(created_at__lte=end_date)
+            payouts_filter &= Q(created_at__lte=end_date)
+            subs_filter &= Q(created_at__lte=end_date)
+
         # 1. Package Sales (type='charge')
-        charges = PlatformLedger.objects.filter(type=PlatformLedger.TransactionType.CHARGE)
+        charges = PlatformLedger.objects.filter(charges_filter)
         total_sales_gross = charges.aggregate(val=Sum('amount_gross'))['val'] or decimal.Decimal('0.00')
         total_platform_fees = charges.aggregate(val=Sum('platform_fee'))['val'] or decimal.Decimal('0.00')
         total_net_earned = charges.aggregate(val=Sum('amount_net'))['val'] or decimal.Decimal('0.00')
 
         # 2. Payouts (TenantPayout)
-        payouts = TenantPayout.objects.all()
+        payouts = TenantPayout.objects.filter(payouts_filter)
         total_paid_payouts = payouts.filter(status=TenantPayout.StatusChoices.PAID).aggregate(val=Sum('amount'))['val'] or decimal.Decimal('0.00')
         total_pending_payouts = charges.filter(status=PlatformLedger.StatusChoices.PENDING).aggregate(val=Sum('amount_net'))['val'] or decimal.Decimal('0.00')
 
         # 3. Platform expenses (type='sub')
-        subs = PlatformLedger.objects.filter(type=PlatformLedger.TransactionType.SUBSCRIPTION)
+        subs = PlatformLedger.objects.filter(subs_filter)
         total_expenses = subs.aggregate(val=Sum('amount_gross'))['val'] or decimal.Decimal('0.00')
 
         return Response({
@@ -727,7 +779,15 @@ class TenantPayoutListView(generics.ListAPIView):
         user = self.request.user
         if user.role != UserRole.GYM_OWNER:
             return TenantPayout.objects.none()
-        return TenantPayout.objects.all().order_by('-created_at')
+        
+        queryset = TenantPayout.objects.all()
+        start_date = self.request.query_params.get('start_date')
+        end_date = self.request.query_params.get('end_date')
+        if start_date:
+            queryset = queryset.filter(created_at__gte=start_date)
+        if end_date:
+            queryset = queryset.filter(created_at__lte=end_date)
+        return queryset.order_by('-created_at')
 
 
 class PlatformTenantFinanceBreakdownAPIView(APIView):
@@ -741,19 +801,49 @@ class PlatformTenantFinanceBreakdownAPIView(APIView):
         if user.role != UserRole.PLATFORM_ADMIN:
             return Response({"error": "Only Platform Admins can view gym breakdowns."}, status=status.HTTP_403_FORBIDDEN)
 
-        from django.db.models import Sum
+        from django.db.models import Sum, Q
         from apps.core.tenants.context import bypass_tenant_isolation
         import decimal
+
+        search = request.query_params.get('search')
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+
+        # Standard page & page_size pagination
+        try:
+            page = int(request.query_params.get('page', 1))
+            page_size = int(request.query_params.get('page_size', 10))
+        except ValueError:
+            page = 1
+            page_size = 10
 
         breakdown = []
         with bypass_tenant_isolation():
             tenants = Tenant.objects.all().order_by('name')
-            for tenant in tenants:
-                charges = PlatformLedger.all_objects.filter(tenant=tenant, type=PlatformLedger.TransactionType.CHARGE)
+            if search:
+                tenants = tenants.filter(Q(name__icontains=search) | Q(subdomain__icontains=search))
+            
+            total_count = tenants.count()
+            start_idx = (page - 1) * page_size
+            end_idx = start_idx + page_size
+            paginated_tenants = tenants[start_idx:end_idx]
+
+            for tenant in paginated_tenants:
+                charges_filter = Q(tenant=tenant, type=PlatformLedger.TransactionType.CHARGE)
+                payouts_filter = Q(tenant=tenant)
+
+                if start_date:
+                    charges_filter &= Q(created_at__gte=start_date)
+                    payouts_filter &= Q(created_at__gte=start_date)
+                if end_date:
+                    charges_filter &= Q(created_at__lte=end_date)
+                    payouts_filter &= Q(created_at__lte=end_date)
+
+                charges = PlatformLedger.all_objects.filter(charges_filter)
                 total_sales_gross = charges.aggregate(val=Sum('amount_gross'))['val'] or decimal.Decimal('0.00')
                 total_platform_fees = charges.aggregate(val=Sum('platform_fee'))['val'] or decimal.Decimal('0.00')
 
-                payouts = TenantPayout.all_objects.filter(tenant=tenant)
+                payouts = TenantPayout.all_objects.filter(payouts_filter)
                 total_paid_payouts = payouts.filter(status=TenantPayout.StatusChoices.PAID).aggregate(val=Sum('amount'))['val'] or decimal.Decimal('0.00')
                 total_pending_payouts = charges.filter(status=PlatformLedger.StatusChoices.PENDING).aggregate(val=Sum('amount_net'))['val'] or decimal.Decimal('0.00')
 
@@ -768,5 +858,10 @@ class PlatformTenantFinanceBreakdownAPIView(APIView):
                     "stripe_connect_status": "Connected" if tenant.stripe_account_id else "Not Connected"
                 })
 
-        return Response(breakdown, status=status.HTTP_200_OK)
+        return Response({
+            "count": total_count,
+            "page": page,
+            "page_size": page_size,
+            "results": breakdown
+        }, status=status.HTTP_200_OK)
 
