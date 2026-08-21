@@ -284,22 +284,38 @@ class FeatureBillingService:
                     description=f"Tenant Subscription: {billing_plan.name}"
                 )
 
-        # IMPORTANT: Cancel any old active subscriptions to prevent double billing
+        # IMPORTANT: Cancel overlapping subscriptions or old core plan subscription to prevent double billing
+        new_feature_ids = set(str(f.id) for f in features)
         old_subs = TenantBillingSubscription.all_objects.filter(
             tenant=tenant,
             status=TenantBillingSubscription.StatusChoices.ACTIVE
         ).exclude(id=billing_sub.id)
 
         for old_sub in old_subs:
-            if old_sub.stripe_subscription_id and old_sub.stripe_subscription_id != stripe_subscription_id:
-                try:
-                    stripe.Subscription.delete(old_sub.stripe_subscription_id)
-                    logger.info("Canceled old Stripe subscription %s for tenant %s", old_sub.stripe_subscription_id, tenant.id)
-                except Exception as e:
-                    logger.error("Failed to cancel old Stripe subscription %s: %s", old_sub.stripe_subscription_id, e)
+            old_features = old_sub.active_features.all()
+            old_feature_ids = set(str(f.id) for f in old_features)
             
-            old_sub.status = TenantBillingSubscription.StatusChoices.CANCELED
-            old_sub.save(update_fields=["status"])
+            should_cancel = False
+            # Overlapping features mean they are re-purchasing/replacing them
+            if new_feature_ids and old_feature_ids and (new_feature_ids & old_feature_ids):
+                should_cancel = True
+            # Plan changed and the old subscription has no features
+            elif old_sub.billing_plan != billing_plan and not old_feature_ids:
+                should_cancel = True
+            # Plan is the same, and both have no features (duplicate plan-only subscription)
+            elif not new_feature_ids and not old_feature_ids and old_sub.billing_plan == billing_plan:
+                should_cancel = True
+
+            if should_cancel:
+                if old_sub.stripe_subscription_id and old_sub.stripe_subscription_id != stripe_subscription_id:
+                    try:
+                        stripe.Subscription.delete(old_sub.stripe_subscription_id)
+                        logger.info("Canceled old Stripe subscription %s for tenant %s", old_sub.stripe_subscription_id, tenant.id)
+                    except Exception as e:
+                        logger.error("Failed to cancel old Stripe subscription %s: %s", old_sub.stripe_subscription_id, e)
+                
+                old_sub.status = TenantBillingSubscription.StatusChoices.CANCELED
+                old_sub.save(update_fields=["status"])
 
         if stripe_customer_id and not tenant.stripe_customer_id:
             tenant.stripe_customer_id = stripe_customer_id

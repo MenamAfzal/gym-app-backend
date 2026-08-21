@@ -481,8 +481,22 @@ class TenantBillingSubscriptionView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        active_subs = TenantBillingSubscription.objects.filter(
+            tenant=tenant,
+            status=TenantBillingSubscription.StatusChoices.ACTIVE
+        ).prefetch_related('active_features')
+        
+        all_features = set()
+        for sub in active_subs:
+            for feat in sub.active_features.all():
+                all_features.add(feat)
+
         serializer = TenantBillingSubscriptionSerializer(billing_sub)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        data = serializer.data
+        
+        from .billing_serializers import BillingFeatureSerializer
+        data["active_features"] = BillingFeatureSerializer(list(all_features), many=True).data
+        return Response(data, status=status.HTTP_200_OK)
 
 
 class CreateCheckoutSessionView(APIView):
