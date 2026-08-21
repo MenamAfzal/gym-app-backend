@@ -31,6 +31,7 @@ stripe_webhook_secret = settings.STRIPE_WEBHOOK_SECRET
 stripe_checkout_webhook_secret = getattr(settings, 'STRIPE_CHECKOUT_WEBHOOK_SECRET', stripe_webhook_secret)
 
 from rest_framework.views import APIView
+from rest_framework import generics
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status, viewsets
@@ -660,4 +661,112 @@ class PackageCancelView(APIView):
         except Exception as e:
             logger.error(f"Error canceling subscription for package {package_id}: {str(e)}")
             return Response({"error": "Failed to cancel subscription."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class TenantFinanceSummaryAPIView(APIView):
+    """
+    Returns a financial summary for the Gym Owner's dashboard.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        if user.role != UserRole.GYM_OWNER:
+            return Response({"error": "Only Gym Owners can view financial summaries."}, status=status.HTTP_403_FORBIDDEN)
+
+        tenant = user.tenant
+        if not tenant:
+            return Response({"error": "No tenant associated with your account."}, status=status.HTTP_400_BAD_REQUEST)
+
+        from django.db.models import Sum
+        import decimal
+
+        # 1. Package Sales (type='charge')
+        charges = PlatformLedger.objects.filter(type=PlatformLedger.TransactionType.CHARGE)
+        total_sales_gross = charges.aggregate(val=Sum('amount_gross'))['val'] or decimal.Decimal('0.00')
+        total_platform_fees = charges.aggregate(val=Sum('platform_fee'))['val'] or decimal.Decimal('0.00')
+        total_net_earned = charges.aggregate(val=Sum('amount_net'))['val'] or decimal.Decimal('0.00')
+
+        # 2. Payouts (TenantPayout)
+        payouts = TenantPayout.objects.all()
+        total_paid_payouts = payouts.filter(status=TenantPayout.StatusChoices.PAID).aggregate(val=Sum('amount'))['val'] or decimal.Decimal('0.00')
+        total_pending_payouts = charges.filter(status=PlatformLedger.StatusChoices.PENDING).aggregate(val=Sum('amount_net'))['val'] or decimal.Decimal('0.00')
+
+        # 3. Platform expenses (type='sub')
+        subs = PlatformLedger.objects.filter(type=PlatformLedger.TransactionType.SUBSCRIPTION)
+        total_expenses = subs.aggregate(val=Sum('amount_gross'))['val'] or decimal.Decimal('0.00')
+
+        return Response({
+            "package_revenue": {
+                "total_gross": str(total_sales_gross),
+                "total_platform_fees": str(total_platform_fees),
+                "total_net_earned": str(total_net_earned),
+            },
+            "payouts": {
+                "total_paid": str(total_paid_payouts),
+                "total_pending": str(total_pending_payouts),
+            },
+            "platform_expenses": {
+                "total_paid": str(total_expenses),
+            },
+            "stripe_connect": {
+                "is_connected": bool(tenant.stripe_account_id),
+                "stripe_account_id": tenant.stripe_account_id,
+            }
+        }, status=status.HTTP_200_OK)
+
+
+class TenantPayoutListView(generics.ListAPIView):
+    """
+    Lists payout history for the current Gym Owner (tenant-scoped).
+    """
+    permission_classes = [IsAuthenticated]
+    serializer_class = TenantPayoutSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.role != UserRole.GYM_OWNER:
+            return TenantPayout.objects.none()
+        return TenantPayout.objects.all().order_by('-created_at')
+
+
+class PlatformTenantFinanceBreakdownAPIView(APIView):
+    """
+    Returns a gym-by-gym financial breakdown list for Platform Admins.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        if user.role != UserRole.PLATFORM_ADMIN:
+            return Response({"error": "Only Platform Admins can view gym breakdowns."}, status=status.HTTP_403_FORBIDDEN)
+
+        from django.db.models import Sum
+        from apps.core.tenants.context import bypass_tenant_isolation
+        import decimal
+
+        breakdown = []
+        with bypass_tenant_isolation():
+            tenants = Tenant.objects.all().order_by('name')
+            for tenant in tenants:
+                charges = PlatformLedger.all_objects.filter(tenant=tenant, type=PlatformLedger.TransactionType.CHARGE)
+                total_sales_gross = charges.aggregate(val=Sum('amount_gross'))['val'] or decimal.Decimal('0.00')
+                total_platform_fees = charges.aggregate(val=Sum('platform_fee'))['val'] or decimal.Decimal('0.00')
+
+                payouts = TenantPayout.all_objects.filter(tenant=tenant)
+                total_paid_payouts = payouts.filter(status=TenantPayout.StatusChoices.PAID).aggregate(val=Sum('amount'))['val'] or decimal.Decimal('0.00')
+                total_pending_payouts = charges.filter(status=PlatformLedger.StatusChoices.PENDING).aggregate(val=Sum('amount_net'))['val'] or decimal.Decimal('0.00')
+
+                breakdown.append({
+                    "tenant_id": str(tenant.id),
+                    "tenant_name": tenant.name,
+                    "subdomain": tenant.subdomain,
+                    "total_client_sales_gross": str(total_sales_gross),
+                    "total_platform_fees": str(total_platform_fees),
+                    "total_paid_payouts": str(total_paid_payouts),
+                    "total_pending_payouts": str(total_pending_payouts),
+                    "stripe_connect_status": "Connected" if tenant.stripe_account_id else "Not Connected"
+                })
+
+        return Response(breakdown, status=status.HTTP_200_OK)
 

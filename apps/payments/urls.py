@@ -16,6 +16,9 @@ from .views import (
     TenantBillingSubscriptionView,
     PackageCheckoutView,
     PackageCancelView,
+    TenantFinanceSummaryAPIView,
+    TenantPayoutListView,
+    PlatformTenantFinanceBreakdownAPIView,
 )
 
 router = DefaultRouter()
@@ -74,5 +77,24 @@ urlpatterns = [
         'packages/<uuid:package_id>/cancel/',
         PackageCancelView.as_view(),
         name='package-cancel',
+    ),
+
+    # ------------------------------------------------------------------ #
+    # Financial Ledger Dashboard APIs                                     #
+    # ------------------------------------------------------------------ #
+    path(
+        'tenant/finance/summary/',
+        TenantFinanceSummaryAPIView.as_view(),
+        name='tenant-finance-summary',
+    ),
+    path(
+        'tenant/payouts/',
+        TenantPayoutListView.as_view(),
+        name='tenant-payouts',
+    ),
+    path(
+        'platform/finance/tenants/',
+        PlatformTenantFinanceBreakdownAPIView.as_view(),
+        name='platform-tenant-finance-breakdown',
     ),
 ]
