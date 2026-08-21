@@ -755,8 +755,17 @@ class PackageTypeViewSet(viewsets.ModelViewSet):
     serializer_class = PackageTypeSerializer
     permission_classes = [IsOwnerOrManager]
 
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve']:
+            return [IsAuthenticated()]
+        return [IsOwnerOrManager()]
+
     def get_queryset(self):
-        return PackageType.objects.all()
+        qs = PackageType.objects.all()
+        location_id = self.request.query_params.get('location')
+        if location_id:
+            qs = qs.filter(location_id=location_id)
+        return qs
 
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
