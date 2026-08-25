@@ -767,6 +767,33 @@ class PackageTypeViewSet(viewsets.ModelViewSet):
             qs = qs.filter(location_id=location_id)
         return qs
 
+    @action(detail=False, methods=['get'], url_path='stats', permission_classes=[IsOwnerOrManager])
+    def stats(self, request):
+        from django.db.models import Sum
+        from apps.scheduling.models import Package, PackageType
+
+        active_packages = Package.objects.filter(status='active')
+        total_subscribers = active_packages.values('client').distinct().count()
+
+        monthly_revenue = active_packages.aggregate(val=Sum('package_type__price'))['val'] or 0.00
+
+        packages_stats = []
+        package_types = PackageType.objects.all()
+        for pt in package_types:
+            count = pt.purchased_packages.filter(status='active').count()
+            packages_stats.append({
+                "package_type_id": str(pt.id),
+                "package_name": pt.name,
+                "price": str(pt.price),
+                "subscriber_count": count
+            })
+
+        return Response({
+            "total_subscribers": total_subscribers,
+            "monthly_revenue": str(monthly_revenue),
+            "subscribers_per_package": packages_stats
+        }, status=status.HTTP_200_OK)
+
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
         from apps.payments.stripe_package_service import StripePackageService
@@ -818,7 +845,7 @@ class ReportsView(APIView):
         end_date = request.query_params.get('end_date')
 
         if not report_type:
-            return Response({"detail": "type query param is required (fill-rate, no-show, staff-utilization)."}, status=400)
+            return Response({"detail": "type query param is required (fill-rate, no-show, staff-utilization, pricing)."}, status=400)
 
         # Default dates
         if not start_date:
@@ -905,6 +932,32 @@ class ReportsView(APIView):
                     "utilization_rate_percent": round((booked_hours / (total_avail_hours * 4)) * 100, 2) if total_avail_hours > 0 else 0.0
                 })
             return Response(data)
+
+        elif report_type == 'pricing' or report_type == 'packages':
+            from django.db.models import Sum
+            from apps.scheduling.models import Package, PackageType
+
+            active_packages = Package.objects.filter(status='active')
+            total_subscribers = active_packages.values('client').distinct().count()
+
+            monthly_revenue = active_packages.aggregate(val=Sum('package_type__price'))['val'] or 0.00
+
+            packages_stats = []
+            package_types = PackageType.objects.all()
+            for pt in package_types:
+                count = pt.purchased_packages.filter(status='active').count()
+                packages_stats.append({
+                    "package_type_id": str(pt.id),
+                    "package_name": pt.name,
+                    "price": str(pt.price),
+                    "subscriber_count": count
+                })
+
+            return Response({
+                "total_subscribers": total_subscribers,
+                "monthly_revenue": str(monthly_revenue),
+                "subscribers_per_package": packages_stats
+            }, status=status.HTTP_200_OK)
 
         return Response({"detail": "Invalid report type."}, status=400)
 

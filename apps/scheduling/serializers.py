@@ -201,15 +201,19 @@ class ClassSessionSerializer(serializers.ModelSerializer):
 
 class PackageTypeSerializer(serializers.ModelSerializer):
     location_name = serializers.CharField(source='location.name', read_only=True)
+    subscriber_count = serializers.SerializerMethodField()
 
     class Meta:
         model = PackageType
         fields = [
             'id', 'location', 'location_name', 'name', 'credit_count', 
             'price', 'validity_days', 'billing_cycle', 'is_active',
-            'stripe_product_id', 'stripe_price_id', 'created_at'
+            'stripe_product_id', 'stripe_price_id', 'subscriber_count', 'created_at'
         ]
-        read_only_fields = ['id', 'location_name', 'stripe_product_id', 'stripe_price_id', 'created_at']
+        read_only_fields = ['id', 'location_name', 'stripe_product_id', 'stripe_price_id', 'subscriber_count', 'created_at']
+
+    def get_subscriber_count(self, obj):
+        return obj.purchased_packages.filter(status='active').count()
 
     def create(self, validated_data):
         from apps.payments.stripe_package_service import StripePackageService
