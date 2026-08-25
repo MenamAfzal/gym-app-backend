@@ -481,6 +481,26 @@ class TenantBillingSubscriptionView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        if billing_sub.stripe_subscription_id:
+            try:
+                import stripe
+                from django.conf import settings
+                stripe.api_key = settings.STRIPE_SECRET_KEY
+                stripe_sub = stripe.Subscription.retrieve(billing_sub.stripe_subscription_id)
+                current_period_end_ts = stripe_sub.get("current_period_end")
+                if current_period_end_ts:
+                    from django.utils import timezone
+                    billing_sub.current_period_end = timezone.datetime.fromtimestamp(
+                        current_period_end_ts, tz=timezone.utc
+                    )
+                    billing_sub.save(update_fields=["current_period_end"])
+            except Exception as e:
+                logger.error(
+                    "Failed to fetch stripe subscription details for %s in view: %s",
+                    billing_sub.stripe_subscription_id,
+                    e
+                )
+
         active_subs = TenantBillingSubscription.objects.filter(
             tenant=tenant,
             status=TenantBillingSubscription.StatusChoices.ACTIVE

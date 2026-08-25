@@ -262,6 +262,22 @@ class FeatureBillingService:
         billing_sub.stripe_subscription_id = stripe_subscription_id
         billing_sub.status = TenantBillingSubscription.StatusChoices.ACTIVE
 
+        if stripe_subscription_id:
+            try:
+                import stripe
+                stripe.api_key = settings.STRIPE_SECRET_KEY
+                stripe_sub = stripe.Subscription.retrieve(stripe_subscription_id)
+                current_period_end_ts = stripe_sub.get("current_period_end")
+                if current_period_end_ts:
+                    billing_sub.current_period_end = timezone.datetime.fromtimestamp(
+                        current_period_end_ts, tz=timezone.utc
+                    )
+            except Exception as e:
+                logger.error(
+                    "Failed to fetch stripe subscription details for %s during fulfillment: %s",
+                    stripe_subscription_id,
+                    e
+                )
 
         billing_sub.save()
         billing_sub.active_features.set(features)
