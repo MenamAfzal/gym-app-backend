@@ -481,6 +481,25 @@ class TenantBillingSubscriptionView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # Self-healing: if stripe_subscription_id is missing, try to recover it from the checkout session
+        if not billing_sub.stripe_subscription_id and billing_sub.stripe_checkout_session_id:
+            try:
+                import stripe
+                from django.conf import settings
+                stripe.api_key = settings.STRIPE_SECRET_KEY
+                if billing_sub.stripe_checkout_session_id.startswith("cs_"):
+                    session = stripe.checkout.Session.retrieve(billing_sub.stripe_checkout_session_id)
+                    sub_id = session.get("subscription")
+                    if sub_id:
+                        billing_sub.stripe_subscription_id = sub_id
+                        billing_sub.save(update_fields=["stripe_subscription_id"])
+            except Exception as e:
+                logger.error(
+                    "Failed to recover subscription ID from checkout session %s: %s",
+                    billing_sub.stripe_checkout_session_id,
+                    e
+                )
+
         if billing_sub.stripe_subscription_id:
             try:
                 import stripe
@@ -493,7 +512,7 @@ class TenantBillingSubscriptionView(APIView):
                     billing_sub.current_period_end = timezone.datetime.fromtimestamp(
                         current_period_end_ts, tz=timezone.utc
                     )
-                    billing_sub.save(update_fields=["current_period_end"])
+                    billing_sub.save(update_fields=["current_period_end", "stripe_subscription_id"])
             except Exception as e:
                 logger.error(
                     "Failed to fetch stripe subscription details for %s in view: %s",
