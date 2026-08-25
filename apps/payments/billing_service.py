@@ -267,7 +267,14 @@ class FeatureBillingService:
                 import stripe
                 stripe.api_key = settings.STRIPE_SECRET_KEY
                 stripe_sub = stripe.Subscription.retrieve(stripe_subscription_id)
-                current_period_end_ts = stripe_sub.get("current_period_end")
+                current_period_end_ts = getattr(stripe_sub, "current_period_end", None)
+                if not current_period_end_ts:
+                    items = getattr(stripe_sub, "items", None)
+                    if items and hasattr(items, "data"):
+                        current_period_end_ts = max(
+                            [getattr(item, "current_period_end", None) for item in items.data if getattr(item, "current_period_end", None)],
+                            default=None
+                        )
                 if current_period_end_ts:
                     billing_sub.current_period_end = timezone.datetime.fromtimestamp(
                         current_period_end_ts, tz=timezone.utc
