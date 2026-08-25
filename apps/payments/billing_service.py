@@ -276,8 +276,9 @@ class FeatureBillingService:
                             default=None
                         )
                 if current_period_end_ts:
-                    billing_sub.current_period_end = timezone.datetime.fromtimestamp(
-                        current_period_end_ts, tz=timezone.utc
+                    from datetime import datetime, timezone as dt_timezone
+                    billing_sub.current_period_end = datetime.fromtimestamp(
+                        current_period_end_ts, tz=dt_timezone.utc
                     )
             except Exception as e:
                 logger.error(

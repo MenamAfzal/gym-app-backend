@@ -515,9 +515,9 @@ class TenantBillingSubscriptionView(APIView):
                             default=None
                         )
                 if current_period_end_ts:
-                    from django.utils import timezone
-                    billing_sub.current_period_end = timezone.datetime.fromtimestamp(
-                        current_period_end_ts, tz=timezone.utc
+                    from datetime import datetime, timezone as dt_timezone
+                    billing_sub.current_period_end = datetime.fromtimestamp(
+                        current_period_end_ts, tz=dt_timezone.utc
                     )
                     billing_sub.save(update_fields=["current_period_end", "stripe_subscription_id"])
             except Exception as e:
