@@ -307,7 +307,7 @@ class FeatureBillingService:
                     description=f"Tenant Subscription: {billing_plan.name}"
                 )
 
-        # IMPORTANT: Cancel overlapping subscriptions or old core plan subscription to prevent double billing
+        # IMPORTANT: Cancel overlapping subscriptions or old core plan subscription to pevent double billing
         new_feature_ids = set(str(f.id) for f in features)
         old_subs = TenantBillingSubscription.all_objects.filter(
             tenant=tenant,
