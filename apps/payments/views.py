@@ -429,7 +429,17 @@ class BillingFeatureDetailView(APIView):
             
         try:
             FeatureBillingService.delete_feature_from_stripe(feature)
-            feature.delete()
+              
+            from apps.core.tenants.context import bypass_tenant_isolation
+            with bypass_tenant_isolation():
+                has_purchased = feature.subscriptions.exists()
+                
+            if has_purchased:
+                feature.is_active = False
+                feature.save(update_fields=['is_active'])
+            else:
+                feature.delete()
+                
         except Exception as e:
             return Response({"error": f"Stripe delete failed: {str(e)}"}, status=status.HTTP_502_BAD_GATEWAY)
             
