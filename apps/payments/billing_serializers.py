@@ -67,11 +67,11 @@ class CheckoutRequestSerializer(serializers.Serializer):
         plan_slug = attrs.get("plan")
         feature_ids = attrs.get("feature_ids", [])
 
-        if plan_slug == BillingPlan.PlanSlug.BASIC and len(feature_ids) != 3:
+        if plan_slug == BillingPlan.PlanSlug.BASIC and len(feature_ids) != 5:
             raise serializers.ValidationError(
                 {
                     "feature_ids": (
-                        f"The Basic plan requires exactly 3 feature IDs. "
+                        f"The Basic plan requires exactly 5 feature IDs. "
                         f"You submitted {len(feature_ids)}."
                     )
                 }
