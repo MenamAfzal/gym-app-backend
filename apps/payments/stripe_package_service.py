@@ -29,11 +29,13 @@ class StripePackageService:
         }
         stripe_interval = interval_map.get(package_type.billing_cycle, 'month')
 
+        desc = f"{package_type.credit_count} credits | Valid for {package_type.validity_days} days | Billing: {package_type.billing_cycle.title()}"
+
         try: 
             if not product_id: 
                 product = stripe.Product.create(
                     name=package_type.name,
-                    description=f"{package_type.credit_count} credits package",
+                    description=desc,
                     metadata={
                         "tenant_id": str(tenant.id),
                         "package_type_id": str(package_type.id)
@@ -46,6 +48,7 @@ class StripePackageService:
                 stripe.Product.modify(
                     product_id,
                     name=package_type.name,
+                    description=desc,
                     metadata={
                         "tenant_id": str(tenant.id),
                         "package_type_id": str(package_type.id)
