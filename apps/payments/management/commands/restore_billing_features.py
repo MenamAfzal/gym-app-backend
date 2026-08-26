@@ -165,9 +165,10 @@ class Command(BaseCommand):
                 self.stdout.write(f"\nProcessing subscription {sub.id} ({sub.stripe_subscription_id})")
                 try:
                     stripe_sub = stripe.Subscription.retrieve(sub.stripe_subscription_id)
+                    stripe_sub_dict = stripe_sub.to_dict()
                     active_feature_ids = []
                     
-                    for item in stripe_sub.get("items", {}).get("data", []):
+                    for item in stripe_sub_dict.get("items", {}).get("data", []):
                         price_id = item.get("price", {}).get("id")
                         if not price_id:
                             continue
