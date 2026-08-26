@@ -819,7 +819,7 @@ class PackageViewSet(viewsets.ModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        qs = Package.objects.all().select_related('package_type', 'client')
+        qs = Package.objects.all().select_related('package_type__location', 'client')
         client_id = self.request.query_params.get('client')
         if client_id:
             qs = qs.filter(client_id=client_id)
@@ -831,7 +831,7 @@ class PackageViewSet(viewsets.ModelViewSet):
             client=request.user,
             credits_remaining__gt=0,
             expires_at__gt=timezone.now()
-        ).select_related('package_type')
+        ).select_related('package_type__location')
         return Response(PackageSerializer(packages, many=True).data)
 
 

@@ -232,18 +232,24 @@ class PackageSerializer(serializers.ModelSerializer):
     package_type_name = serializers.CharField(source='package_type.name', read_only=True)
     client_name = serializers.CharField(source='client.profile.nickname', read_only=True)
     client_email = serializers.CharField(source='client.email', read_only=True)
+    location = LocationSerializer(source='package_type.location', read_only=True)
+    is_canceled = serializers.SerializerMethodField()
 
     class Meta:
         model = Package
         fields = [
             'id', 'client', 'client_name', 'client_email', 'package_type', 
-            'package_type_name', 'credits_remaining', 'purchased_at', 'expires_at', 'created_at'
+            'package_type_name', 'credits_remaining', 'purchased_at', 'expires_at', 'created_at',
+            'location', 'status', 'cancel_at_period_end', 'is_canceled'
         ]
-        read_only_fields = ['id', 'client_name', 'client_email', 'package_type_name', 'created_at']
+        read_only_fields = ['id', 'client_name', 'client_email', 'package_type_name', 'created_at', 'location', 'is_canceled']
         extra_kwargs = {
             'credits_remaining': {'required': False},
             'expires_at': {'required': False}
         }
+
+    def get_is_canceled(self, obj):
+        return obj.status == 'canceled' or obj.cancel_at_period_end
 
     def create(self, validated_data):
         pkg_type = validated_data['package_type']
