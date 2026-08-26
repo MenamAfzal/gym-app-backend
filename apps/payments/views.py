@@ -481,67 +481,98 @@ class TenantBillingSubscriptionView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        # Self-healing: if stripe_subscription_id is missing, try to recover it from the checkout session
-        if not billing_sub.stripe_subscription_id and billing_sub.stripe_checkout_session_id:
-            try:
-                import stripe
-                from django.conf import settings
-                stripe.api_key = settings.STRIPE_SECRET_KEY
-                if billing_sub.stripe_checkout_session_id.startswith("cs_"):
-                    session = stripe.checkout.Session.retrieve(billing_sub.stripe_checkout_session_id)
-                    sub_id = session.get("subscription")
-                    if sub_id:
-                        billing_sub.stripe_subscription_id = sub_id
-                        billing_sub.save(update_fields=["stripe_subscription_id"])
-            except Exception as e:
-                logger.error(
-                    "Failed to recover subscription ID from checkout session %s: %s",
-                    billing_sub.stripe_checkout_session_id,
-                    e
-                )
+        active_subs = (
+            TenantBillingSubscription.objects
+            .filter(tenant=tenant, status=TenantBillingSubscription.StatusChoices.ACTIVE)
+            .select_related('billing_plan')
+            .prefetch_related('active_features')
+        )
 
-        if billing_sub.stripe_subscription_id:
-            try:
-                import stripe
-                from django.conf import settings
-                stripe.api_key = settings.STRIPE_SECRET_KEY
-                stripe_sub = stripe.Subscription.retrieve(billing_sub.stripe_subscription_id)
-                current_period_end_ts = getattr(stripe_sub, "current_period_end", None)
-                if not current_period_end_ts:
-                    items = getattr(stripe_sub, "items", None)
-                    if items and hasattr(items, "data"):
-                        current_period_end_ts = max(
-                            [getattr(item, "current_period_end", None) for item in items.data if getattr(item, "current_period_end", None)],
-                            default=None
-                        )
-                if current_period_end_ts:
-                    from datetime import datetime, timezone as dt_timezone
-                    billing_sub.current_period_end = datetime.fromtimestamp(
-                        current_period_end_ts, tz=dt_timezone.utc
+        # Sync all active subscriptions with Stripe on-the-fly
+        for sub in active_subs:
+            # Self-healing: if stripe_subscription_id is missing, try to recover it from the checkout session
+            if not sub.stripe_subscription_id and sub.stripe_checkout_session_id:
+                try:
+                    import stripe
+                    from django.conf import settings
+                    stripe.api_key = settings.STRIPE_SECRET_KEY
+                    if sub.stripe_checkout_session_id.startswith("cs_"):
+                        session = stripe.checkout.Session.retrieve(sub.stripe_checkout_session_id)
+                        sub_id = session.get("subscription")
+                        if sub_id:
+                            sub.stripe_subscription_id = sub_id
+                            sub.save(update_fields=["stripe_subscription_id"])
+                except Exception as e:
+                    logger.error(
+                        "Failed to recover subscription ID from checkout session %s: %s",
+                        sub.stripe_checkout_session_id,
+                        e
                     )
-                    billing_sub.save(update_fields=["current_period_end", "stripe_subscription_id"])
-            except Exception as e:
-                logger.error(
-                    "Failed to fetch stripe subscription details for %s in view: %s",
-                    billing_sub.stripe_subscription_id,
-                    e
-                )
 
-        active_subs = TenantBillingSubscription.objects.filter(
-            tenant=tenant,
-            status=TenantBillingSubscription.StatusChoices.ACTIVE
-        ).prefetch_related('active_features')
-        
+            if sub.stripe_subscription_id:
+                try:
+                    import stripe
+                    from django.conf import settings
+                    stripe.api_key = settings.STRIPE_SECRET_KEY
+                    stripe_sub = stripe.Subscription.retrieve(sub.stripe_subscription_id)
+                    current_period_end_ts = getattr(stripe_sub, "current_period_end", None)
+                    if not current_period_end_ts:
+                        items = getattr(stripe_sub, "items", None)
+                        if items and hasattr(items, "data"):
+                            current_period_end_ts = max(
+                                [getattr(item, "current_period_end", None) for item in items.data if getattr(item, "current_period_end", None)],
+                                default=None
+                            )
+                    if current_period_end_ts:
+                        from datetime import datetime, timezone as dt_timezone
+                        sub.current_period_end = datetime.fromtimestamp(
+                            current_period_end_ts, tz=dt_timezone.utc
+                        )
+                        sub.save(update_fields=["current_period_end", "stripe_subscription_id"])
+                except Exception as e:
+                    logger.error(
+                        "Failed to fetch stripe subscription details for %s in view: %s",
+                        sub.stripe_subscription_id,
+                        e
+                    )
+
+        # Build combined active features list and map their individual current_period_end dates
         all_features = set()
+        feature_end_dates = {}
         for sub in active_subs:
             for feat in sub.active_features.all():
                 all_features.add(feat)
+                feat_id = str(feat.id)
+                if sub.current_period_end:
+                    if feat_id not in feature_end_dates or sub.current_period_end > feature_end_dates[feat_id]:
+                        feature_end_dates[feat_id] = sub.current_period_end
 
         serializer = TenantBillingSubscriptionSerializer(billing_sub)
         data = serializer.data
         
         from .billing_serializers import BillingFeatureSerializer
-        data["active_features"] = BillingFeatureSerializer(list(all_features), many=True).data
+        feature_list = []
+        for feat in all_features:
+            feat_data = BillingFeatureSerializer(feat).data
+            end_date = feature_end_dates.get(str(feat.id))
+            feat_data['current_period_end'] = end_date.isoformat() if end_date else None
+            feature_list.append(feat_data)
+        
+        data["active_features"] = feature_list
+
+        # Expose all co-existing active subscriptions in detail
+        subscriptions_list = []
+        for sub in active_subs:
+            sub_data = {
+                "id": str(sub.id),
+                "stripe_subscription_id": sub.stripe_subscription_id,
+                "current_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None,
+                "status": sub.status,
+                "features": [str(f.id) for f in sub.active_features.all()]
+            }
+            subscriptions_list.append(sub_data)
+        
+        data["active_subscriptions"] = subscriptions_list
         return Response(data, status=status.HTTP_200_OK)
 
 
