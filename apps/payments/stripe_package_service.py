@@ -36,6 +36,7 @@ class StripePackageService:
                 product = stripe.Product.create(
                     name=package_type.name,
                     description=desc,
+                    active=package_type.is_active,
                     metadata={
                         "tenant_id": str(tenant.id),
                         "package_type_id": str(package_type.id)
@@ -49,6 +50,7 @@ class StripePackageService:
                     product_id,
                     name=package_type.name,
                     description=desc,
+                    active=package_type.is_active,
                     metadata={
                         "tenant_id": str(tenant.id),
                         "package_type_id": str(package_type.id)
