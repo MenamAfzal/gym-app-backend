@@ -734,8 +734,8 @@ class PackageCheckoutView(APIView):
             return Response({"error": "This package is not available for purchase."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            success_url = request.data.get('success_url', 'https://fit-plus-gym-portal.vercel.app/dashboard/billing/success')
-            cancel_url = request.data.get('cancel_url', 'https://fit-plus-gym-portal.vercel.app/dashboard/billing/cancel')
+            success_url = request.data.get('success_url', 'fitverx://payment/success')
+            cancel_url = request.data.get('cancel_url', 'fitverx://payment/cancel')
 
             session = stripe.checkout.Session.create(
                 payment_method_types=['card'],
