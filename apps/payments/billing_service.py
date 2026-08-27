@@ -472,7 +472,20 @@ class FeatureBillingService:
         price_changed = old_price is not None and feature.price != old_price
         cycle_changed = old_cycle is not None and feature.billing_cycle != old_cycle
         
+        should_create_price = False
         if not feature.stripe_price_id or price_changed or cycle_changed:
+            should_create_price = True
+        else:
+            try:
+                existing_price = stripe.Price.retrieve(feature.stripe_price_id)
+                if not existing_price.active:
+                    should_create_price = True
+                    logger.info(f"Price {feature.stripe_price_id} is inactive on Stripe. Will create a new one.")
+            except Exception as retrieve_err:
+                logger.warning(f"Could not retrieve Stripe price {feature.stripe_price_id}: {retrieve_err}")
+                should_create_price = True
+
+        if should_create_price:
             try:
                 # Deactivate the old price if it exists
                 if feature.stripe_price_id:
