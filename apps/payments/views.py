@@ -470,7 +470,10 @@ class TenantBillingSubscriptionView(APIView):
         active_subs = (
             TenantBillingSubscription.objects
             .filter(tenant=tenant)
-            .exclude(status=TenantBillingSubscription.StatusChoices.CANCELED)
+            .exclude(status__in=[
+                TenantBillingSubscription.StatusChoices.CANCELED,
+                TenantBillingSubscription.StatusChoices.INCOMPLETE
+            ])
             .select_related('billing_plan')
             .prefetch_related('active_features')
             .order_by('-created_at')
