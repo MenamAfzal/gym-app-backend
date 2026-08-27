@@ -942,15 +942,18 @@ class TenantFinanceSummaryAPIView(APIView):
         total_expenses = subs.aggregate(val=Sum('amount_gross'))['val'] or decimal.Decimal('0.00')
 
         # 4. Package-wise breakdown
-        package_types = PackageType.objects.all()
+        from django.db.models import Count
+        package_types = PackageType.objects.annotate(
+            sales_count=Count('purchased_packages'),
+            active_subscribers=Count('purchased_packages', filter=Q(purchased_packages__status='active'))
+        )
         package_wise_revenue = []
         total_package_sales_count = 0
         
         for pt in package_types:
-            pt_packages = Package.objects.filter(package_type=pt)
-            sales_count = pt_packages.count()
+            sales_count = pt.sales_count
             total_package_sales_count += sales_count
-            active_subscribers = pt_packages.filter(status='active').count()
+            active_subscribers = pt.active_subscribers
             revenue = decimal.Decimal(str(pt.price)) * sales_count
             
             package_wise_revenue.append({
