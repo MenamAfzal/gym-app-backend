@@ -467,36 +467,17 @@ class TenantBillingSubscriptionView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        from django.db.models import Case, When, Value, IntegerField
-        
-        billing_sub = (
-            TenantBillingSubscription.objects
-            .filter(tenant=tenant)
-            .select_related('billing_plan')
-            .prefetch_related('active_features')
-            .annotate(
-                is_active_sort=Case(
-                    When(status=TenantBillingSubscription.StatusChoices.ACTIVE, then=Value(1)),
-                    default=Value(0),
-                    output_field=IntegerField()
-                )
-            )
-            .order_by('-is_active_sort', '-created_at')
-            .first()
-        )
-
-        if not billing_sub:
-            return Response(
-                {"detail": "No billing subscription found for this tenant."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
-
         active_subs = (
             TenantBillingSubscription.objects
-            .filter(tenant=tenant, status=TenantBillingSubscription.StatusChoices.ACTIVE)
+            .filter(tenant=tenant)
+            .exclude(status=TenantBillingSubscription.StatusChoices.CANCELED)
             .select_related('billing_plan')
             .prefetch_related('active_features')
+            .order_by('-created_at')
         )
+
+        if not active_subs.exists():
+            return Response([], status=status.HTTP_200_OK)
 
         # Sync all active subscriptions with Stripe on-the-fly
         for sub in active_subs:
@@ -553,44 +534,21 @@ class TenantBillingSubscriptionView(APIView):
                         e
                     )
 
-        # Build combined active features list and map their individual current_period_end dates
-        all_features = set()
-        feature_end_dates = {}
+        # Build list of active subscriptions with customized feature current_period_end dates
+        from .billing_serializers import TenantBillingSubscriptionSerializer, BillingFeatureSerializer
+        serializer_data = []
         for sub in active_subs:
+            sub_data = TenantBillingSubscriptionSerializer(sub).data
+            # Set each feature's current_period_end matching the subscription's own end date
+            features_with_dates = []
             for feat in sub.active_features.all():
-                all_features.add(feat)
-                feat_id = str(feat.id)
-                if sub.current_period_end:
-                    if feat_id not in feature_end_dates or sub.current_period_end > feature_end_dates[feat_id]:
-                        feature_end_dates[feat_id] = sub.current_period_end
+                feat_data = BillingFeatureSerializer(feat).data
+                feat_data['current_period_end'] = sub.current_period_end.isoformat() if sub.current_period_end else None
+                features_with_dates.append(feat_data)
+            sub_data['active_features'] = features_with_dates
+            serializer_data.append(sub_data)
 
-        serializer = TenantBillingSubscriptionSerializer(billing_sub)
-        data = serializer.data
-        
-        from .billing_serializers import BillingFeatureSerializer
-        feature_list = []
-        for feat in all_features:
-            feat_data = BillingFeatureSerializer(feat).data
-            end_date = feature_end_dates.get(str(feat.id))
-            feat_data['current_period_end'] = end_date.isoformat() if end_date else None
-            feature_list.append(feat_data)
-        
-        data["active_features"] = feature_list
-
-        # Expose all co-existing active subscriptions in detail
-        subscriptions_list = []
-        for sub in active_subs:
-            sub_data = {
-                "id": str(sub.id),
-                "stripe_subscription_id": sub.stripe_subscription_id,
-                "current_period_end": sub.current_period_end.isoformat() if sub.current_period_end else None,
-                "status": sub.status,
-                "features": [str(f.id) for f in sub.active_features.all()]
-            }
-            subscriptions_list.append(sub_data)
-        
-        data["active_subscriptions"] = subscriptions_list
-        return Response(data, status=status.HTTP_200_OK)
+        return Response(serializer_data, status=status.HTTP_200_OK)
 
 
 class TenantBillingSubscriptionCancelView(APIView):
@@ -611,26 +569,40 @@ class TenantBillingSubscriptionCancelView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        from django.db.models import Case, When, Value, IntegerField
-        billing_sub = (
-            TenantBillingSubscription.objects
-            .filter(tenant=tenant)
-            .annotate(
-                is_active_sort=Case(
-                    When(status=TenantBillingSubscription.StatusChoices.ACTIVE, then=Value(1)),
-                    default=Value(0),
-                    output_field=IntegerField()
+        subscription_id = request.data.get("subscription_id")
+        
+        if subscription_id:
+            billing_sub = (
+                TenantBillingSubscription.objects
+                .filter(tenant=tenant, id=subscription_id)
+                .first()
+            )
+            if not billing_sub:
+                return Response(
+                    {"error": "No billing subscription found with the provided ID for this tenant."},
+                    status=status.HTTP_404_NOT_FOUND,
                 )
+        else:
+            from django.db.models import Case, When, Value, IntegerField
+            billing_sub = (
+                TenantBillingSubscription.objects
+                .filter(tenant=tenant)
+                .annotate(
+                    is_active_sort=Case(
+                        When(status=TenantBillingSubscription.StatusChoices.ACTIVE, then=Value(1)),
+                        default=Value(0),
+                        output_field=IntegerField()
+                    )
+                )
+                .order_by('-is_active_sort', '-created_at')
+                .first()
             )
-            .order_by('-is_active_sort', '-created_at')
-            .first()
-        )
 
-        if not billing_sub:
-            return Response(
-                {"error": "No billing subscription found for this tenant."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            if not billing_sub:
+                return Response(
+                    {"error": "No billing subscription found for this tenant."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
 
         if not billing_sub.stripe_subscription_id:
             return Response(
