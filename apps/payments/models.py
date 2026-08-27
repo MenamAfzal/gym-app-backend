@@ -157,6 +157,10 @@ class TenantBillingSubscription(TenantAwareModel):
         blank=True,
         help_text="When the current billing period ends (populated by webhook)",
     )
+    cancel_at_period_end = models.BooleanField(
+        default=False,
+        help_text="Whether the Gym Admin has requested plan cancellation at the end of the billing period",
+    )
 
     class Meta:
         verbose_name = "Tenant Billing Subscription"

@@ -40,6 +40,7 @@ class TenantBillingSubscriptionSerializer(serializers.ModelSerializer):
             "active_features",
             "status",
             "current_period_end",
+            "cancel_at_period_end",
             "stripe_checkout_session_id",
             "stripe_subscription_id",
             "created_at",

@@ -391,6 +391,9 @@ class FeatureBillingService:
         }
         billing_sub.status = status_map.get(raw_status, billing_sub.status)
 
+        cancel_at_period_end = _get(subscription_obj, "cancel_at_period_end", False)
+        billing_sub.cancel_at_period_end = cancel_at_period_end
+
         if current_period_end_ts:
             billing_sub.current_period_end = timezone.datetime.fromtimestamp(
                 current_period_end_ts, tz=timezone.utc
@@ -406,7 +409,7 @@ class FeatureBillingService:
                 stripe_sub_id,
             )
 
-        billing_sub.save(update_fields=["status", "current_period_end"])
+        billing_sub.save(update_fields=["status", "current_period_end", "cancel_at_period_end"])
         logger.info("Synced subscription %s -> status=%s", stripe_sub_id, raw_status)
 
     @classmethod

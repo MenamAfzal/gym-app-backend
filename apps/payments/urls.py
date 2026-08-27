@@ -14,6 +14,7 @@ from .views import (
     BillingFeatureDetailView,
     BillingPlanListView,
     TenantBillingSubscriptionView,
+    TenantBillingSubscriptionCancelView,
     PackageCheckoutView,
     PackageCancelView,
     TenantFinanceSummaryAPIView,
@@ -67,6 +68,11 @@ urlpatterns = [
         'billing/subscription/',
         TenantBillingSubscriptionView.as_view(),
         name='billing-subscription',
+    ),
+    path(
+        'billing/subscription/cancel/',
+        TenantBillingSubscriptionCancelView.as_view(),
+        name='billing-subscription-cancel',
     ),
     path(
         'packages/checkout/',

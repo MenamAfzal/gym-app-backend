@@ -525,6 +525,11 @@ class TenantBillingSubscriptionView(APIView):
                     from django.conf import settings
                     stripe.api_key = settings.STRIPE_SECRET_KEY
                     stripe_sub = stripe.Subscription.retrieve(sub.stripe_subscription_id)
+                     
+                    cancel_at_period_end = getattr(stripe_sub, "cancel_at_period_end", False)
+                    sub.cancel_at_period_end = cancel_at_period_end
+                    update_fields = ["cancel_at_period_end", "stripe_subscription_id"]
+
                     current_period_end_ts = getattr(stripe_sub, "current_period_end", None)
                     if not current_period_end_ts:
                         items = getattr(stripe_sub, "items", None)
@@ -538,7 +543,9 @@ class TenantBillingSubscriptionView(APIView):
                         sub.current_period_end = datetime.fromtimestamp(
                             current_period_end_ts, tz=dt_timezone.utc
                         )
-                        sub.save(update_fields=["current_period_end", "stripe_subscription_id"])
+                        update_fields.append("current_period_end")
+                        
+                    sub.save(update_fields=update_fields)
                 except Exception as e:
                     logger.error(
                         "Failed to fetch stripe subscription details for %s in view: %s",
@@ -584,6 +591,84 @@ class TenantBillingSubscriptionView(APIView):
         
         data["active_subscriptions"] = subscriptions_list
         return Response(data, status=status.HTTP_200_OK)
+
+
+class TenantBillingSubscriptionCancelView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        if user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
+            return Response(
+                {"error": "Only Gym Owners can cancel a subscription."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        tenant = getattr(user, 'tenant', None)
+        if not tenant:
+            return Response(
+                {"error": "No tenant associated with your account."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from django.db.models import Case, When, Value, IntegerField
+        billing_sub = (
+            TenantBillingSubscription.objects
+            .filter(tenant=tenant)
+            .annotate(
+                is_active_sort=Case(
+                    When(status=TenantBillingSubscription.StatusChoices.ACTIVE, then=Value(1)),
+                    default=Value(0),
+                    output_field=IntegerField()
+                )
+            )
+            .order_by('-is_active_sort', '-created_at')
+            .first()
+        )
+
+        if not billing_sub:
+            return Response(
+                {"error": "No billing subscription found for this tenant."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if not billing_sub.stripe_subscription_id:
+            return Response(
+                {"error": "No active Stripe subscription associated with this plan."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if billing_sub.status == TenantBillingSubscription.StatusChoices.CANCELED or billing_sub.cancel_at_period_end:
+            return Response(
+                {"error": "Subscription is already canceled."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            import stripe
+            from django.conf import settings
+            stripe.api_key = settings.STRIPE_SECRET_KEY
+            
+            stripe.Subscription.modify(
+                billing_sub.stripe_subscription_id,
+                cancel_at_period_end=True
+            )
+            billing_sub.cancel_at_period_end = True
+            billing_sub.save(update_fields=['cancel_at_period_end'])
+            return Response(
+                {"detail": "Subscription will be canceled at the end of the billing period."},
+                status=status.HTTP_200_OK
+            )
+        except Exception as e:
+            logger.error(
+                "Error canceling tenant subscription %s: %s",
+                billing_sub.stripe_subscription_id,
+                e
+            )
+            return Response(
+                {"error": "Failed to cancel subscription on Stripe."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class CreateCheckoutSessionView(APIView):
