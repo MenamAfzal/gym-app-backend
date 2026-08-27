@@ -342,15 +342,28 @@ class BookingViewSet(viewsets.ModelViewSet):
         if current_bookings >= session.capacity:
             return Response({"detail": "Session is full. Join waitlist instead."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Resolve Payment: find active Package or raise error
         package = Package.objects.select_for_update().filter(
             client=target_client,
             credits_remaining__gt=0,
-            expires_at__gt=timezone.now()
+            expires_at__gt=timezone.now(),
+            package_type__location=session.template.location
         ).first()
 
         if not package:
-            return Response({"detail": "No active credits or packages found for booking."}, status=status.HTTP_402_PAYMENT_REQUIRED)
+            has_other_packages = Package.objects.filter(
+                client=target_client,
+                credits_remaining__gt=0,
+                expires_at__gt=timezone.now()
+            ).exists()
+            if has_other_packages:
+                return Response(
+                    {"detail": "Your purchased package is not valid for this location."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            return Response(
+                {"detail": "No active credits or packages found for booking."},
+                status=status.HTTP_402_PAYMENT_REQUIRED
+            )
 
         # Deduct Credit
         package.credits_remaining -= 1
