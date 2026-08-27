@@ -449,6 +449,7 @@ class FeatureBillingService:
                 product = stripe.Product.create(
                     name=feature.name,
                     description=feature.description,
+                    active=feature.is_active,
                     metadata={"code": feature.code, "type": "billing_feature"}
                 )
                 feature.stripe_product_id = product.id
@@ -460,7 +461,8 @@ class FeatureBillingService:
                 stripe.Product.modify(
                     feature.stripe_product_id,
                     name=feature.name,
-                    description=feature.description
+                    description=feature.description,
+                    active=feature.is_active
                 )
             except Exception as e:
                 logger.warning(f"Failed to modify Stripe product {feature.stripe_product_id}: {e}")
@@ -487,12 +489,19 @@ class FeatureBillingService:
                     unit_amount=price_in_cents,
                     currency="usd",
                     recurring={"interval": stripe_interval},
+                    active=feature.is_active,
                     metadata={"code": feature.code}
                 )
                 feature.stripe_price_id = price.id
             except Exception as e:
                 logger.error(f"Failed to create Stripe price for {feature.name}: {e}")
                 raise
+        else:
+            if feature.stripe_price_id:
+                try:
+                    stripe.Price.modify(feature.stripe_price_id, active=feature.is_active)
+                except Exception as e:
+                    logger.warning(f"Failed to modify Stripe price active status for {feature.stripe_price_id}: {e}")
 
     @classmethod
     def delete_feature_from_stripe(cls, feature: BillingFeature) -> None:
