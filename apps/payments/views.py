@@ -889,7 +889,7 @@ class PackageCancelView(APIView):
 
 class TenantFinanceSummaryAPIView(APIView):
     """
-    Returns a financial summary for the Gym Owner's dashboard.
+    Returns a comprehensive financial summary for the Gym Owner's dashboard.
     """
     permission_classes = [IsAuthenticated]
 
@@ -904,6 +904,7 @@ class TenantFinanceSummaryAPIView(APIView):
 
         from django.db.models import Sum, Q
         import decimal
+        from apps.scheduling.models import Package, PackageType, Payment
 
         start_date = request.query_params.get('start_date')
         end_date = request.query_params.get('end_date')
@@ -912,24 +913,27 @@ class TenantFinanceSummaryAPIView(APIView):
         charges_filter = Q(type=PlatformLedger.TransactionType.CHARGE)
         payouts_filter = Q()
         subs_filter = Q(type=PlatformLedger.TransactionType.SUBSCRIPTION)
+        payments_filter = Q(type='package_purchase')
 
         if start_date:
             charges_filter &= Q(created_at__gte=start_date)
             payouts_filter &= Q(created_at__gte=start_date)
             subs_filter &= Q(created_at__gte=start_date)
+            payments_filter &= Q(created_at__gte=start_date)
         if end_date:
             charges_filter &= Q(created_at__lte=end_date)
             payouts_filter &= Q(created_at__lte=end_date)
             subs_filter &= Q(created_at__lte=end_date)
+            payments_filter &= Q(created_at__lte=end_date)
 
-        # 1. Package Sales (type='charge')
+        # 1. Platform Ledger Charges
         charges = PlatformLedger.objects.filter(charges_filter)
         total_sales_gross = charges.aggregate(val=Sum('amount_gross'))['val'] or decimal.Decimal('0.00')
         total_platform_fees = charges.aggregate(val=Sum('platform_fee'))['val'] or decimal.Decimal('0.00')
         total_net_earned = charges.aggregate(val=Sum('amount_net'))['val'] or decimal.Decimal('0.00')
 
         # 2. Payouts (TenantPayout)
-        payouts = TenantPayout.objects.filter(payouts_filter)
+        payouts = TenantPayout.objects.filter(payouts_filter).order_by('-created_at')
         total_paid_payouts = payouts.filter(status=TenantPayout.StatusChoices.PAID).aggregate(val=Sum('amount'))['val'] or decimal.Decimal('0.00')
         total_pending_payouts = charges.filter(status=PlatformLedger.StatusChoices.PENDING).aggregate(val=Sum('amount_net'))['val'] or decimal.Decimal('0.00')
 
@@ -937,23 +941,85 @@ class TenantFinanceSummaryAPIView(APIView):
         subs = PlatformLedger.objects.filter(subs_filter)
         total_expenses = subs.aggregate(val=Sum('amount_gross'))['val'] or decimal.Decimal('0.00')
 
+        # 4. Package-wise breakdown
+        package_types = PackageType.objects.all()
+        package_wise_revenue = []
+        total_package_sales_count = 0
+        
+        for pt in package_types:
+            pt_packages = Package.objects.filter(package_type=pt)
+            sales_count = pt_packages.count()
+            total_package_sales_count += sales_count
+            active_subscribers = pt_packages.filter(status='active').count()
+            revenue = decimal.Decimal(str(pt.price)) * sales_count
+            
+            package_wise_revenue.append({
+                "package_id": str(pt.id),
+                "package_name": pt.name,
+                "price": str(pt.price),
+                "billing_cycle": pt.billing_cycle,
+                "total_sales_count": sales_count,
+                "total_revenue": str(revenue),
+                "active_subscribers_count": active_subscribers
+            })
+
+        # 5. Unique customers count
+        unique_customers_count = Package.objects.values('client').distinct().count()
+
+        # 6. User Subscriber List
+        packages_list = Package.objects.select_related('client', 'package_type').order_by('-purchased_at')
+        subscribers_data = []
+        for p in packages_list:
+            subscribers_data.append({
+                "package_id": str(p.id),
+                "client_id": str(p.client.id),
+                "client_name": p.client.fullname,
+                "client_email": p.client.email,
+                "package_name": p.package_type.name,
+                "purchased_at": p.purchased_at.isoformat() if p.purchased_at else None,
+                "expires_at": p.expires_at.isoformat() if p.expires_at else None,
+                "status": p.status,
+                "credits_remaining": p.credits_remaining
+            })
+
+        # 7. Detailed Payment History / Transactions
+        payments_qs = Payment.objects.filter(payments_filter).select_related('client').order_by('-created_at')
+        payments_data = []
+        for pm in payments_qs:
+            payments_data.append({
+                "payment_id": str(pm.id),
+                "client_name": pm.client.fullname,
+                "client_email": pm.client.email,
+                "amount": str(pm.amount),
+                "status": pm.status,
+                "created_at": pm.created_at.isoformat() if pm.created_at else None,
+                "provider_ref": pm.provider_ref
+            })
+
+        # 8. Payout History list serialization
+        payouts_data = TenantPayoutSerializer(payouts, many=True).data
+
         return Response({
-            "package_revenue": {
-                "total_gross": str(total_sales_gross),
+            "summary": {
+                "total_sales": str(total_sales_gross),
                 "total_platform_fees": str(total_platform_fees),
-                "total_net_earned": str(total_net_earned),
-            },
-            "payouts": {
-                "total_paid": str(total_paid_payouts),
-                "total_pending": str(total_pending_payouts),
-            },
-            "platform_expenses": {
-                "total_paid": str(total_expenses),
+                "total_net_earnings": str(total_net_earned),
+                "total_expenses": str(total_expenses),
+                "total_paid_payouts": str(total_paid_payouts),
+                "total_pending_payouts": str(total_pending_payouts),
             },
             "stripe_connect": {
                 "is_connected": bool(tenant.stripe_account_id),
                 "stripe_account_id": tenant.stripe_account_id,
-            }
+            },
+            "package_wise_revenue": package_wise_revenue,
+            "analytics": {
+                "total_package_sales": total_package_sales_count,
+                "number_of_users_purchased": unique_customers_count,
+            },
+            "subscribers": subscribers_data,
+            "payments_history": payments_data,
+            "payouts_history": payouts_data,
         }, status=status.HTTP_200_OK)
 
 
