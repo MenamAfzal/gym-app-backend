@@ -63,9 +63,9 @@ class FeatureBillingService:
             )
 
         if slug == BillingPlan.PlanSlug.BASIC:
-            if len(resolved) != 3:
+            if len(resolved) != 5:
                 raise BillingValidationError(
-                    f"The Basic plan requires exactly 3 features. You selected {len(resolved)}."
+                    f"The Basic plan requires exactly 5 features. You selected {len(resolved)}."
                 )
             return resolved
 
