@@ -205,6 +205,15 @@ class Package(UUIDMixin, TimestampMixin, TenantMixin):
         default=False,
         help_text="Whether the client has requested cancellation at the end of the billing period"
     )
+    price = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+        help_text="Price of the package at the time of purchase"
+    )
+
+    def save(self, *args, **kwargs):
+        if self.price is None and self.package_type_id:
+            self.price = self.package_type.price
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.package_type.name} for {self.client.email} ({self.credits_remaining} left)"

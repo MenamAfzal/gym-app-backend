@@ -775,7 +775,11 @@ class PackageTypeViewSet(viewsets.ModelViewSet):
         active_packages = Package.objects.filter(status='active')
         total_subscribers = active_packages.values('client').distinct().count()
 
-        monthly_revenue = active_packages.aggregate(val=Sum('package_type__price'))['val'] or 0.00
+        from django.db.models.functions import Coalesce
+        import decimal
+        monthly_revenue = active_packages.aggregate(
+            val=Sum(Coalesce('price', 'package_type__price'))
+        )['val'] or decimal.Decimal('0.00')
 
         packages_stats = []
         package_types = PackageType.objects.all()
@@ -790,7 +794,7 @@ class PackageTypeViewSet(viewsets.ModelViewSet):
 
         return Response({
             "total_subscribers": total_subscribers,
-            "monthly_revenue": str(monthly_revenue),
+            "monthly_revenue": f"{monthly_revenue:.2f}",
             "subscribers_per_package": packages_stats
         }, status=status.HTTP_200_OK)
 
@@ -940,7 +944,11 @@ class ReportsView(APIView):
             active_packages = Package.objects.filter(status='active')
             total_subscribers = active_packages.values('client').distinct().count()
 
-            monthly_revenue = active_packages.aggregate(val=Sum('package_type__price'))['val'] or 0.00
+            from django.db.models.functions import Coalesce
+            import decimal
+            monthly_revenue = active_packages.aggregate(
+                val=Sum(Coalesce('price', 'package_type__price'))
+            )['val'] or decimal.Decimal('0.00')
 
             packages_stats = []
             package_types = PackageType.objects.all()
@@ -955,7 +963,7 @@ class ReportsView(APIView):
 
             return Response({
                 "total_subscribers": total_subscribers,
-                "monthly_revenue": str(monthly_revenue),
+                "monthly_revenue": f"{monthly_revenue:.2f}",
                 "subscribers_per_package": packages_stats
             }, status=status.HTTP_200_OK)
 
