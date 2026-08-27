@@ -97,7 +97,12 @@ class NutritionGoalBulkCreateAPIView(APIView):
         if not user_id:
             return Response({"error": "user_id query param is required"}, status=status.HTTP_400_BAD_REQUEST)
         if date_str:
-            date = parse_date(date_str)
+            from django.utils.dateparse import parse_date, parse_datetime
+            date = parse_date(str(date_str))
+            if not date:
+                parsed_dt = parse_datetime(str(date_str))
+                if parsed_dt:
+                    date = parsed_dt.date()
             if date:
                 goals = goals.filter(date=date)
 
@@ -560,20 +565,18 @@ class LogFoodAPIView(APIView):
         meal_type = request.data.get("meal_type")
         serving = float(request.data.get("serving", 1))
          
-        utc_now = timezone.now()
-     
-        # target_tz = ZoneInfo('US/Eastern') # If using ZoneInfo directly
-        # OR better, if 'US/Eastern' is in your settings or a variable:
-        est_now = timezone.localtime(utc_now, ZoneInfo('US/Eastern'))
-
-        today = est_now.date()
-
-        # Debugging clearly
-        print(f"\n--- DEBUG TIME CHECK ---", file=sys.stderr)
-        print(f"UTC: {utc_now}", file=sys.stderr)
-        print(f"EST: {est_now}", file=sys.stderr)
-        print(f"Date: {today}", file=sys.stderr)
-        print(f"------------------------\n", file=sys.stderr)
+        date_input = request.data.get("date") or request.query_params.get("date")
+        today = None
+        if date_input:
+            from django.utils.dateparse import parse_date, parse_datetime
+            today = parse_date(str(date_input))
+            if not today:
+                parsed_dt = parse_datetime(str(date_input))
+                if parsed_dt:
+                    today = parsed_dt.date()
+        
+        if not today:
+            today = timezone.localdate()
 
         # 1. Create/Get logged meal for today
         logged_meal, _ = LoggedMeal.objects.get_or_create(
@@ -686,7 +689,18 @@ class LogFoodAPIView(APIView):
 
     def get(self, request):
         user = request.user
-        today = request.query_params.get("date", date.today())
+        today_input = request.query_params.get("date")
+        today = None
+        if today_input:
+            from django.utils.dateparse import parse_date, parse_datetime
+            today = parse_date(str(today_input))
+            if not today:
+                parsed_dt = parse_datetime(str(today_input))
+                if parsed_dt:
+                    today = parsed_dt.date()
+        
+        if not today:
+            today = timezone.localdate()
 
         meals = (
             LoggedMeal.objects.filter(user=user, created_at=today)
