@@ -21,6 +21,9 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
+        from apps.core.tenants.context import _bypass_isolation
+        _bypass_isolation.set(True)
+
         json_file = options["json_file"]
         tenant_ident = options.get("tenant")
 

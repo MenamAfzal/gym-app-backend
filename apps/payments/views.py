@@ -804,8 +804,16 @@ class PackageCheckoutView(APIView):
             return Response({"error": "This package is not available for purchase."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            success_url = request.data.get('success_url', 'fitverx://payment/success')
-            cancel_url = request.data.get('cancel_url', 'fitverx://payment/cancel')
+            # Dynamically determine deep-link scheme for multi-tenancy / white-labeling
+            app_scheme = user.tenant.branding.get('app_scheme') if user.tenant.branding else None
+            if not app_scheme:
+                app_scheme = getattr(settings, 'DEEPLINK_SCHEME', 'fitverx')
+
+            default_success = f"{app_scheme}://payment/success"
+            default_cancel = f"{app_scheme}://payment/cancel"
+
+            success_url = request.data.get('success_url', default_success)
+            cancel_url = request.data.get('cancel_url', default_cancel)
 
             session = stripe.checkout.Session.create(
                 payment_method_types=['card'],
