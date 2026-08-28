@@ -16,7 +16,21 @@ class ProductSerializer(serializers.ModelSerializer):
         fields = '__all__'
 
  
+class AbsoluteURLField(serializers.CharField):
+    def to_representation(self, value):
+        if not value:
+            return None
+        if str(value).startswith(('http://', 'https://')):
+            return value
+        request = self.context.get('request')
+        if request:
+            return request.build_absolute_uri(value)
+        return value
+
+
 class ExerciseSerializer(serializers.ModelSerializer):
+    video_url = AbsoluteURLField(allow_null=True, required=False)
+
     class Meta:
         model = Exercise
         fields = ["id", "name", "description", "video_url", "coaching_cues", "tags" ]
@@ -350,6 +364,8 @@ class FirestoreImportSerializer(serializers.Serializer):
 
 
 class ExerciseSerializer(serializers.ModelSerializer):
+    video_url = AbsoluteURLField(allow_null=True, required=False)
+
     class Meta:
         model = Exercise
         fields = '__all__'
@@ -1108,12 +1124,15 @@ class DeckWorkoutMinimalSerializer(serializers.ModelSerializer):
 
 
 class Saveserializer(serializers.ModelSerializer):
+    video_url = AbsoluteURLField(allow_null=True, required=False)
+
     class Meta:
         model = Exercise
         fields = "__all__"
 
 
 class ExerciseUpdateSerializer(serializers.ModelSerializer):
+    video_url = AbsoluteURLField(allow_null=True, required=False)
     tags = serializers.PrimaryKeyRelatedField(
         many=True,
         queryset=WorkoutTag.objects.none(),
@@ -1151,6 +1170,7 @@ class ExerciseUpdateSerializer(serializers.ModelSerializer):
 
 
 class ExerciseSaveSerializer(serializers.ModelSerializer):
+    video_url = AbsoluteURLField(allow_null=True, required=False)
     tags = serializers.PrimaryKeyRelatedField(
         queryset=WorkoutTag.objects.none(),
         many=True,
