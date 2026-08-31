@@ -226,7 +226,7 @@ class Migration(migrations.Migration):
             name='platform',
             field=models.CharField(blank=True, choices=[('ios', 'iOS'), ('android', 'Android'), ('web', 'Web')], help_text='Device platform', max_length=20, null=True),
         ),
-        migrations.RunSQL("TRUNCATE TABLE notifications_fcmdevice CASCADE;"),
+        migrations.RunSQL("DELETE FROM notifications_fcmdevice;"),
         migrations.AddField(
             model_name='fcmdevice',
             name='tenant',

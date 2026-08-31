@@ -61,9 +61,9 @@ class GymSchedulingSystemTestCase(TestCase):
             expires_at=timezone.now() + timedelta(days=30)
         )
 
-        # Cancellation Policy (24-hour cutoff)
+        # Cancellation Policy (12-hour cutoff)
         self.policy = CancellationPolicy.objects.create(
-            tenant=self.tenant, scope_type='global', cutoff_hours=24, late_fee_amount=10.00
+            tenant=self.tenant, scope_type='global', cutoff_hours=12, late_fee_amount=10.00
         )
 
     def test_recurrence_rule_expansion(self):
@@ -125,7 +125,7 @@ class GymSchedulingSystemTestCase(TestCase):
 
     def test_booking_logic_and_cancellation(self):
         """Test standard booking, early cancellation refund, and late cancellation forfeiture."""
-        start_time = timezone.now() + timedelta(days=2) # Outside cutoff
+        start_time = timezone.now() + timedelta(days=2) # Outside cutoff (early)
         session = ClassSession.objects.create(
             tenant=self.tenant,
             template=self.template,
@@ -162,14 +162,14 @@ class GymSchedulingSystemTestCase(TestCase):
 
         self.assertEqual(self.pkg1.credits_remaining, 10)
 
-        # 3. Late Cancel (No Refund)
+        # 3. Late Cancel (Within 12 hours: Cancellation successful, No Credit Refund)
         late_session = ClassSession.objects.create(
             tenant=self.tenant,
             template=self.template,
             room=self.room,
             staff=self.trainer,
-            start_at=timezone.now() + timedelta(hours=10), # Inside 24h cutoff
-            end_at=timezone.now() + timedelta(hours=11),
+            start_at=timezone.now() + timedelta(hours=6), # Inside 12h cutoff
+            end_at=timezone.now() + timedelta(hours=7),
             capacity=1
         )
         
@@ -185,11 +185,94 @@ class GymSchedulingSystemTestCase(TestCase):
 
         self.assertEqual(self.pkg1.credits_remaining, 9)
 
-        # Late cancel
-        booking2.status = 'no_show'
+        # Late cancel - client cancels booking within 12h window
+        is_early_late_session = timezone.now() <= (late_session.start_at - timedelta(hours=self.policy.cutoff_hours))
+        self.assertFalse(is_early_late_session)
+        booking2.status = 'cancelled'
         booking2.save()
-        # No increment to credits_remaining
+        # No refund to client package (credit forfeited)
         self.assertEqual(self.pkg1.credits_remaining, 9)
+        self.assertEqual(booking2.status, 'cancelled')
+
+    def test_booking_viewset_cancellation_endpoint(self):
+        """Test BookingViewSet.destroy endpoint for both early (>12h) and late (<=12h) cancellations."""
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.scheduling.views import BookingViewSet
+
+        factory = APIRequestFactory()
+
+        # 1. Early cancellation (> 12 hours before session start)
+        early_session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=timezone.now() + timedelta(hours=24),
+            end_at=timezone.now() + timedelta(hours=25),
+            capacity=2
+        )
+        early_booking = Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            session=early_session,
+            credit_source=self.pkg1,
+            status='booked'
+        )
+        # Client had 10 credits, booked -> deduct 1
+        self.pkg1.credits_remaining = 9
+        self.pkg1.save()
+
+        view = BookingViewSet.as_view({'delete': 'destroy'})
+        request = factory.delete(f'/api/bookings/{early_booking.id}/')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.client1)
+
+        response = view(request, pk=str(early_booking.id))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['status'], 'cancelled')
+        self.assertTrue(response.data['refunded'])
+
+        # Check credit refunded
+        self.pkg1.refresh_from_db()
+        self.assertEqual(self.pkg1.credits_remaining, 10)
+        early_booking.refresh_from_db()
+        self.assertEqual(early_booking.status, 'cancelled')
+
+        # 2. Late cancellation (within 12 hours before session start)
+        late_session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=timezone.now() + timedelta(hours=6), # 6 hours away (< 12h)
+            end_at=timezone.now() + timedelta(hours=7),
+            capacity=2
+        )
+        late_booking = Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            session=late_session,
+            credit_source=self.pkg1,
+            status='booked'
+        )
+        # Client had 10 credits, booked -> deduct 1
+        self.pkg1.credits_remaining = 9
+        self.pkg1.save()
+
+        request = factory.delete(f'/api/bookings/{late_booking.id}/')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.client1)
+
+        response = view(request, pk=str(late_booking.id))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['status'], 'cancelled')
+        self.assertFalse(response.data['refunded'])
+
+        # Check credit NOT refunded
+        self.pkg1.refresh_from_db()
+        self.assertEqual(self.pkg1.credits_remaining, 9)
+        late_booking.refresh_from_db()
+        self.assertEqual(late_booking.status, 'cancelled')
 
     def test_waitlist_promotion(self):
         """Test that waitlisted clients are offered slots when capacity opens up."""

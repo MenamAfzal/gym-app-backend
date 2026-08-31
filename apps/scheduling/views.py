@@ -423,7 +423,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         if not policy:
             policy = CancellationPolicy.objects.filter(scope_type='global').first()
 
-        cutoff_hours = policy.cutoff_hours if policy else 24
+        cutoff_hours = policy.cutoff_hours if policy else 12
         cutoff_time = session.start_at - timedelta(hours=cutoff_hours)
 
         is_early_cancel = now <= cutoff_time

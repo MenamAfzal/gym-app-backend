@@ -369,7 +369,7 @@ class CancellationPolicy(UUIDMixin, TimestampMixin, TenantMixin):
     scope_type = models.CharField(max_length=20, choices=SCOPE_CHOICES, default='global')
     template = models.ForeignKey(ClassTemplate, on_delete=models.CASCADE, null=True, blank=True, related_name='cancellation_policies')
     membership_tier = models.CharField(max_length=50, null=True, blank=True, help_text="e.g. VIP, Gold")
-    cutoff_hours = models.PositiveIntegerField(help_text="Cancel window cutoff in hours")
+    cutoff_hours = models.PositiveIntegerField(default=12, help_text="Cancel window cutoff in hours")
     late_fee_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
 
     def __str__(self):
