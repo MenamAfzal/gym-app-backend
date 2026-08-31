@@ -830,6 +830,10 @@ class PackageViewSet(viewsets.ModelViewSet):
     serializer_class = PackageSerializer
     permission_classes = [IsOwnerOrManager]
 
+    @transaction.atomic
+    def perform_create(self, serializer):
+        serializer.save(tenant=self.request.tenant)
+
     def get_permissions(self):
         if self.action == 'my_active_packages':
             return [IsAuthenticated()]

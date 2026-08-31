@@ -209,6 +209,15 @@ class Package(UUIDMixin, TimestampMixin, TenantMixin):
         max_digits=10, decimal_places=2, null=True, blank=True,
         help_text="Price of the package at the time of purchase"
     )
+    is_complimentary = models.BooleanField(
+        default=False,
+        help_text="Whether this package was granted as a free/complimentary package by gym staff"
+    )
+    assigned_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='assigned_packages',
+        help_text="Staff or Admin who manually assigned this package"
+    )
 
     def save(self, *args, **kwargs):
         if self.price is None and self.package_type_id:

@@ -9,7 +9,7 @@ from .models import (
     SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
     StaffClientAssignment, FacilityAccessLog
 )
-from apps.users.models import User
+from apps.users.models import User, UserRole
 
 class LocationSerializer(serializers.ModelSerializer):
     class Meta:
@@ -234,29 +234,133 @@ class PackageSerializer(serializers.ModelSerializer):
     client_email = serializers.CharField(source='client.email', read_only=True)
     location = LocationSerializer(source='package_type.location', read_only=True)
     is_canceled = serializers.SerializerMethodField()
+    assigned_by_email = serializers.CharField(source='assigned_by.email', read_only=True)
 
     class Meta:
         model = Package
         fields = [
             'id', 'client', 'client_name', 'client_email', 'package_type', 
             'package_type_name', 'credits_remaining', 'purchased_at', 'expires_at', 'created_at',
-            'location', 'status', 'cancel_at_period_end', 'is_canceled'
+            'location', 'status', 'cancel_at_period_end', 'is_canceled',
+            'is_complimentary', 'assigned_by', 'assigned_by_email', 'price'
         ]
-        read_only_fields = ['id', 'client_name', 'client_email', 'package_type_name', 'created_at', 'location', 'is_canceled']
+        read_only_fields = [
+            'id', 'client_name', 'client_email', 'package_type_name', 'created_at',
+            'location', 'is_canceled', 'is_complimentary', 'assigned_by', 'assigned_by_email'
+        ]
         extra_kwargs = {
             'credits_remaining': {'required': False},
-            'expires_at': {'required': False}
+            'expires_at': {'required': False},
+            'price': {'required': False}
         }
 
     def get_is_canceled(self, obj):
         return obj.status == 'canceled' or obj.cancel_at_period_end
 
+    def validate(self, attrs):
+        request = self.context.get('request')
+        client = attrs.get('client')
+        package_type = attrs.get('package_type')
+        credits_remaining = attrs.get('credits_remaining')
+        expires_at = attrs.get('expires_at')
+
+        # Only apply manual assignment validations on creation
+        if not self.instance:
+            tenant = getattr(request, 'tenant', None) if request else None
+            if not tenant and client:
+                tenant = client.tenant
+
+            if not client:
+                raise serializers.ValidationError({"client": "Client is required."})
+            if not package_type:
+                raise serializers.ValidationError({"package_type": "Package type is required."})
+
+            # Anti-Fraud 1: Tenant Isolation
+            if tenant:
+                if client.tenant_id != tenant.id:
+                    raise serializers.ValidationError({"client": "Target client does not belong to your gym."})
+                if package_type.tenant_id != tenant.id:
+                    raise serializers.ValidationError({"package_type": "Package type does not belong to your gym."})
+
+            # Anti-Fraud 2: Target user must be an active CLIENT
+            if client.role != UserRole.CLIENT:
+                raise serializers.ValidationError({"client": "Packages can only be assigned to clients."})
+            if not client.is_active:
+                raise serializers.ValidationError({"client": "Cannot assign a package to an inactive client."})
+
+            # Anti-Fraud 3: PackageType must be active
+            if not package_type.is_active:
+                raise serializers.ValidationError({"package_type": "This package type is inactive."})
+
+            # Anti-Fraud 4: Strict finite credit limit (no unlimited / 0 / negative / excessive credits)
+            if package_type.credit_count <= 0:
+                raise serializers.ValidationError({"package_type": "Package type must have a positive credit count."})
+
+            if credits_remaining is not None:
+                if credits_remaining <= 0:
+                    raise serializers.ValidationError({"credits_remaining": "Credits remaining must be greater than zero."})
+                if credits_remaining > package_type.credit_count:
+                    raise serializers.ValidationError({
+                        "credits_remaining": f"Credits cannot exceed the package type limit of {package_type.credit_count}."
+                    })
+
+            # Anti-Fraud 5: Expiration date validation (finite duration)
+            if expires_at is not None:
+                if expires_at <= timezone.now():
+                    raise serializers.ValidationError({"expires_at": "Expiration date must be in the future."})
+                max_validity = timezone.now() + timedelta(days=max(package_type.validity_days * 2, 365))
+                if expires_at > max_validity:
+                    raise serializers.ValidationError({"expires_at": "Expiration date exceeds the maximum allowable validity period."})
+
+            # Anti-Fraud 6: Monthly free package limit (max 3 per month per gym / tenant)
+            if request and tenant:
+                now = timezone.now()
+                month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+                monthly_tenant_free_count = Package.objects.filter(
+                    tenant=tenant,
+                    is_complimentary=True,
+                    created_at__gte=month_start
+                ).count()
+
+                if monthly_tenant_free_count >= 3:
+                    raise serializers.ValidationError({
+                        "detail": "Monthly limit of 3 free package assignments for this gym has been reached for this month."
+                    })
+
+                monthly_client_free_count = Package.objects.filter(
+                    tenant=tenant,
+                    client=client,
+                    is_complimentary=True,
+                    created_at__gte=month_start
+                ).count()
+
+                if monthly_client_free_count >= 3:
+                    raise serializers.ValidationError({
+                        "detail": "This client has already received the maximum of 3 free packages for this month."
+                    })
+
+        return attrs
+
     def create(self, validated_data):
+        request = self.context.get('request')
         pkg_type = validated_data['package_type']
         if not validated_data.get('credits_remaining'):
             validated_data['credits_remaining'] = pkg_type.credit_count
         if not validated_data.get('expires_at'):
             validated_data['expires_at'] = timezone.now() + timedelta(days=pkg_type.validity_days)
+
+        # Mark as complimentary/free manual assignment
+        validated_data['is_complimentary'] = True
+        if validated_data.get('price') is None:
+            from decimal import Decimal
+            validated_data['price'] = Decimal('0.00')
+
+        if request and request.user:
+            validated_data['assigned_by'] = request.user
+            if not validated_data.get('tenant'):
+                validated_data['tenant'] = getattr(request, 'tenant', None) or request.user.tenant
+
         return super().create(validated_data)
 
 

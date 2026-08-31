@@ -315,3 +315,127 @@ class GymSchedulingSystemTestCase(TestCase):
         waitlist.refresh_from_db()
         self.assertEqual(waitlist.status, 'offered')
         self.assertIsNotNone(waitlist.expires_at)
+
+    def test_complimentary_package_assignment_and_anti_fraud_limits(self):
+        """Test assigning complimentary packages, enforcing 3/month limit, and anti-fraud rules."""
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.scheduling.views import PackageViewSet
+        from apps.scheduling.serializers import PackageSerializer
+
+        factory = APIRequestFactory()
+        view = PackageViewSet.as_view({'post': 'create'})
+
+        # Clean existing packages for clear monthly counting
+        Package.objects.filter(tenant=self.tenant).delete()
+
+        # 1. First complimentary package assignment (success)
+        request = factory.post('/api/packages/', {
+            'client': str(self.client1.id),
+            'package_type': str(self.package_type.id),
+        }, format='json')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.owner)
+
+        response1 = view(request)
+        self.assertEqual(response1.status_code, 201)
+        self.assertTrue(response1.data['is_complimentary'])
+        self.assertEqual(response1.data['credits_remaining'], self.package_type.credit_count)
+        self.assertEqual(response1.data['assigned_by'], self.owner.id)
+
+        # 2. Second complimentary package assignment (success)
+        request = factory.post('/api/packages/', {
+            'client': str(self.client2.id),
+            'package_type': str(self.package_type.id),
+        }, format='json')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.owner)
+        response2 = view(request)
+        self.assertEqual(response2.status_code, 201)
+
+        # 3. Third complimentary package assignment (success)
+        request = factory.post('/api/packages/', {
+            'client': str(self.client1.id),
+            'package_type': str(self.package_type.id),
+        }, format='json')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.owner)
+        response3 = view(request)
+        self.assertEqual(response3.status_code, 201)
+
+        # 4. Fourth complimentary package assignment (exceeds monthly limit -> fails 400)
+        request = factory.post('/api/packages/', {
+            'client': str(self.client2.id),
+            'package_type': str(self.package_type.id),
+        }, format='json')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.owner)
+        response4 = view(request)
+        self.assertEqual(response4.status_code, 400)
+        self.assertIn("Monthly limit of 3 free package assignments", str(response4.data))
+
+        # 5. Anti-Fraud: Excessive/Unlimited credits rejected
+        Package.objects.filter(tenant=self.tenant).delete() # Reset count
+        request = factory.post('/api/packages/', {
+            'client': str(self.client1.id),
+            'package_type': str(self.package_type.id),
+            'credits_remaining': 999999 # Exceeds package_type.credit_count (10)
+        }, format='json')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.owner)
+        response_fraud_credits = view(request)
+        self.assertEqual(response_fraud_credits.status_code, 400)
+        self.assertIn("credits_remaining", response_fraud_credits.data)
+
+        # 6. Anti-Fraud: Assigning to inactive client rejected
+        self.client2.is_active = False
+        self.client2.save()
+        request = factory.post('/api/packages/', {
+            'client': str(self.client2.id),
+            'package_type': str(self.package_type.id),
+        }, format='json')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.owner)
+        response_inactive = view(request)
+        self.assertEqual(response_inactive.status_code, 400)
+        self.assertIn("inactive", str(response_inactive.data))
+        self.client2.is_active = True
+        self.client2.save()
+
+    def test_non_stripe_package_cancellation_flow(self):
+        """Test that manually assigned/complimentary packages without Stripe sub cancel successfully."""
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.payments.views import PackageCancelView
+
+        factory = APIRequestFactory()
+
+        # Create a complimentary/manually assigned package (no stripe_subscription_id)
+        comp_pkg = Package.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            package_type=self.package_type,
+            credits_remaining=10,
+            expires_at=timezone.now() + timedelta(days=30),
+            is_complimentary=True,
+            status='active'
+        )
+
+        view = PackageCancelView.as_view()
+        request = factory.post(f'/api/payments/packages/{comp_pkg.id}/cancel/')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.client1)
+
+        response = view(request, package_id=str(comp_pkg.id))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['detail'], "Package has been canceled successfully.")
+
+        comp_pkg.refresh_from_db()
+        self.assertEqual(comp_pkg.status, 'canceled')
+
+        # Double cancellation attempt returns 400
+        request2 = factory.post(f'/api/payments/packages/{comp_pkg.id}/cancel/')
+        request2.tenant = self.tenant
+        force_authenticate(request2, user=self.client1)
+        response2 = view(request2, package_id=str(comp_pkg.id))
+        self.assertEqual(response2.status_code, 400)
+        self.assertEqual(response2.data['error'], "Package is already canceled.")
+

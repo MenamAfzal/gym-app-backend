@@ -851,11 +851,13 @@ class PackageCancelView(APIView):
         except Package.DoesNotExist:
             return Response({"error": "Package not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        if not package.stripe_subscription_id:
-            return Response({"error": "Package does not have an active subscription."}, status=status.HTTP_400_BAD_REQUEST)
-
         if package.status == 'canceled' or package.cancel_at_period_end:
-            return Response({"error": "Subscription is already canceled."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Package is already canceled."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not package.stripe_subscription_id:
+            package.status = 'canceled'
+            package.save(update_fields=['status'])
+            return Response({"detail": "Package has been canceled successfully."}, status=status.HTTP_200_OK)
 
         try:
             stripe.Subscription.modify(
