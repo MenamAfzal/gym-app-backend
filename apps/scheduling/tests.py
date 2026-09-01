@@ -439,3 +439,147 @@ class GymSchedulingSystemTestCase(TestCase):
         self.assertEqual(response2.status_code, 400)
         self.assertEqual(response2.data['error'], "Package is already canceled.")
 
+    def test_staff_conflict_validation_on_session_create_and_edit(self):
+        """Verify staff conflict validation cannot be bypassed when creating or editing a session."""
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.scheduling.views import ClassSessionViewSet
+
+        factory = APIRequestFactory()
+        view_patch = ClassSessionViewSet.as_view({'patch': 'partial_update'})
+
+        room_b = Room.objects.create(
+            tenant=self.tenant, location=self.location, name="Room B", capacity=10
+        )
+
+        start_time = timezone.now() + timedelta(days=5)
+        end_time = start_time + timedelta(hours=1)
+
+        # 1. Create Session B already assigned to trainer in room_b
+        session_b = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=room_b,
+            staff=self.trainer,
+            start_at=start_time,
+            end_at=end_time,
+            capacity=10
+        )
+
+        # 2. Create Session A at same time slot WITHOUT staff (unassigned) in self.room
+        session_a = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=None,
+            start_at=start_time,
+            end_at=end_time,
+            capacity=10
+        )
+
+        # 3. Attempt to edit Session A to assign trainer via PATCH (without start_at/end_at in payload)
+        request = factory.patch(
+            f'/api/sessions/{session_a.id}/',
+            {'staff': str(self.trainer.id)},
+            format='json'
+        )
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.owner)
+
+        response = view_patch(request, pk=str(session_a.id))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('staff', response.data)
+
+        # 4. Create Session C at a non-overlapping time slot with trainer in self.room
+        session_c = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=start_time + timedelta(hours=3),
+            end_at=start_time + timedelta(hours=4),
+            capacity=10
+        )
+
+        # 5. Attempt to edit Session C start_at/end_at to overlap with Session B
+        request_overlap = factory.patch(
+            f'/api/sessions/{session_c.id}/',
+            {
+                'start_at': start_time.isoformat(),
+                'end_at': end_time.isoformat()
+            },
+            format='json'
+        )
+        request_overlap.tenant = self.tenant
+        force_authenticate(request_overlap, user=self.owner)
+
+        response_overlap = view_patch(request_overlap, pk=str(session_c.id))
+        self.assertEqual(response_overlap.status_code, 400)
+        self.assertIn('staff', response_overlap.data)
+
+        # 6. Editing non-staff attributes of Session B should NOT trigger self conflict
+        request_self = factory.patch(
+            f'/api/sessions/{session_b.id}/',
+            {'capacity': 15},
+            format='json'
+        )
+        request_self.tenant = self.tenant
+        force_authenticate(request_self, user=self.owner)
+
+        response_self = view_patch(request_self, pk=str(session_b.id))
+        self.assertEqual(response_self.status_code, 200)
+        self.assertEqual(response_self.data['capacity'], 15)
+
+    def test_substitute_request_accept_staff_conflict(self):
+        """Verify substitute request cannot be accepted by a trainer who has a schedule conflict."""
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.scheduling.views import SubstituteRequestViewSet
+        from apps.scheduling.models import SubstituteRequest
+
+        factory = APIRequestFactory()
+
+        trainer2 = User.objects.create_user(
+            email="trainer2@aligym.com", password="password123", role=UserRole.TRAINER, tenant=self.tenant
+        )
+
+        start_time = timezone.now() + timedelta(days=6)
+        end_time = start_time + timedelta(hours=1)
+
+        # Session 1 led by self.trainer
+        session1 = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=start_time,
+            end_at=end_time,
+            capacity=10
+        )
+
+        # Session 2 led by trainer2 at the same time
+        session2 = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=trainer2,
+            start_at=start_time,
+            end_at=end_time,
+            capacity=10
+        )
+
+        sub_req = SubstituteRequest.objects.create(
+            tenant=self.tenant,
+            session=session1,
+            requested_by_staff=self.trainer,
+            status='open'
+        )
+
+        # Trainer 2 attempts to accept sub request for session1 while busy with session2
+        view_accept = SubstituteRequestViewSet.as_view({'post': 'accept'})
+        request = factory.post(f'/api/substitute-requests/{sub_req.id}/accept/')
+        request.tenant = self.tenant
+        force_authenticate(request, user=trainer2)
+
+        response = view_accept(request, pk=str(sub_req.id))
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("already assigned to another session", str(response.data['detail']))
+

@@ -196,6 +196,69 @@ class ClassSessionSerializer(serializers.ModelSerializer):
         end = data.get('end_at', self.instance.end_at if self.instance else None)
         if start and end and start >= end:
             raise serializers.ValidationError("End time must be after start time.")
+
+        if 'staff' in data:
+            staff = data['staff']
+        elif self.instance:
+            staff = self.instance.staff
+        else:
+            staff = None
+
+        if 'room' in data:
+            room = data['room']
+        elif self.instance:
+            room = self.instance.room
+        else:
+            room = None
+
+        if 'status' in data:
+            session_status = data['status']
+        elif self.instance:
+            session_status = self.instance.status
+        else:
+            session_status = 'scheduled'
+
+        if staff and start and end and session_status == 'scheduled':
+            staff_conflict_qs = ClassSession.objects.filter(
+                staff=staff,
+                start_at__lt=end,
+                end_at__gt=start,
+                status='scheduled'
+            )
+            if self.instance:
+                staff_conflict_qs = staff_conflict_qs.exclude(id=self.instance.id)
+
+            if staff_conflict_qs.exists():
+                raise serializers.ValidationError({
+                    "staff": "This staff member is already assigned to another session at the same time slot."
+                })
+
+            appointment_conflict_qs = Appointment.objects.filter(
+                provider=staff,
+                start_at__lt=end,
+                end_at__gt=start,
+                status='scheduled'
+            )
+            if appointment_conflict_qs.exists():
+                raise serializers.ValidationError({
+                    "staff": "This staff member has a conflicting private appointment at the same time slot."
+                })
+
+        if room and start and end and session_status == 'scheduled':
+            room_conflict_qs = ClassSession.objects.filter(
+                room=room,
+                start_at__lt=end,
+                end_at__gt=start,
+                status='scheduled'
+            )
+            if self.instance:
+                room_conflict_qs = room_conflict_qs.exclude(id=self.instance.id)
+
+            if room_conflict_qs.exists():
+                raise serializers.ValidationError({
+                    "room": "This room is already reserved for another session at the same time slot."
+                })
+
         return data
 
 

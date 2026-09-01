@@ -771,13 +771,34 @@ class SubstituteRequestViewSet(viewsets.ModelViewSet):
             if request.data.get('trainer') and str(request.data.get('trainer')) != str(request.user.id):
                 return Response({"detail": "You cannot accept substitution requests on behalf of other trainers."}, status=status.HTTP_403_FORBIDDEN)
 
+        # Check staff conflict for target_trainer
+        session = sub_req.session
+        staff_conflict = ClassSession.objects.filter(
+            staff=target_trainer,
+            start_at__lt=session.end_at,
+            end_at__gt=session.start_at,
+            status='scheduled'
+        ).exclude(id=session.id).exists()
+
+        appointment_conflict = Appointment.objects.filter(
+            provider=target_trainer,
+            start_at__lt=session.end_at,
+            end_at__gt=session.start_at,
+            status='scheduled'
+        ).exists()
+
+        if staff_conflict or appointment_conflict:
+            return Response(
+                {"detail": "This staff member is already assigned to another session at the same time slot."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         # Update substitute request
         sub_req.status = 'filled'
         sub_req.accepted_by_staff = target_trainer
         sub_req.save()
 
         # Update session
-        session = sub_req.session
         session.staff = target_trainer
         session.save()
 
