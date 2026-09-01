@@ -362,6 +362,22 @@ class Payment(UUIDMixin, TimestampMixin, TenantMixin):
                 description=f"Payment for {self.type}"
             )
 
+        # Emit Rewards Event for completed payments
+        if self.status == 'completed':
+            try:
+                from apps.rewards.events import RewardEvent
+                from apps.rewards.services import RewardEngineService
+                
+                RewardEngineService.handle_event(RewardEvent.create_payment_completed(
+                    tenant_id=self.tenant_id,
+                    user_id=self.client_id,
+                    payment_id=self.id,
+                    amount=self.amount,
+                    payment_type=self.type
+                ))
+            except Exception:
+                pass
+
     def __str__(self):
         return f"Payment {self.id} - {self.type} - ${self.amount}"
 

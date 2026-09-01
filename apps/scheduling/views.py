@@ -464,6 +464,27 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.checked_in_at = timezone.now()
         booking.status = 'attended'
         booking.save()
+
+        # Emit Rewards Event
+        try:
+            from apps.rewards.events import RewardEvent
+            from apps.rewards.services import RewardEngineService
+            
+            template = getattr(booking.session, 'template', None)
+            RewardEngineService.handle_event(RewardEvent.create_booking_attended(
+                tenant_id=booking.tenant_id,
+                user_id=booking.client_id,
+                booking_id=booking.id,
+                session_id=booking.session_id,
+                class_name=template.name if template else "",
+                category=template.category if template else "",
+                intensity=template.intensity if template else "",
+                occurred_at=booking.checked_in_at
+            ))
+        except Exception as e:
+            # Reward failures must never break core check-in flow
+            pass
+
         return Response({"detail": "Checked in successfully."})
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])

@@ -254,6 +254,23 @@ class LogCompletionAPIView(APIView):
             workout_log = serializer.save(user=request.user)
             workout_log.is_completed = True
             workout_log.save(update_fields=["is_completed"])
+
+            # Emit Rewards Event
+            try:
+                from apps.rewards.events import RewardEvent
+                from apps.rewards.services import RewardEngineService
+
+                RewardEngineService.handle_event(RewardEvent.create_workout_completed(
+                    tenant_id=workout_log.tenant_id,
+                    user_id=request.user.id,
+                    workout_log_id=workout_log.id,
+                    workout_name=getattr(workout_log.workout, 'name', ''),
+                    duration_seconds=workout_log.duration_seconds or 0,
+                    occurred_at=workout_log.completed_at
+                ))
+            except Exception:
+                pass
+
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 class FavoriteWorkoutAPIView(APIView):

@@ -202,7 +202,8 @@ class PlatformLedgerViewSetTest(TestCase):
     def setUp(self):
         from rest_framework.test import APIClient
         from apps.users.models import User, UserRole
-        from apps.scheduling.models import Payment, PlatformLedger
+        from apps.scheduling.models import Payment
+        from apps.payments.models import PlatformLedger
 
         self.client = APIClient()
 
@@ -239,7 +240,7 @@ class PlatformLedgerViewSetTest(TestCase):
 
     def test_platform_admin_can_view_all_ledgers(self):
         self.client.force_authenticate(user=self.admin)
-        response = self.client.get('/api/v1/scheduling/platform-ledgers/')
+        response = self.client.get('/api/v1/payments/platform-ledgers/')
         self.assertEqual(response.status_code, 200)
 
         ledger_ids = [item['id'] for item in response.data]
