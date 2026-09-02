@@ -90,7 +90,7 @@ class StaffLocationViewSet(viewsets.ModelViewSet):
     permission_classes = [IsOwnerOrManager]
 
     def get_queryset(self):
-        return StaffLocation.objects.all()
+        return StaffLocation.objects.select_related('staff', 'staff__profile', 'location')
 
 
 class StaffAvailabilityViewSet(viewsets.ModelViewSet):
@@ -99,7 +99,7 @@ class StaffAvailabilityViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = StaffAvailability.objects.all()
+        qs = StaffAvailability.objects.select_related('staff', 'staff__profile')
         staff_id = self.request.query_params.get('staff')
         if staff_id:
             qs = qs.filter(staff_id=staff_id)
@@ -112,7 +112,7 @@ class ClassTemplateViewSet(viewsets.ModelViewSet):
     permission_classes = [IsOwnerOrManager]
 
     def get_queryset(self):
-        return ClassTemplate.objects.all()
+        return ClassTemplate.objects.select_related('location')
 
 
 class RecurrenceRuleViewSet(viewsets.ModelViewSet):
@@ -121,7 +121,7 @@ class RecurrenceRuleViewSet(viewsets.ModelViewSet):
     permission_classes = [IsOwnerOrManager]
 
     def get_queryset(self):
-        return RecurrenceRule.objects.all()
+        return RecurrenceRule.objects.select_related('template', 'room', 'staff', 'staff__profile')
 
     @transaction.atomic
     def perform_create(self, serializer):
@@ -197,7 +197,7 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         return [IsAuthenticated()]
 
     def get_queryset(self):
-        qs = ClassSession.objects.select_related('template', 'room', 'staff', 'staff__profile')
+        qs = ClassSession.objects.select_related('template', 'template__location', 'room', 'staff', 'staff__profile')
         user = self.request.user
         
         # Staff location segregation
@@ -260,19 +260,57 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         return qs
 
     @transaction.atomic
+    def perform_update(self, serializer):
+        old_status = serializer.instance.status
+        session = serializer.save()
+
+        if session.status == 'cancelled' and old_status != 'cancelled':
+            from .tasks import cancel_session_bookings_and_refund, process_credit_refund_job
+            cancel_session_bookings_and_refund(session)
+            try:
+                process_credit_refund_job.delay(str(session.id))
+            except Exception:
+                pass
+
+    @action(detail=True, methods=['post'], permission_classes=[IsOwnerOrManager])
+    @transaction.atomic
+    def cancel(self, request, pk=None):
+        """
+        Custom action to cancel an entire session, cancel all active bookings, and refund 1 credit to each client.
+        """
+        session = self.get_object()
+        if session.status == 'cancelled':
+            return Response({"detail": "Session is already cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+
+        session.status = 'cancelled'
+        session.save()
+
+        from .tasks import cancel_session_bookings_and_refund, process_credit_refund_job
+        cancel_session_bookings_and_refund(session)
+        try:
+            process_credit_refund_job.delay(str(session.id))
+        except Exception:
+            pass
+
+        return Response({"detail": "Session cancelled successfully and active booking credits refunded."}, status=status.HTTP_200_OK)
+
+    @transaction.atomic
     def destroy(self, request, *args, **kwargs):
         """
-        Cancel a session. Triggers credit-refund and notifications.
+        Cancel a session. Triggers credit-refund for all active bookings and notifications.
         """
         session = self.get_object()
         session.status = 'cancelled'
         session.save()
 
-        # Import celery tasks inline to prevent circular dependencies
-        from .tasks import process_credit_refund_job
-        process_credit_refund_job.delay(str(session.id))
+        from .tasks import cancel_session_bookings_and_refund, process_credit_refund_job
+        cancel_session_bookings_and_refund(session)
+        try:
+            process_credit_refund_job.delay(str(session.id))
+        except Exception:
+            pass
 
-        return Response({"detail": "Session cancelled successfully and refund job triggered."}, status=status.HTTP_200_OK)
+        return Response({"detail": "Session cancelled successfully and active booking credits refunded."}, status=status.HTTP_200_OK)
 
 
 class BookingViewSet(viewsets.ModelViewSet):
@@ -289,7 +327,11 @@ class BookingViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = Booking.objects.select_related('session', 'session__template', 'client')
+        qs = Booking.objects.select_related(
+            'session', 'session__template', 'session__template__location',
+            'session__room', 'session__staff', 'session__staff__profile',
+            'client', 'client__profile', 'credit_source'
+        )
         if user.role == UserRole.CLIENT:
             qs = qs.filter(client=user)
         elif user.role in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
@@ -509,7 +551,7 @@ class WaitlistViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = Waitlist.objects.all().select_related('client', 'session', 'session__template')
+        qs = Waitlist.objects.select_related('client', 'client__profile', 'session', 'session__template')
         if user.role == UserRole.CLIENT:
             qs = qs.filter(client=user)
         
@@ -564,7 +606,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = Appointment.objects.select_related('provider', 'client')
+        qs = Appointment.objects.select_related('provider', 'provider__profile', 'client', 'client__profile', 'location', 'room')
         if user.role == UserRole.CLIENT:
             qs = qs.filter(client=user)
         elif user.role in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
@@ -719,7 +761,12 @@ class SubstituteRequestViewSet(viewsets.ModelViewSet):
     permission_classes = [IsGymStaffOrOwner]
 
     def get_queryset(self):
-        return SubstituteRequest.objects.all()
+        return SubstituteRequest.objects.select_related(
+            'session', 'session__template', 'session__template__location',
+            'session__room', 'session__staff', 'session__staff__profile',
+            'requested_by_staff', 'requested_by_staff__profile',
+            'accepted_by_staff', 'accepted_by_staff__profile'
+        )
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
@@ -837,14 +884,16 @@ class PackageTypeViewSet(viewsets.ModelViewSet):
         )['val'] or decimal.Decimal('0.00')
 
         packages_stats = []
-        package_types = PackageType.objects.all()
+        from django.db.models import Count
+        package_types = PackageType.objects.annotate(
+            active_subscribers=Count('purchased_packages', filter=Q(purchased_packages__status='active'))
+        )
         for pt in package_types:
-            count = pt.purchased_packages.filter(status='active').count()
             packages_stats.append({
                 "package_type_id": str(pt.id),
                 "package_name": pt.name,
                 "price": str(pt.price),
-                "subscriber_count": count
+                "subscriber_count": pt.active_subscribers
             })
 
         return Response({
@@ -882,7 +931,9 @@ class PackageViewSet(viewsets.ModelViewSet):
         return super().get_permissions()
 
     def get_queryset(self):
-        qs = Package.objects.all().select_related('package_type__location', 'client')
+        qs = Package.objects.select_related(
+            'package_type', 'package_type__location', 'client', 'client__profile', 'assigned_by'
+        )
         client_id = self.request.query_params.get('client')
         if client_id:
             qs = qs.filter(client_id=client_id)
@@ -894,7 +945,7 @@ class PackageViewSet(viewsets.ModelViewSet):
             client=request.user,
             credits_remaining__gt=0,
             expires_at__gt=timezone.now()
-        ).select_related('package_type__location')
+        ).select_related('package_type', 'package_type__location', 'client', 'client__profile', 'assigned_by')
         return Response(PackageSerializer(packages, many=True).data)
 
 

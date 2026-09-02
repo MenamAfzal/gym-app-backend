@@ -578,8 +578,75 @@ class GymSchedulingSystemTestCase(TestCase):
         request = factory.post(f'/api/substitute-requests/{sub_req.id}/accept/')
         request.tenant = self.tenant
         force_authenticate(request, user=trainer2)
-
         response = view_accept(request, pk=str(sub_req.id))
         self.assertEqual(response.status_code, 400)
         self.assertIn("already assigned to another session", str(response.data['detail']))
+
+    def test_gym_admin_session_cancellation_refunds_all_clients(self):
+        """
+        Verify that when a Gym Admin cancels an entire class session (even within the 12h cutoff window),
+        all active bookings for that session are cancelled and 1 credit is automatically refunded to each client's package.
+        """
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.scheduling.views import ClassSessionViewSet
+
+        factory = APIRequestFactory()
+
+        # Create a session starting in 2 hours (inside the 12h cutoff window)
+        session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=timezone.now() + timedelta(hours=2),
+            end_at=timezone.now() + timedelta(hours=3),
+            capacity=10
+        )
+
+        # Client 1 & Client 2 book the session (deducting 1 credit each)
+        booking1 = Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            session=session,
+            credit_source=self.pkg1,
+            status='booked'
+        )
+        self.pkg1.credits_remaining = 9
+        self.pkg1.save()
+
+        booking2 = Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client2,
+            session=session,
+            credit_source=self.pkg2,
+            status='booked'
+        )
+        self.pkg2.credits_remaining = 9
+        self.pkg2.save()
+
+        # Gym Admin cancels the session via DELETE
+        view_delete = ClassSessionViewSet.as_view({'delete': 'destroy'})
+        request = factory.delete(f'/api/sessions/{session.id}/')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.owner)
+
+        response = view_delete(request, pk=str(session.id))
+        self.assertEqual(response.status_code, 200)
+
+        # Refresh database records
+        session.refresh_from_db()
+        booking1.refresh_from_db()
+        booking2.refresh_from_db()
+        self.pkg1.refresh_from_db()
+        self.pkg2.refresh_from_db()
+
+        # Verify session and booking statuses
+        self.assertEqual(session.status, 'cancelled')
+        self.assertEqual(booking1.status, 'cancelled')
+        self.assertEqual(booking2.status, 'cancelled')
+
+        # Verify BOTH clients got their 1 credit refunded despite being within 12 hours
+        self.assertEqual(self.pkg1.credits_remaining, 10)
+        self.assertEqual(self.pkg2.credits_remaining, 10)
+
 

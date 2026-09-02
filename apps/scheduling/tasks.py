@@ -124,6 +124,63 @@ def run_no_show_marking_job():
             reset_current_tenant(token)
 
 
+def cancel_session_bookings_and_refund(session):
+    """
+    Iterates through all active (non-cancelled) bookings for a cancelled class session,
+    updates their status to 'cancelled', and automatically refunds 1 credit back to each
+    client's package regardless of any 12-hour cancellation policy window.
+    """
+    with transaction.atomic():
+        bookings = Booking.objects.select_for_update().select_related(
+            'credit_source', 'client', 'client__profile'
+        ).filter(
+            session=session
+        ).exclude(status='cancelled')
+
+        for booking in bookings:
+            booking.status = 'cancelled'
+            booking.save()
+
+            # Refund credit to package
+            pkg = None
+            if booking.credit_source:
+                try:
+                    pkg = Package.objects.select_for_update().get(id=booking.credit_source.id)
+                except Package.DoesNotExist:
+                    pkg = None
+
+            if not pkg:
+                pkg = Package.objects.filter(
+                    client=booking.client,
+                    tenant=session.tenant
+                ).order_by('-purchased_at').first()
+
+            if pkg:
+                pkg.credits_remaining += 1
+                pkg.save()
+                logger.info(f"Refunded 1 credit to package {pkg.id} for client {booking.client.email}")
+
+            try:
+                from apps.notifications.services import NotificationService
+                from apps.notifications.events import SessionCancelledEvent
+                client_name = booking.client.email
+                if hasattr(booking.client, 'profile') and booking.client.profile and booking.client.profile.first_name:
+                    client_name = booking.client.profile.first_name
+
+                NotificationService.handle_event(SessionCancelledEvent(
+                    tenant_id=booking.tenant_id,
+                    recipient_id=booking.client_id,
+                    entity_id=booking.id,
+                    context_data={
+                        'client_name': client_name,
+                        'class_name': session.template.name if session.template else "Class",
+                        'class_time': str(session.start_at),
+                    }
+                ))
+            except Exception as e:
+                logger.warning(f"Failed to send cancellation notification for booking {booking.id}: {e}")
+
+
 @shared_task
 def process_credit_refund_job(session_id):
     """
@@ -140,34 +197,7 @@ def process_credit_refund_job(session_id):
     from apps.core.tenants.context import set_current_tenant, reset_current_tenant
     token = set_current_tenant(session.tenant)
     try:
-        with transaction.atomic():
-            bookings = Booking.objects.select_for_update().filter(
-                session=session
-            ).exclude(status='cancelled')
-
-            for booking in bookings:
-                booking.status = 'cancelled'
-                booking.save()
-
-                # Refund credit to package
-                if booking.credit_source:
-                    pkg = Package.objects.select_for_update().get(id=booking.credit_source.id)
-                    pkg.credits_remaining += 1
-                    pkg.save()
-                    logger.info(f"Refunded credit to package {pkg.id} for client {booking.client.email}")
-
-                from apps.notifications.services import NotificationService
-                from apps.notifications.events import SessionCancelledEvent
-                NotificationService.handle_event(SessionCancelledEvent(
-                    tenant_id=booking.tenant_id,
-                    recipient_id=booking.client_id,
-                    entity_id=booking.id,
-                    context_data={
-                        'client_name': booking.client.profile.first_name if hasattr(booking.client, 'profile') else booking.client.email,
-                        'class_name': session.template.name,
-                        'class_time': str(session.start_at),
-                    }
-                ))
+        cancel_session_bookings_and_refund(session)
     finally:
         reset_current_tenant(token)
 
