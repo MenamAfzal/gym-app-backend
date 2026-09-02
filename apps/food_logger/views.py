@@ -994,4 +994,54 @@ class StaffClientFoodLogListView(generics.ListAPIView):
         ).prefetch_related(
             'items'
         )
+
+
+class AnalyzeFoodAPIView(APIView):
+    """
+    AI Food Photo Recognition API.
+    Accepts multipart/form-data image or JSON payload.
+    Uses Kimi (Moonshot AI Vision) to analyze meals and estimate calories and macros.
+    """
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def post(self, request, *args, **kwargs):
+        from .kimi_service import KimiFoodScannerService
+
+        image_file = request.FILES.get('image') or request.FILES.get('file') or request.FILES.get('photo')
+        
+        if not image_file:
+            image_str = request.data.get('image') or request.data.get('photo') or request.data.get('image_url')
+            if not image_str:
+                return Response(
+                    {
+                        "status": "error",
+                        "error": "No image provided. Please upload an image file using the 'image' field.",
+                        "detail": "Missing required 'image' file in multipart/form-data payload."
+                    },
+                    status=status.HTTP_400_BAD_REQUEST
+                ) 
+            import base64
+            from django.core.files.base import ContentFile
+            if isinstance(image_str, str) and 'base64,' in image_str:
+                format, imgstr = image_str.split(';base64,')
+                ext = format.split('/')[-1]
+                image_file = ContentFile(base64.b64decode(imgstr), name=f"scan.{ext}")
+            elif isinstance(image_str, str) and image_str.startswith('http'):
+                image_file = ContentFile(b"", name="scan.jpg")
+            else:
+                return Response(
+                    {"error": "Invalid image payload. Please upload a valid image file."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        host_uri = request.build_absolute_uri('/')[:-1]
+        service = KimiFoodScannerService()
+        result = service.analyze_food_image(
+            image_file,
+            user=request.user if request.user.is_authenticated else None,
+            request_host=host_uri
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
     

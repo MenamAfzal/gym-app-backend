@@ -255,3 +255,8 @@ FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000")
 
 # PLATFORM SETTINGS
 PLATFORM_FEE_PERCENTAGE = 10.0
+
+# KIMI / MOONSHOT AI CONFIGURATION
+KIMI_API_KEY = os.environ.get("KIMI_API_KEY", os.environ.get("MOONSHOT_API_KEY", ""))
+KIMI_BASE_URL = os.environ.get("KIMI_BASE_URL", os.environ.get("MOONSHOT_BASE_URL", "https://api.moonshot.cn/v1"))
+KIMI_MODEL = os.environ.get("KIMI_MODEL", "moonshot-v1-8k-vision-preview")

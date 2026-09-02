@@ -18,13 +18,20 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
+from apps.food_logger.views import AnalyzeFoodAPIView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+ 
+    path('ai/analyze-food/', AnalyzeFoodAPIView.as_view(), name='top-ai-analyze-food'),
+    path('api/v1/ai/analyze-food/', AnalyzeFoodAPIView.as_view(), name='v1-ai-analyze-food'),
+    path('api/v1/ai/scan-meal/', AnalyzeFoodAPIView.as_view(), name='v1-ai-scan-meal'),
+    path('api/v1/ai/scan-food/', AnalyzeFoodAPIView.as_view(), name='v1-ai-scan-food'),
 
     # API Version 1
     path('api/v1/platform/', include('apps.core.urls')), 
     path('api/v1/users/', include('apps.users.urls')),
+
     path('api/v1/scheduling/', include('apps.scheduling.urls')),  
     path('api/v1/', include('apps.reflection_logger.urls')),
     path('api/v1/reflection_logger/', include('apps.reflection_logger.urls')),

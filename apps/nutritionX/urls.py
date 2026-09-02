@@ -5,8 +5,12 @@ from apps.nutritionX.views import (
     CustomFoodEntryAPIView, UserDrinkHistoryAPIView, WaterIntakeAPIView,
     ClientNutritionGoalAPIView
 )
+from apps.food_logger.views import AnalyzeFoodAPIView
 
 urlpatterns = [
+    path("analyze-food/", AnalyzeFoodAPIView.as_view(), name="nutritionx-analyze-food"),
+    path("scan-meal/", AnalyzeFoodAPIView.as_view(), name="nutritionx-scan-meal"),
+    path("scan-food/", AnalyzeFoodAPIView.as_view(), name="nutritionx-scan-food"),
     path("add-food/", AddFoodToMealView.as_view(), name="add-food"),
     path("daily-meals/", UserDailyMealsView.as_view(), name="daily-meals"),
     path("custom-meal/", CustomFoodEntryAPIView.as_view(), name="meal-log-create"),
