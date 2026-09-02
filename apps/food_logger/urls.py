@@ -3,13 +3,20 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     FoodLogGetApi, FoodSuggestionListCreateAPIView, StaffClientFoodLogListView, StaffRecipeItemUpdateAPIView, StaffRecipeListCreateAPIView, StaffRecipeItemListAPIView, StaffRecipeUpdateAPIView,
     UserRecipeItemListCreateAPIView, NutritionGoalBulkCreateAPIView, CustomMealView, LogFoodAPIView, CustomFoodApiView,
-    GetAllFoodApiView, UserFavoriteStaffRecipeAPIView, AddFoodToMealView, LoggedMealDatesAPIView, UserMedicationViewSet
+    GetAllFoodApiView, UserFavoriteStaffRecipeAPIView, AddFoodToMealView, LoggedMealDatesAPIView, UserMedicationViewSet,
+    AnalyzeFoodAPIView
 )
 from apps.nutritionX.views import WaterIntakeAPIView, ClientMacroHistoryListView
 
 router = DefaultRouter()
 router.register(r'medications', UserMedicationViewSet, basename='user-medication')
-urlpatterns = [
+urlpatterns = [ 
+    
+    path('analyze-food/', AnalyzeFoodAPIView.as_view(), name='food-analyze-food'),
+    path('scan-meal/', AnalyzeFoodAPIView.as_view(), name='food-scan-meal'),
+    path('scan-food/', AnalyzeFoodAPIView.as_view(), name='food-scan-food'),
+    path('scan/', AnalyzeFoodAPIView.as_view(), name='food-scan'),
+
 
     # -------------------  Staff Interaction
     path('suggestions/', FoodSuggestionListCreateAPIView.as_view()),
