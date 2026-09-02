@@ -118,7 +118,7 @@ class AdminBadgeViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        return Badge.objects.filter(tenant=tenant).annotate(awarded_count=Count('user_awards'))
+        return Badge.objects.filter(tenant=tenant).annotate(awarded_count=Count('awarded_users'))
 
     def perform_create(self, serializer):
         tenant = get_request_tenant(self.request)
@@ -371,7 +371,7 @@ class ClientBadgeView(APIView):
         available_badges = Badge.objects.filter(
             tenant=tenant,
             is_active=True
-        ).annotate(awarded_count=Count('user_awards'))
+        ).annotate(awarded_count=Count('awarded_users'))
 
         return Response({
             'earned_badges': UserBadgeSerializer(earned_user_badges, many=True).data,
