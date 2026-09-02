@@ -80,6 +80,28 @@ class User(UUIDMixin, AbstractUser):
     def __str__(self):
         return f"{self.email} ({self.role})"
 
+    @property
+    def full_name(self):
+        try:
+            if hasattr(self, 'profile') and self.profile:
+                name = f"{self.profile.first_name or ''} {self.profile.last_name or ''}".strip()
+                if name:
+                    return name
+                if self.profile.nickname:
+                    return self.profile.nickname
+        except Exception:
+            pass
+        name = f"{self.first_name or ''} {self.last_name or ''}".strip()
+        return name if name else self.email
+
+    @property
+    def fullname(self):
+        return self.full_name
+
+    def get_full_name(self):
+        return self.full_name
+
+
 
 class GenderChoices(models.TextChoices):
     """Gender options for user profiles."""
