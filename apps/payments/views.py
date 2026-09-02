@@ -955,13 +955,13 @@ class TenantFinanceSummaryAPIView(APIView):
         unique_customers_count = Package.objects.values('client').distinct().count()
 
         # 6. User Subscriber List
-        packages_list = Package.objects.select_related('client', 'package_type').order_by('-purchased_at')
+        packages_list = Package.objects.select_related('client', 'client__profile', 'package_type').order_by('-purchased_at')
         subscribers_data = []
         for p in packages_list:
             subscribers_data.append({
                 "package_id": str(p.id),
                 "client_id": str(p.client.id),
-                "client_name": p.client.fullname,
+                "client_name": p.client.full_name,
                 "client_email": p.client.email,
                 "package_name": p.package_type.name,
                 "purchased_at": p.purchased_at.isoformat() if p.purchased_at else None,
@@ -971,12 +971,12 @@ class TenantFinanceSummaryAPIView(APIView):
             })
 
         # 7. Detailed Payment History / Transactions
-        payments_qs = Payment.objects.filter(payments_filter).select_related('client').order_by('-created_at')
+        payments_qs = Payment.objects.filter(payments_filter).select_related('client', 'client__profile').order_by('-created_at')
         payments_data = []
         for pm in payments_qs:
             payments_data.append({
                 "payment_id": str(pm.id),
-                "client_name": pm.client.fullname,
+                "client_name": pm.client.full_name,
                 "client_email": pm.client.email,
                 "amount": str(pm.amount),
                 "status": pm.status,
