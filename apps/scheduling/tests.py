@@ -649,4 +649,43 @@ class GymSchedulingSystemTestCase(TestCase):
         self.assertEqual(self.pkg1.credits_remaining, 10)
         self.assertEqual(self.pkg2.credits_remaining, 10)
 
+    def test_cancelled_session_does_not_block_new_session_creation(self):
+        """Verify that cancelled sessions/appointments are excluded from scheduling conflict checks."""
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.scheduling.views import ClassSessionViewSet
+        from apps.scheduling.serializers import ClassSessionSerializer
+
+        factory = APIRequestFactory()
+
+        start_time = timezone.now() + timedelta(days=10)
+        end_time = start_time + timedelta(hours=1)
+
+        # 1. Create a session assigned to trainer and mark it cancelled
+        session_cancelled = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=start_time,
+            end_at=end_time,
+            capacity=10,
+            status='cancelled'
+        )
+
+        # 2. Attempt to create a new session for the same trainer in the same time slot via serializer
+        serializer_data = {
+            'template': str(self.template.id),
+            'room': str(self.room.id),
+            'staff': str(self.trainer.id),
+            'start_at': start_time,
+            'end_at': end_time,
+            'capacity': 10,
+            'status': 'scheduled'
+        }
+        serializer = ClassSessionSerializer(data=serializer_data)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        new_session = serializer.save(tenant=self.tenant)
+        self.assertEqual(new_session.staff, self.trainer)
+        self.assertEqual(new_session.status, 'scheduled')
+
 

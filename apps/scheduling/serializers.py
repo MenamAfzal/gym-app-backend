@@ -218,13 +218,12 @@ class ClassSessionSerializer(serializers.ModelSerializer):
         else:
             session_status = 'scheduled'
 
-        if staff and start and end and session_status == 'scheduled':
+        if staff and start and end and session_status != 'cancelled':
             staff_conflict_qs = ClassSession.objects.filter(
                 staff=staff,
                 start_at__lt=end,
                 end_at__gt=start,
-                status='scheduled'
-            )
+            ).exclude(status='cancelled')
             if self.instance:
                 staff_conflict_qs = staff_conflict_qs.exclude(id=self.instance.id)
 
@@ -237,20 +236,18 @@ class ClassSessionSerializer(serializers.ModelSerializer):
                 provider=staff,
                 start_at__lt=end,
                 end_at__gt=start,
-                status='scheduled'
-            )
+            ).exclude(status='cancelled')
             if appointment_conflict_qs.exists():
                 raise serializers.ValidationError({
                     "staff": "This staff member has a conflicting private appointment at the same time slot."
                 })
 
-        if room and start and end and session_status == 'scheduled':
+        if room and start and end and session_status != 'cancelled':
             room_conflict_qs = ClassSession.objects.filter(
                 room=room,
                 start_at__lt=end,
                 end_at__gt=start,
-                status='scheduled'
-            )
+            ).exclude(status='cancelled')
             if self.instance:
                 room_conflict_qs = room_conflict_qs.exclude(id=self.instance.id)
 

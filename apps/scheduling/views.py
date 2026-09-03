@@ -71,7 +71,7 @@ class RoomViewSet(viewsets.ModelViewSet):
         return [IsAuthenticated()]
 
     def get_queryset(self):
-        qs = Room.objects.all()
+        qs = Room.objects.select_related('location').all()
         user = self.request.user
         
         # Staff location segregation
@@ -151,8 +151,7 @@ class RecurrenceRuleViewSet(viewsets.ModelViewSet):
                         room=rule.room,
                         start_at__lt=end_at,
                         end_at__gt=start_at,
-                        status='scheduled'
-                    ).exists()
+                    ).exclude(status='cancelled').exists()
                     if room_conflict:
                         raise ValidationError(f"Room conflict detected for {rule.room} on {current_date} at {rule.start_time}")
 
@@ -162,8 +161,7 @@ class RecurrenceRuleViewSet(viewsets.ModelViewSet):
                         staff=rule.staff,
                         start_at__lt=end_at,
                         end_at__gt=start_at,
-                        status='scheduled'
-                    ).exists()
+                    ).exclude(status='cancelled').exists()
                     if staff_conflict:
                         raise ValidationError(f"Staff conflict detected for {rule.staff.email} on {current_date} at {rule.start_time}")
 
@@ -197,7 +195,11 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         return [IsAuthenticated()]
 
     def get_queryset(self):
-        qs = ClassSession.objects.select_related('template', 'template__location', 'room', 'staff', 'staff__profile')
+        qs = ClassSession.objects.select_related(
+            'template', 'template__location', 'room', 'staff', 'staff__profile'
+        ).prefetch_related(
+            'bookings', 'bookings__client', 'bookings__client__profile', 'waitlists'
+        )
         user = self.request.user
         
         # Staff location segregation
@@ -662,15 +664,13 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                         provider=provider,
                         start_at__lt=slot_end,
                         end_at__gt=slot_start,
-                        status='scheduled'
-                    ).exists()
+                    ).exclude(status='cancelled').exists()
 
                     overlap_session = ClassSession.objects.filter(
                         staff=provider,
                         start_at__lt=slot_end,
                         end_at__gt=slot_start,
-                        status='scheduled'
-                    ).exists()
+                    ).exclude(status='cancelled').exists()
 
                     if not overlap_appt and not overlap_session:
                         slots.append({
@@ -714,15 +714,13 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             provider=provider,
             start_at__lt=end_at,
             end_at__gt=start_at,
-            status='scheduled'
-        ).exists()
+        ).exclude(status='cancelled').exists()
 
         overlap_session = ClassSession.objects.filter(
             staff=provider,
             start_at__lt=end_at,
             end_at__gt=start_at,
-            status='scheduled'
-        ).exists()
+        ).exclude(status='cancelled').exists()
 
         if overlap_appt or overlap_session:
             return Response({"detail": "Provider is not available during this time slot."}, status=status.HTTP_400_BAD_REQUEST)
@@ -824,15 +822,13 @@ class SubstituteRequestViewSet(viewsets.ModelViewSet):
             staff=target_trainer,
             start_at__lt=session.end_at,
             end_at__gt=session.start_at,
-            status='scheduled'
-        ).exclude(id=session.id).exists()
+        ).exclude(status='cancelled').exclude(id=session.id).exists()
 
         appointment_conflict = Appointment.objects.filter(
             provider=target_trainer,
             start_at__lt=session.end_at,
             end_at__gt=session.start_at,
-            status='scheduled'
-        ).exists()
+        ).exclude(status='cancelled').exists()
 
         if staff_conflict or appointment_conflict:
             return Response(
@@ -1138,7 +1134,7 @@ class ViewAllClientsAPIView(APIView):
     def get(self, request):
         status_filter = request.query_params.get('status', 'Active')
         
-        qs = User.objects.filter(role='client')
+        qs = User.objects.filter(role='client').select_related('profile')
         if request.user.tenant:
             qs = qs.filter(tenant=request.user.tenant)
 
@@ -1168,7 +1164,7 @@ class FacilityAccessViewSet(viewsets.ModelViewSet):
     pagination_class = StandardResultsSetPagination
 
     def get_queryset(self):
-        qs = self.queryset.select_related('client', 'location')
+        qs = self.queryset.select_related('client', 'client__profile', 'location')
         user = self.request.user
         if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
             qs = qs.filter(location__location_staff__staff=user).distinct()
