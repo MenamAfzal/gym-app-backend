@@ -1,0 +1,328 @@
+{
+	"info": {
+		"_postman_id": "b78f9a12-7e34-4b56-8a99-1234abcdef02",
+		"name": "Gym App - Checked-In Client Visibility Verification",
+		"description": "Postman Collection to test that clients checked in for a session remain visible in the bookings list and count with status 'checked_in'.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "01 - Auth Login",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Status code is 200', function () {",
+							"    pm.response.to.have.status(200);",
+							"    var jsonData = pm.response.json();",
+							"    var token = jsonData.access || jsonData.token;",
+							"    pm.environment.set('auth_token', token);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"email\": \"owner@aligym.com\",\n  \"password\": \"password123\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/api/users/login/",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"api",
+						"users",
+						"login",
+						""
+					]
+				}
+			}
+		},
+		{
+			"name": "02 - Create Class Session",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Session created successfully', function () {",
+							"    pm.response.to.have.status(201);",
+							"    var res = pm.response.json();",
+							"    pm.environment.set('session_id', res.id);",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Authorization",
+						"value": "Bearer {{auth_token}}"
+					},
+					{
+						"key": "X-Tenant-Subdomain",
+						"value": "{{tenant_subdomain}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"template\": \"{{template_id}}\",\n  \"room\": \"{{room_id}}\",\n  \"staff\": \"{{trainer_id}}\",\n  \"start_at\": \"2026-09-20T10:00:00Z\",\n  \"end_at\": \"2026-09-20T11:00:00Z\",\n  \"capacity\": 10,\n  \"status\": \"scheduled\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/api/scheduling/sessions/",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"api",
+						"scheduling",
+						"sessions",
+						""
+					]
+				}
+			}
+		},
+		{
+			"name": "03 - Client Book Session",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Booking created successfully', function () {",
+							"    pm.response.to.have.status(201);",
+							"    var res = pm.response.json();",
+							"    pm.environment.set('booking_id', res.id);",
+							"    pm.expect(res.status).to.eql('booked');",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Content-Type",
+						"value": "application/json"
+					},
+					{
+						"key": "Authorization",
+						"value": "Bearer {{auth_token}}"
+					},
+					{
+						"key": "X-Tenant-Subdomain",
+						"value": "{{tenant_subdomain}}"
+					}
+				],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n  \"session\": \"{{session_id}}\",\n  \"client_id\": \"{{client_id}}\"\n}"
+				},
+				"url": {
+					"raw": "{{base_url}}/api/scheduling/bookings/",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"api",
+						"scheduling",
+						"bookings",
+						""
+					]
+				}
+			}
+		},
+		{
+			"name": "04 - Get Session Details (Before Check-In)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Session shows 1 booked client with status booked', function () {",
+							"    pm.response.to.have.status(200);",
+							"    var res = pm.response.json();",
+							"    pm.expect(res.booked_count).to.eql(1);",
+							"    pm.expect(res.bookings.length).to.eql(1);",
+							"    pm.expect(res.bookings[0].status).to.eql('booked');",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{auth_token}}"
+					},
+					{
+						"key": "X-Tenant-Subdomain",
+						"value": "{{tenant_subdomain}}"
+					}
+				],
+				"url": {
+					"raw": "{{base_url}}/api/scheduling/sessions/{{session_id}}/",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"api",
+						"scheduling",
+						"sessions",
+						"{{session_id}}",
+						""
+					]
+				}
+			}
+		},
+		{
+			"name": "05 - Check-In Client",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Check-in successful with status checked_in', function () {",
+							"    pm.response.to.have.status(200);",
+							"    var res = pm.response.json();",
+							"    pm.expect(res.status).to.eql('checked_in');",
+							"    pm.expect(res.checked_in_at).to.not.be.null;",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "POST",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{auth_token}}"
+					},
+					{
+						"key": "X-Tenant-Subdomain",
+						"value": "{{tenant_subdomain}}"
+					}
+				],
+				"url": {
+					"raw": "{{base_url}}/api/scheduling/bookings/{{booking_id}}/check_in/",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"api",
+						"scheduling",
+						"bookings",
+						"{{booking_id}}",
+						"check_in",
+						""
+					]
+				}
+			}
+		},
+		{
+			"name": "06 - Get Session Details (After Check-In - Client Must Remain Visible!)",
+			"event": [
+				{
+					"listen": "test",
+					"script": {
+						"exec": [
+							"pm.test('Checked-in client remains visible in bookings list and booked_count is still 1', function () {",
+							"    pm.response.to.have.status(200);",
+							"    var res = pm.response.json();",
+							"    pm.expect(res.booked_count).to.eql(1);",
+							"    pm.expect(res.bookings.length).to.eql(1);",
+							"    pm.expect(res.bookings[0].status).to.eql('checked_in');",
+							"    pm.expect(res.bookings[0].id).to.eql(pm.environment.get('booking_id'));",
+							"});"
+						],
+						"type": "text/javascript"
+					}
+				}
+			],
+			"request": {
+				"method": "GET",
+				"header": [
+					{
+						"key": "Authorization",
+						"value": "Bearer {{auth_token}}"
+					},
+					{
+						"key": "X-Tenant-Subdomain",
+						"value": "{{tenant_subdomain}}"
+					}
+				],
+				"url": {
+					"raw": "{{base_url}}/api/scheduling/sessions/{{session_id}}/",
+					"host": [
+						"{{base_url}}"
+					],
+					"path": [
+						"api",
+						"scheduling",
+						"sessions",
+						"{{session_id}}",
+						""
+					]
+				}
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://127.0.0.1:8000",
+			"type": "string"
+		},
+		{
+			"key": "tenant_subdomain",
+			"value": "ali-gym",
+			"type": "string"
+		},
+		{
+			"key": "trainer_id",
+			"value": "REPLACE_WITH_TRAINER_UUID",
+			"type": "string"
+		},
+		{
+			"key": "client_id",
+			"value": "REPLACE_WITH_CLIENT_UUID",
+			"type": "string"
+		},
+		{
+			"key": "template_id",
+			"value": "REPLACE_WITH_TEMPLATE_UUID",
+			"type": "string"
+		},
+		{
+			"key": "room_id",
+			"value": "REPLACE_WITH_ROOM_UUID",
+			"type": "string"
+		}
+	]
+}
