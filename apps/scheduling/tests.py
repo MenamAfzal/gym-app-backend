@@ -688,4 +688,55 @@ class GymSchedulingSystemTestCase(TestCase):
         self.assertEqual(new_session.staff, self.trainer)
         self.assertEqual(new_session.status, 'scheduled')
 
+    def test_checked_in_client_remains_visible_in_bookings_and_count(self):
+        """
+        Verify that when a client checks in for a session, their booking remains
+        visible in the serialized session bookings list with status 'checked_in'
+        and is included in booked_count.
+        """
+        from rest_framework.test import APIRequestFactory
+        from apps.scheduling.serializers import ClassSessionSerializer
+        factory = APIRequestFactory()
+
+        # 1. Create session and booking
+        start_time = timezone.now() + timedelta(days=1)
+        end_time = start_time + timedelta(hours=1)
+        session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=start_time,
+            end_at=end_time,
+            capacity=10,
+            status='scheduled'
+        )
+        booking = Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            session=session,
+            status='booked'
+        )
+
+        # Verify initial serialized status as trainer
+        req = factory.get('/')
+        req.user = self.trainer
+        serializer_initial = ClassSessionSerializer(session, context={'request': req})
+        self.assertEqual(serializer_initial.data['booked_count'], 1)
+        self.assertEqual(len(serializer_initial.data['bookings']), 1)
+        self.assertEqual(serializer_initial.data['bookings'][0]['status'], 'booked')
+
+        # 2. Transition booking status to checked_in (simulating check-in)
+        booking.status = 'checked_in'
+        booking.checked_in_at = timezone.now()
+        booking.save()
+
+        # 3. Re-serialize session and verify participant visibility
+        serializer_after = ClassSessionSerializer(session, context={'request': req})
+        self.assertEqual(serializer_after.data['booked_count'], 1)
+        self.assertEqual(len(serializer_after.data['bookings']), 1)
+        self.assertEqual(serializer_after.data['bookings'][0]['status'], 'checked_in')
+        self.assertEqual(serializer_after.data['bookings'][0]['client_id'], str(self.client1.id))
+
+
 

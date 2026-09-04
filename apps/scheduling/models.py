@@ -120,7 +120,7 @@ class ClassSession(UUIDMixin, TimestampMixin, TenantMixin):
 
     @property
     def is_full(self):
-        return self.bookings.filter(status='booked').count() >= self.capacity
+        return self.bookings.filter(status__in=['booked', 'checked_in', 'attended']).count() >= self.capacity
 
     @property
     def name(self):
@@ -242,9 +242,10 @@ class Booking(UUIDMixin, TimestampMixin, TenantMixin):
     """
     STATUS_CHOICES = [
         ('booked', 'Booked'),
+        ('checked_in', 'Checked In'),
+        ('attended', 'Attended'),
         ('cancelled', 'Cancelled'),
         ('no_show', 'No Show'),
-        ('attended', 'Attended'),
     ]
     client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bookings')
     session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name='bookings')

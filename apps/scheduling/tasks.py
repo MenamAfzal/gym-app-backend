@@ -131,9 +131,7 @@ def cancel_session_bookings_and_refund(session):
     client's package regardless of any 12-hour cancellation policy window.
     """
     with transaction.atomic():
-        bookings = Booking.objects.select_for_update().select_related(
-            'credit_source', 'client', 'client__profile'
-        ).filter(
+        bookings = Booking.objects.select_for_update().filter(
             session=session
         ).exclude(status='cancelled')
 
@@ -143,9 +141,9 @@ def cancel_session_bookings_and_refund(session):
 
             # Refund credit to package
             pkg = None
-            if booking.credit_source:
+            if booking.credit_source_id:
                 try:
-                    pkg = Package.objects.select_for_update().get(id=booking.credit_source.id)
+                    pkg = Package.objects.select_for_update().get(id=booking.credit_source_id)
                 except Package.DoesNotExist:
                     pkg = None
 

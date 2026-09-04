@@ -378,11 +378,11 @@ class BookingViewSet(viewsets.ModelViewSet):
 
         # Check existing booking
         existing_booking = Booking.objects.filter(client=target_client, session=session).first()
-        if existing_booking and existing_booking.status == 'booked':
+        if existing_booking and existing_booking.status in ['booked', 'checked_in', 'attended']:
             return Response({"detail": "Already booked this session."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Capacity Check
-        current_bookings = session.bookings.filter(status='booked').count()
+        current_bookings = session.bookings.filter(status__in=['booked', 'checked_in', 'attended']).count()
         if current_bookings >= session.capacity:
             return Response({"detail": "Session is full. Join waitlist instead."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -506,7 +506,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             return Response({"detail": "You do not have permission to check in for this booking."}, status=status.HTTP_403_FORBIDDEN)
 
         booking.checked_in_at = timezone.now()
-        booking.status = 'attended'
+        booking.status = 'checked_in'
         booking.save()
 
         # Emit Rewards Event

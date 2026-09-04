@@ -148,7 +148,7 @@ class ClassSessionSerializer(serializers.ModelSerializer):
 
     def get_booked_count(self, obj):
         if hasattr(obj, 'bookings'):
-            return obj.bookings.filter(status='booked').count()
+            return obj.bookings.filter(status__in=['booked', 'checked_in', 'attended']).count()
         return 0
 
     def get_waitlist_count(self, obj):
@@ -160,7 +160,7 @@ class ClassSessionSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if request and request.user and request.user.role in ['trainer', 'gym_owner', 'gym_manager', 'staff']:
             if hasattr(obj, 'bookings'):
-                active_bookings = obj.bookings.filter(status__in=['booked', 'checked_in']).select_related('client', 'client__profile')
+                active_bookings = obj.bookings.filter(status__in=['booked', 'checked_in', 'attended']).select_related('client', 'client__profile')
                 results = []
                 for b in active_bookings:
                     c = b.client
@@ -185,9 +185,12 @@ class ClassSessionSerializer(serializers.ModelSerializer):
     def get_user_booking_status(self, obj):
         request = self.context.get('request')
         if request and request.user and request.user.is_authenticated:
-            if hasattr(obj, 'bookings') and obj.bookings.filter(client=request.user, status='booked').exists():
-                return "booked"
-            if hasattr(obj, 'waitlist_entries') and obj.waitlist_entries.filter(client=request.user, status='waiting').exists():
+            if hasattr(obj, 'bookings'):
+                user_booking = obj.bookings.filter(client=request.user, status__in=['booked', 'checked_in', 'attended']).first()
+                if user_booking:
+                    return user_booking.status
+            waitlist_qs = getattr(obj, 'waitlists', None) or getattr(obj, 'waitlist_entries', None)
+            if waitlist_qs and waitlist_qs.filter(client=request.user, status='waiting').exists():
                 return "waitlist"
         return None
 
