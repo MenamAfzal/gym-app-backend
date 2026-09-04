@@ -980,6 +980,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import AccessToken
 from .serializers import PollDetailSerializer, UserMinimalSerializer
 from .models import CommentReaction
+from .permissions import is_admin_user, IsOwnerOrAdmin
 from apps.socialnetwork.helper_functions import handle_file_response
 from apps.socialnetwork.models import Comment, Like, Photo, Poll, PollOption, Video, Vote, Post
 from apps.socialnetwork.serializers import (
@@ -1200,48 +1201,35 @@ class MultiMediaUploadAPIView(APIView):
         return user
 
     def _handle_poll_upload(self, request):
-        user = request.user
-        if not user.is_authenticated:
-            return format_error_response(
-                'Authentication required',
-                status_code=status.HTTP_401_UNAUTHORIZED
-            )
-        from apps.users.models import UserRole
-        if not (user.is_staff or user.role != UserRole.CLIENT):
-            return format_error_response(
-                'Staff privileges required',
-                status_code=status.HTTP_403_FORBIDDEN
-            )
+        user = self._get_authenticated_user(request)
+        if isinstance(user, Response):
+            return user
         return handle_poll_upload(request, user)
 
 
 class PollCreateAPIView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, *args, **kwargs):
         user = request.user
-        if not user.is_authenticated:
+        if not user or not user.is_authenticated:
             return format_error_response(
                 'Authentication required',
                 status_code=status.HTTP_401_UNAUTHORIZED
-            )
-        from apps.users.models import UserRole
-        if not (user.is_staff or user.role != UserRole.CLIENT):
-            return format_error_response(
-                'Staff privileges required',
-                status_code=status.HTTP_403_FORBIDDEN
             )
         return handle_poll_upload(request, user)
 
 
 class PollAPIView(viewsets.ModelViewSet):
-    permission_classes = [AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         user = self.request.user
         from apps.users.models import UserRole
-        if user.is_authenticated and (user.is_staff or user.role != UserRole.CLIENT):
+        if user.is_authenticated and (user.is_staff or is_admin_user(user) or user.role != UserRole.CLIENT):
             return Poll.objects.all().order_by('-created_at')
+        if user.is_authenticated:
+            return Poll.objects.filter(Q(visible_to_clients=True) | Q(user=user)).order_by('-created_at')
         return Poll.objects.filter(visible_to_clients=True).order_by('-created_at')
 
     def get_serializer_class(self):
@@ -1251,6 +1239,28 @@ class PollAPIView(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
+
+    def destroy(self, request, *args, **kwargs):
+        poll = self.get_object()
+        if poll.user_id != request.user.id and not is_admin_user(request.user):
+            return Response(
+                {"error": "You do not have permission to delete this poll."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        self.perform_destroy(poll)
+        return Response(
+            {"message": "Poll deleted successfully."},
+            status=status.HTTP_204_NO_CONTENT
+        )
+
+    def update(self, request, *args, **kwargs):
+        poll = self.get_object() 
+        if poll.user_id != request.user.id and not is_admin_user(request.user):
+            return Response(
+                {"error": "You do not have permission to edit this poll."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        return super().update(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'])
     def vote(self, request, pk=None):
@@ -1430,9 +1440,20 @@ class MediaViewSet(viewsets.ModelViewSet):
             return format_error_response('Need to specify valid media_type')
 
         try:
-            media = self.media_types[media_type]['model'].objects.get(pk=pk)
-        except (Photo.DoesNotExist, Video.DoesNotExist):
+            model_class = self.media_types[media_type]['model']
+            media = model_class.objects.get(pk=pk)
+        except model_class.DoesNotExist:
             return format_error_response(f"{media_type} not found", status_code=status.HTTP_404_NOT_FOUND)
+ 
+        user = self._get_authenticated_user(request)
+        if isinstance(user, Response):
+            return user
+
+        if media.user_id != user.id and not is_admin_user(user):
+            return format_error_response(
+                f"You do not have permission to edit this {media_type}.",
+                status_code=status.HTTP_403_FORBIDDEN
+            )
 
         serializer = self.get_serializer(media, data=request.data, partial=True)
         if serializer.is_valid():
@@ -1452,28 +1473,28 @@ class MediaViewSet(viewsets.ModelViewSet):
             return user
 
         try:
-            obj = self.media_types[media_type]['model'].objects.get(pk=pk)
-            obj.delete()
-            return Response(status=status.HTTP_204_NO_CONTENT)
-        except (Photo.DoesNotExist, Video.DoesNotExist):
+            model_class = self.media_types[media_type]['model']
+            obj = model_class.objects.get(pk=pk)
+        except model_class.DoesNotExist:
             return format_error_response(f"{media_type} not found", status_code=status.HTTP_404_NOT_FOUND)
-        
+
+        # Security Check: Allow deletion ONLY if author OR gym admin
+        if obj.user_id != user.id and not is_admin_user(user):
+            return format_error_response(
+                f"You do not have permission to delete this {media_type}.",
+                status_code=status.HTTP_403_FORBIDDEN
+            )
+
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     def _get_authenticated_user(self, request):
         user = request.user
-        if not user.is_authenticated:
+        if not user or not user.is_authenticated:
             return format_error_response(
                 'Authentication required',
                 status_code=status.HTTP_401_UNAUTHORIZED
             )
-
-        from apps.users.models import UserRole
-        if not (user.is_staff or user.role != UserRole.CLIENT):
-            return format_error_response(
-                'Staff privileges required',
-                status_code=status.HTTP_403_FORBIDDEN
-            )
-
         return user
 
     @action(detail=True, methods=['post'])
@@ -1795,8 +1816,10 @@ class UnifiedFeedAPIView(APIView):
             models.Q(end_date__isnull=True) | models.Q(end_date__gt=timezone.now()))
 
         from apps.users.models import UserRole
-        if request.user.is_authenticated and (request.user.is_staff or request.user.role != UserRole.CLIENT):
+        if request.user.is_authenticated and (request.user.is_staff or is_admin_user(request.user) or request.user.role != UserRole.CLIENT):
             pass
+        elif request.user.is_authenticated:
+            poll_qs = poll_qs.filter(models.Q(visible_to_clients=True) | models.Q(user=request.user))
         else:
             poll_qs = poll_qs.filter(visible_to_clients=True)
 
@@ -1814,7 +1837,7 @@ class UnifiedMediaUploadAPIView(APIView):
     A simplified API for uploading multiple media files with a single 'files' parameter.
     """
     parser_classes = (MultiPartParser, FormParser, JSONParser)
-    permission_classes = [AllowAny]
+    permission_classes = [permissions.IsAuthenticated]
 
     @transaction.atomic
     def post(self, request, *args, **kwargs):
@@ -1904,28 +1927,17 @@ class UnifiedMediaUploadAPIView(APIView):
 
     def _get_authenticated_user(self, request):
         user = request.user
-        if not user.is_authenticated:
-            try:
-                user = User.objects.filter(is_staff=True, is_active=True).first() or User.objects.filter(
-                    is_active=True).first()
-                if not user:
-                    return format_error_response('Authentication required', status_code=status.HTTP_401_UNAUTHORIZED)
-            except Exception as e:
-                logger.error(f"Authentication error: {str(e)}", exc_info=True)
-                return format_error_response(f'Authentication error: {str(e)}',
-                                             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        if not user or not user.is_authenticated:
+            return format_error_response(
+                'Authentication required',
+                status_code=status.HTTP_401_UNAUTHORIZED
+            )
         return user
 
     def _handle_poll_upload(self, request):
         user = self._get_authenticated_user(request)
         if isinstance(user, Response):
             return user
-        from apps.users.models import UserRole
-        if not (user.is_staff or user.role != UserRole.CLIENT):
-            return format_error_response(
-                'Staff privileges required',
-                status_code=status.HTTP_403_FORBIDDEN
-            )
         return handle_poll_upload(request, user)
     
 class CommentViewSet(mixins.DestroyModelMixin, viewsets.GenericViewSet):
@@ -1940,8 +1952,8 @@ class CommentViewSet(mixins.DestroyModelMixin, viewsets.GenericViewSet):
     def destroy(self, request, *args, **kwargs):
         comment = self.get_object()
 
-        # Security Check: Allow deletion ONLY if the user is the author OR is staff/admin
-        if comment.user != request.user and not request.user.is_staff:
+        # Security Check: Allow deletion ONLY if the user is the author OR is gym admin
+        if comment.user != request.user and not is_admin_user(request.user):
             return Response(
                 {"error": "You do not have permission to delete this comment."},
                 status=status.HTTP_403_FORBIDDEN
