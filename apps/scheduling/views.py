@@ -396,6 +396,27 @@ class BookingViewSet(viewsets.ModelViewSet):
         if existing_booking and existing_booking.status in ['booked', 'checked_in', 'attended']:
             return Response({"detail": "Already booked this session."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Check schedule conflict: client cannot book overlapping sessions or appointments
+        client_session_conflict = Booking.objects.filter(
+            client=target_client,
+            session__start_at__lt=session.end_at,
+            session__end_at__gt=session.start_at,
+            status__in=['booked', 'checked_in', 'attended']
+        ).exclude(session=session).exists()
+
+        client_appt_conflict = Appointment.objects.filter(
+            client=target_client,
+            start_at__lt=session.end_at,
+            end_at__gt=session.start_at,
+            status__in=['scheduled', 'checked_in', 'attended']
+        ).exists()
+
+        if client_session_conflict or client_appt_conflict:
+            return Response(
+                {"detail": "Schedule conflict detected: you already have an active booking or appointment during this time slot."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         # Capacity Check
         current_bookings = session.bookings.filter(status__in=['booked', 'checked_in', 'attended']).count()
         if current_bookings >= session.capacity:
@@ -739,6 +760,27 @@ class AppointmentViewSet(viewsets.ModelViewSet):
 
         if overlap_appt or overlap_session:
             return Response({"detail": "Provider is not available during this time slot."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Check client conflict
+        client_appt_conflict = Appointment.objects.filter(
+            client=target_client,
+            start_at__lt=end_at,
+            end_at__gt=start_at,
+            status__in=['scheduled', 'checked_in', 'attended']
+        ).exists()
+
+        client_session_conflict = Booking.objects.filter(
+            client=target_client,
+            session__start_at__lt=end_at,
+            session__end_at__gt=start_at,
+            status__in=['booked', 'checked_in', 'attended']
+        ).exists()
+
+        if client_appt_conflict or client_session_conflict:
+            return Response(
+                {"detail": "Schedule conflict detected: you already have an active booking or appointment during this time slot."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         # Check credits
         package = Package.objects.select_for_update().filter(

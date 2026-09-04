@@ -738,5 +738,90 @@ class GymSchedulingSystemTestCase(TestCase):
         self.assertEqual(serializer_after.data['bookings'][0]['status'], 'checked_in')
         self.assertEqual(serializer_after.data['bookings'][0]['client_id'], str(self.client1.id))
 
+    def test_client_schedule_conflict_prevention(self):
+        """Verify a client cannot book into multiple sessions or appointments at the same time."""
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.scheduling.views import BookingViewSet
+
+        factory = APIRequestFactory()
+        view_create = BookingViewSet.as_view({'post': 'create'})
+
+        room_b = Room.objects.create(
+            tenant=self.tenant, location=self.location, name="Room B", capacity=10
+        )
+
+        start_time = timezone.now() + timedelta(days=7)
+        end_time = start_time + timedelta(hours=1)
+
+        # Session 1 in Room A
+        session1 = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=start_time,
+            end_at=end_time,
+            capacity=10,
+            status='scheduled'
+        )
+
+        # Session 2 in Room B at the exact same time
+        session2 = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=room_b,
+            staff=self.trainer,
+            start_at=start_time,
+            end_at=end_time,
+            capacity=10,
+            status='scheduled'
+        )
+
+        # 1. Client 1 books Session 1 -> Should Succeed
+        request1 = factory.post(
+            '/api/bookings/',
+            {'session': str(session1.id), 'join_mode': 'physical'},
+            format='json'
+        )
+        request1.tenant = self.tenant
+        force_authenticate(request1, user=self.client1)
+
+        response1 = view_create(request1)
+        self.assertEqual(response1.status_code, 201)
+
+        # 2. Client 1 attempts to book Session 2 at the same time -> Should Fail with 400
+        request2 = factory.post(
+            '/api/bookings/',
+            {'session': str(session2.id), 'join_mode': 'physical'},
+            format='json'
+        )
+        request2.tenant = self.tenant
+        force_authenticate(request2, user=self.client1)
+
+        response2 = view_create(request2)
+        self.assertEqual(response2.status_code, 400)
+        self.assertIn("Schedule conflict", str(response2.data.get('detail', '')))
+
+        # 3. Client cancels booking 1
+        booking1_id = response1.data['id']
+        view_destroy = BookingViewSet.as_view({'delete': 'destroy'})
+        request_del = factory.delete(f'/api/bookings/{booking1_id}/')
+        request_del.tenant = self.tenant
+        force_authenticate(request_del, user=self.client1)
+        response_del = view_destroy(request_del, pk=booking1_id)
+        self.assertEqual(response_del.status_code, 200)
+
+        # 4. Now Client 1 can book Session 2 -> Should Succeed
+        request3 = factory.post(
+            '/api/bookings/',
+            {'session': str(session2.id), 'join_mode': 'physical'},
+            format='json'
+        )
+        request3.tenant = self.tenant
+        force_authenticate(request3, user=self.client1)
+        response3 = view_create(request3)
+        self.assertEqual(response3.status_code, 201)
+
+
 
 
