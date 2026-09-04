@@ -39,7 +39,22 @@ logger = logging.getLogger(__name__)
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = 'page_size'
-    max_page_size = 100
+    max_page_size = 1000
+
+    def paginate_queryset(self, queryset, request, view=None):
+        params = getattr(request, 'query_params', getattr(request, 'GET', {}))
+        pagination_param = params.get('pagination', '').lower()
+        if pagination_param in ['false', '0', 'no']:
+            return None
+        return super().paginate_queryset(queryset, request, view)
+
+    def get_page_size(self, request):
+        if self.page_size_query_param:
+            params = getattr(request, 'query_params', getattr(request, 'GET', {}))
+            val = params.get(self.page_size_query_param)
+            if val and str(val).lower() == 'all':
+                return self.max_page_size
+        return super().get_page_size(request)
 
 
 class LocationViewSet(viewsets.ModelViewSet):
