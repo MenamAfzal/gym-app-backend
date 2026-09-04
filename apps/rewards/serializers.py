@@ -18,7 +18,7 @@ class RewardProgramSerializer(serializers.ModelSerializer):
     class Meta:
         model = RewardProgram
         fields = [
-            'id', 'name', 'program_type', 'description', 'is_active',
+            'id', 'name', 'program_type', 'description', 'status',
             'start_date', 'end_date', 'metadata', 'rules_count',
             'created_at', 'updated_at'
         ]
@@ -140,7 +140,7 @@ class RewardWalletSerializer(serializers.ModelSerializer):
             'lifetime_redeemed', 'current_tier', 'current_tier_name',
             'current_tier_multiplier', 'updated_at'
         ]
-        read_only_fields = fields
+        read_only_fields = [f for f in fields if f != 'balance']
 
 
 class RewardRedemptionSerializer(serializers.ModelSerializer):

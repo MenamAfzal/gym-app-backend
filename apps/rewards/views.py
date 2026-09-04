@@ -5,7 +5,7 @@ Separates Business Admin configuration/fulfillment endpoints from Client-facing
 wallet and redemption interactions.
 Highly optimized with query annotations and eager joins to eliminate N+1 queries.
 """
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, mixins
 from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -15,14 +15,15 @@ from django.db.models import Sum, Count, Q
 from apps.rewards.models import (
     RewardProgram, RewardRule, Badge, RewardTier,
     RewardWallet, RewardPointLedger, UserBadge, UserStreak,
-    RewardCatalogItem, RewardRedemption, RewardTransaction
+    RewardCatalogItem, RewardRedemption, RewardTransaction,
+    RewardRuleVersion
 )
 from apps.rewards.serializers import (
     RewardProgramSerializer, RewardRuleSerializer, BadgeSerializer,
     RewardTierSerializer, RewardCatalogItemSerializer, RewardPointLedgerSerializer,
     UserBadgeSerializer, UserStreakSerializer, RewardWalletSerializer,
     RewardRedemptionSerializer, RedemptionCreateSerializer, PointsAdjustmentSerializer,
-    RewardTransactionSerializer
+    RewardTransactionSerializer, RewardRuleVersionSerializer
 )
 from apps.rewards.permissions import (
     IsRewardAdminOrManager, IsRewardStaffOrAdmin, IsRewardClient
@@ -67,6 +68,17 @@ class AdminRewardProgramViewSet(viewsets.ModelViewSet):
         tenant = get_request_tenant(self.request)
         serializer.save(tenant=tenant)
 
+    @action(detail=True, methods=['post'], url_path='toggle-status')
+    def toggle_status(self, request, pk=None):
+        program = self.get_object()
+        new_status = request.data.get('status')
+        if new_status not in ['draft', 'active', 'paused', 'archived']:
+            return Response({'error': 'Invalid status choice.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        program.status = new_status
+        program.save(update_fields=['status'])
+        return Response({'id': str(program.id), 'status': program.status})
+
 
 class AdminRewardRuleViewSet(viewsets.ModelViewSet):
     """
@@ -106,6 +118,24 @@ class AdminRewardRuleViewSet(viewsets.ModelViewSet):
         rule.status = new_status
         rule.save(update_fields=['status'])
         return Response({'id': str(rule.id), 'status': rule.status})
+
+
+class AdminRewardRuleVersionViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Read-only view for historical rule versions.
+    """
+    serializer_class = RewardRuleVersionSerializer
+    permission_classes = [IsAuthenticated, IsRewardAdminOrManager]
+
+    def get_queryset(self):
+        tenant = get_request_tenant(self.request)
+        qs = RewardRuleVersion.objects.filter(rule__tenant=tenant).select_related('created_by')
+        
+        rule_id = self.request.query_params.get('rule_id')
+        if rule_id:
+            qs = qs.filter(rule_id=rule_id)
+            
+        return qs.order_by('-version')
 
 
 class AdminBadgeViewSet(viewsets.ModelViewSet):
@@ -211,7 +241,7 @@ class AdminRewardRedemptionViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({'error': str(ex)}, status=status.HTTP_400_BAD_REQUEST)
 
 
-class AdminRewardWalletViewSet(viewsets.ReadOnlyModelViewSet):
+class AdminRewardWalletViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin, mixins.UpdateModelMixin, viewsets.GenericViewSet):
     """
     Staff oversight of member wallets and manual point adjustments.
     """
@@ -221,6 +251,24 @@ class AdminRewardWalletViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
         return RewardWallet.objects.filter(tenant=tenant).select_related('user', 'current_tier')
+
+    def perform_update(self, serializer):
+        wallet = self.get_object()
+        old_balance = wallet.balance
+        new_balance = serializer.validated_data.get('balance', old_balance)
+        
+        if old_balance != new_balance:
+            amount_diff = new_balance - old_balance
+            updated_wallet = RewardWalletService.adjust_points(
+                tenant_id=wallet.tenant_id,
+                user=wallet.user,
+                amount=amount_diff,
+                reason="Manual balance update via API",
+                admin_user=self.request.user
+            )
+            serializer.instance = updated_wallet
+        else:
+            serializer.save()
 
     @action(detail=False, methods=['post'], url_path='adjust-points')
     def adjust_points(self, request):
@@ -279,6 +327,16 @@ class AdminRewardAnalyticsView(APIView):
         badges_awarded_count = UserBadge.objects.filter(tenant=tenant).count()
         pending_redemptions_count = RewardRedemption.objects.filter(tenant=tenant, status='PENDING').count()
 
+        top_members = list(RewardWallet.objects.filter(tenant=tenant).select_related('user').order_by('-lifetime_earned')[:5].values(
+            'user__email', 'balance', 'lifetime_earned'
+        ))
+
+        successful_rules = list(RewardTransaction.objects.filter(
+            tenant=tenant, result_status='SUCCESS'
+        ).values('rule__name', 'rule__program__name').annotate(
+            execution_count=Count('id')
+        ).order_by('-execution_count')[:5])
+
         return Response({
             'total_active_points_liability': wallets_agg['total_active_points'] or 0,
             'total_points_ever_earned': wallets_agg['total_lifetime_earned'] or 0,
@@ -287,6 +345,8 @@ class AdminRewardAnalyticsView(APIView):
             'active_reward_rules': active_rules_count,
             'total_badges_awarded': badges_awarded_count,
             'pending_redemptions': pending_redemptions_count,
+            'top_members': top_members,
+            'successful_rules': successful_rules,
         })
 
 

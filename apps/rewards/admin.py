@@ -11,8 +11,8 @@ from apps.rewards.models import (
 
 @admin.register(RewardProgram)
 class RewardProgramAdmin(admin.ModelAdmin):
-    list_display = ('name', 'tenant', 'program_type', 'is_active', 'created_at')
-    list_filter = ('tenant', 'program_type', 'is_active')
+    list_display = ('name', 'tenant', 'program_type', 'status', 'created_at')
+    list_filter = ('tenant', 'program_type', 'status')
     search_fields = ('name', 'tenant__name')
     list_select_related = ('tenant',)
 

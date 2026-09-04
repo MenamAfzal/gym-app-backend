@@ -18,6 +18,12 @@ class ProgramType(models.TextChoices):
     REFERRAL = 'referral', _('Member Referral')
     TIERED_VIP = 'tiered_vip', _('Tiered VIP')
 
+class ProgramStatus(models.TextChoices):
+    DRAFT = 'draft', _('Draft')
+    ACTIVE = 'active', _('Active')
+    PAUSED = 'paused', _('Paused')
+    ARCHIVED = 'archived', _('Archived')
+
 
 class RuleStatus(models.TextChoices):
     DRAFT = 'draft', _('Draft')
@@ -69,7 +75,12 @@ class RewardProgram(TenantAwareModel):
         help_text="Program archetype"
     )
     description = models.TextField(blank=True)
-    is_active = models.BooleanField(default=True, db_index=True)
+    status = models.CharField(
+        max_length=20,
+        choices=ProgramStatus.choices,
+        default=ProgramStatus.ACTIVE,
+        db_index=True
+    )
     start_date = models.DateTimeField(null=True, blank=True)
     end_date = models.DateTimeField(null=True, blank=True)
     metadata = models.JSONField(default=dict, blank=True)
@@ -79,7 +90,7 @@ class RewardProgram(TenantAwareModel):
         verbose_name_plural = _('Reward Programs')
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['tenant', 'is_active', 'program_type']),
+            models.Index(fields=['tenant', 'status', 'program_type']),
         ]
 
     def __str__(self):

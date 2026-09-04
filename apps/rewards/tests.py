@@ -98,7 +98,7 @@ class RewardRuleEvaluationTests(RewardsBaseTestCase):
             tenant=self.tenant1,
             name="Alpha Loyalty",
             program_type='loyalty',
-            is_active=True
+            status='active'
         )
 
     def test_simple_event_rule_awards_points(self):
@@ -263,7 +263,7 @@ class IdempotencyAndDeduplicationTests(RewardsBaseTestCase):
         self.program = RewardProgram.objects.create(
             tenant=self.tenant1,
             name="Loyalty Program",
-            is_active=True
+            status='active'
         )
         self.rule = RewardRule.objects.create(
             tenant=self.tenant1,

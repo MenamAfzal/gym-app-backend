@@ -73,7 +73,7 @@ class RewardEngineService:
                     tenant_id=tenant_id,
                     event_type=event.event_type,
                     status='active',
-                    program__is_active=True
+                    program__status='active'
                 ).order_by('-priority', 'created_at')
 
                 if not active_rules.exists():
@@ -92,6 +92,19 @@ class RewardEngineService:
                             result_status=ExecutionStatus.SUCCESS
                         ).count()
                         if user_exec_count >= rule.max_executions_per_user:
+                            continue
+                    
+                    # Check rolling window execution cap
+                    if rule.max_executions_per_period is not None and rule.period_window_days is not None:
+                        cutoff_date = timezone.now() - timezone.timedelta(days=rule.period_window_days)
+                        period_exec_count = RewardTransaction.objects.filter(
+                            tenant_id=tenant_id,
+                            user=user,
+                            rule=rule,
+                            result_status=ExecutionStatus.SUCCESS,
+                            created_at__gte=cutoff_date
+                        ).count()
+                        if period_exec_count >= rule.max_executions_per_period:
                             continue
 
                     # Evaluate DSL conditions
@@ -374,6 +387,9 @@ class RewardRedemptionService:
 
                 if redemption.status == RedemptionStatus.CANCELLED:
                     return redemption
+                
+                if redemption.status == RedemptionStatus.FULFILLED:
+                    raise ValueError("Cannot cancel an already fulfilled redemption.")
 
                 redemption.status = RedemptionStatus.CANCELLED
                 redemption.notes = f"{redemption.notes}\nCancelled by {staff_user.email if staff_user else 'System'}: {reason}".strip()

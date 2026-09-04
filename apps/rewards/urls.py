@@ -8,6 +8,7 @@ from apps.rewards.views import (
     AdminRewardProgramViewSet, AdminRewardRuleViewSet, AdminBadgeViewSet,
     AdminRewardTierViewSet, AdminRewardCatalogViewSet, AdminRewardRedemptionViewSet,
     AdminRewardWalletViewSet, AdminRewardTransactionViewSet, AdminRewardAnalyticsView,
+    AdminRewardRuleVersionViewSet,
     ClientRewardWalletView, ClientRewardLedgerView, ClientBadgeView,
     ClientStreakView, ClientRewardStoreViewSet, ClientRedemptionViewSet
 )
@@ -15,6 +16,7 @@ from apps.rewards.views import (
 router_admin = DefaultRouter()
 router_admin.register(r'programs', AdminRewardProgramViewSet, basename='admin-reward-programs')
 router_admin.register(r'rules', AdminRewardRuleViewSet, basename='admin-reward-rules')
+router_admin.register(r'rule-versions', AdminRewardRuleVersionViewSet, basename='admin-reward-rule-versions')
 router_admin.register(r'badges', AdminBadgeViewSet, basename='admin-reward-badges')
 router_admin.register(r'tiers', AdminRewardTierViewSet, basename='admin-reward-tiers')
 router_admin.register(r'catalog', AdminRewardCatalogViewSet, basename='admin-reward-catalog')
