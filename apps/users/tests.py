@@ -695,3 +695,90 @@ class AuthEmailTemplateBrandingTests(TestCase):
         self.assertIn("Apex Athletics", reset_email.body)
         self.assertNotIn("FitVerx", reset_email.subject)
         self.assertNotIn("Forward Thinking Fitness", reset_email.body)
+
+
+class TenantLoginIsolationAPITests(TestCase):
+    def setUp(self):
+        self.tenant_a = Tenant.objects.create(name="Tenant Alpha", subdomain="alpha")
+        self.tenant_b = Tenant.objects.create(name="Tenant Beta", subdomain="beta")
+
+        self.user_a = User.objects.create_user(
+            email="user_a@alpha.com",
+            password="Password123!",
+            role=UserRole.CLIENT,
+            tenant=self.tenant_a
+        )
+
+        self.platform_admin = User.objects.create_user(
+            email="superadmin@platform.com",
+            password="Password123!",
+            role=UserRole.PLATFORM_ADMIN,
+            tenant=None
+        )
+
+        self.client = APIClient()
+        self.login_url = reverse('auth_login')
+
+    def test_login_success_with_matching_tenant(self):
+        payload = {
+            "email": "user_a@alpha.com",
+            "password": "Password123!",
+            "tenant_id": str(self.tenant_a.id)
+        }
+        response = self.client.post(self.login_url, payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', response.data)
+        self.assertIn('refresh', response.data)
+        self.assertEqual(response.data['user']['email'], "user_a@alpha.com")
+        self.assertEqual(response.data['user']['tenant_id'], str(self.tenant_a.id))
+
+    def test_login_blocked_when_credentials_match_different_tenant(self):
+        # User belongs to Tenant Alpha, attempts to log into Tenant Beta
+        payload = {
+            "email": "user_a@alpha.com",
+            "password": "Password123!",
+            "tenant_id": str(self.tenant_b.id)
+        }
+        response = self.client.post(self.login_url, payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("User credentials do not match the specified gym/tenant.", str(response.data))
+
+    def test_login_blocked_without_tenant_id_for_regular_user(self):
+        payload = {
+            "email": "user_a@alpha.com",
+            "password": "Password123!"
+        }
+        response = self.client.post(self.login_url, payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("tenant_id is required to login.", str(response.data))
+
+    def test_login_blocked_with_nonexistent_tenant_id(self):
+        import uuid
+        payload = {
+            "email": "user_a@alpha.com",
+            "password": "Password123!",
+            "tenant_id": str(uuid.uuid4())
+        }
+        response = self.client.post(self.login_url, payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Invalid Tenant ID or tenant not found.", str(response.data))
+
+    def test_login_platform_admin_allowed_without_tenant_id(self):
+        payload = {
+            "email": "superadmin@platform.com",
+            "password": "Password123!"
+        }
+        response = self.client.post(self.login_url, payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', response.data)
+        self.assertTrue(response.data['user']['is_platform_admin'])
+
+    def test_login_with_wrong_password(self):
+        payload = {
+            "email": "user_a@alpha.com",
+            "password": "WrongPassword!",
+            "tenant_id": str(self.tenant_a.id)
+        }
+        response = self.client.post(self.login_url, payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+

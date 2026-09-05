@@ -76,8 +76,10 @@ class CreateUserSerializer(serializers.Serializer):
     
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     """
-    Customizes the JWT response to include user details.
+    Customizes the JWT response to include user details and enforces tenant isolation.
     """
+    tenant_id = serializers.UUIDField(required=False, allow_null=True)
+
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
@@ -92,20 +94,69 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
+        # 1. Authenticate email + password credentials
         data = super().validate(attrs)
+
+        # 2. Extract tenant_id from serializer attrs, request data, header, or context
+        request = self.context.get('request')
+        tenant_id = attrs.get('tenant_id')
+        if not tenant_id and request:
+            raw_tenant_id = request.data.get('tenant_id') or request.headers.get('X-Tenant-Id')
+            if raw_tenant_id:
+                try:
+                    import uuid
+                    tenant_id = uuid.UUID(str(raw_tenant_id))
+                except (ValueError, AttributeError):
+                    raise serializers.ValidationError({"tenant_id": "Invalid Tenant ID format."})
+            elif hasattr(request, 'tenant') and request.tenant:
+                tenant_id = getattr(request.tenant, 'id', None)
+
+        # 3. Determine if user is Platform Admin
+        is_platform_admin = (
+            self.user.role == UserRole.PLATFORM_ADMIN
+            or self.user.is_superuser
+            or self.user.tenant is None
+        )
+
+        # 4. Enforce tenant match
+        if tenant_id:
+            try:
+                target_tenant = Tenant.objects.get(id=tenant_id)
+            except (Tenant.DoesNotExist, ValueError):
+                raise serializers.ValidationError({
+                    "tenant_id": "Invalid Tenant ID or tenant not found."
+                })
+
+            if not target_tenant.is_active:
+                raise serializers.ValidationError({
+                    "detail": "This gym/tenant account is inactive."
+                })
+
+            # Prevent user from logging into a different tenant
+            if not is_platform_admin and self.user.tenant_id != target_tenant.id:
+                raise serializers.ValidationError({
+                    "detail": "User credentials do not match the specified gym/tenant."
+                })
+        else:
+            # If tenant_id was not provided and user is NOT a platform admin, require it
+            if not is_platform_admin:
+                raise serializers.ValidationError({
+                    "tenant_id": "tenant_id is required to login."
+                })
 
         # Add custom data to the Response Body
         data['user'] = {
             'id': str(self.user.id),
             'email': self.user.email,
             'role': self.user.role,
-            'nickname': self.user.profile.nickname if hasattr(self.user, 'profile') else "",
+            'nickname': self.user.profile.nickname if hasattr(self.user, 'profile') and self.user.profile else "",
             # Helper for frontend routing
-            'is_platform_admin': self.user.tenant is None
+            'is_platform_admin': is_platform_admin
         }
         
         if self.user.tenant:
             data['user']['tenant_id'] = str(self.user.tenant.id)
+            data['user']['tenant_name'] = self.user.tenant.name
             data['user']['tenant_subdomain'] = self.user.tenant.subdomain
             
         return data
