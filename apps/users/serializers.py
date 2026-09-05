@@ -120,8 +120,8 @@ class RegistrationInitSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True, min_length=8)
     role = serializers.ChoiceField(choices=UserRole.choices)
     
-    # Tenant Resolution
     tenant_id = serializers.UUIDField(required=False)
+    platform_name = serializers.CharField(required=False, allow_blank=True, default='')
     
     # Basic Profile Data (Collected upfront)
     nickname = serializers.CharField(required=False, allow_blank=True)
@@ -220,6 +220,7 @@ class UserSerializer(serializers.ModelSerializer):
 
 class ForgotPasswordInitSerializer(serializers.Serializer):
     email = serializers.EmailField()
+    platform_name = serializers.CharField(required=False, allow_blank=True, default='')
 
     def validate_email(self, value):
         from django.contrib.auth import get_user_model

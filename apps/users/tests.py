@@ -623,3 +623,75 @@ class ClientNutritionGoalAPITest(TestCase):
         self.assertEqual(response.data['calories_goal_kcal'], "2500")
 
 
+class AuthEmailTemplateBrandingTests(TestCase):
+    def test_registration_otp_email_template_default_branding(self):
+        from django.template.loader import render_to_string
+        rendered = render_to_string("emails/registration_otp.html", {"code": "123456"})
+        
+        self.assertNotIn("Forward Thinking Fitness", rendered)
+        self.assertNotIn("Forward Thinking", rendered)
+        self.assertNotIn("REGISTARTION", rendered)
+        
+        # Default fallback is FitVerx
+        self.assertIn("FitVerx", rendered)
+        self.assertIn("© FitVerx — All rights reserved", rendered)
+        self.assertIn("123456", rendered)
+        self.assertIn("5 minutes", rendered)
+
+    def test_registration_otp_email_template_custom_platform_name(self):
+        from django.template.loader import render_to_string
+        rendered = render_to_string(
+            "emails/registration_otp.html",
+            {"code": "123456", "platform_name": "Go2Padel"}
+        )
+        
+        self.assertNotIn("Forward Thinking Fitness", rendered)
+        self.assertNotIn("Forward Thinking", rendered)
+        
+        # Custom platform name should be rendered, not FitVerx
+        self.assertIn("Go2Padel", rendered)
+        self.assertIn("© Go2Padel — All rights reserved", rendered)
+        self.assertNotIn("FitVerx", rendered)
+        self.assertIn("123456", rendered)
+
+    def test_password_reset_otp_email_template_custom_platform_name(self):
+        from django.template.loader import render_to_string
+        rendered = render_to_string(
+            "emails/password_reset_otp.html",
+            {"code": "654321", "platform_name": "Apex Athletics"}
+        )
+        
+        self.assertNotIn("Forward Thinking Fitness", rendered)
+        self.assertNotIn("Forward Thinking", rendered)
+        
+        # Custom platform name should be rendered, not FitVerx
+        self.assertIn("Apex Athletics", rendered)
+        self.assertIn("© Apex Athletics — All rights reserved", rendered)
+        self.assertNotIn("FitVerx", rendered)
+        self.assertIn("654321", rendered)
+
+    def test_send_email_otp_service_with_custom_platform_name(self):
+        from django.core import mail
+        from apps.users.services import AuthService, OTPPurpose
+        
+        # Test Registration OTP with custom platform name
+        AuthService.send_email_otp(
+            "testuser@example.com", "112233", OTPPurpose.REGISTRATION, platform_name="Go2Padel"
+        )
+        self.assertEqual(len(mail.outbox), 1)
+        reg_email = mail.outbox[0]
+        self.assertIn("Go2Padel", reg_email.subject)
+        self.assertIn("Go2Padel", reg_email.body)
+        self.assertNotIn("FitVerx", reg_email.subject)
+        self.assertNotIn("Forward Thinking Fitness", reg_email.body)
+        
+        # Test Password Reset OTP with custom platform name
+        AuthService.send_email_otp(
+            "testuser@example.com", "445566", OTPPurpose.PASSWORD_RESET, platform_name="Apex Athletics"
+        )
+        self.assertEqual(len(mail.outbox), 2)
+        reset_email = mail.outbox[1]
+        self.assertIn("Apex Athletics", reset_email.subject)
+        self.assertIn("Apex Athletics", reset_email.body)
+        self.assertNotIn("FitVerx", reset_email.subject)
+        self.assertNotIn("Forward Thinking Fitness", reset_email.body)

@@ -763,8 +763,13 @@ class RegistrationInitView(APIView):
 
         # 2. Generate & Send OTP
         email = serializer.validated_data['email']
+        platform_name = (
+            serializer.validated_data.get('platform_name')
+            or request.data.get('platform_name')
+            or request.headers.get('X-Platform-Name')
+        )
         code = AuthService.create_email_otp(email, OTPPurpose.REGISTRATION)
-        AuthService.send_email_otp(email, code, OTPPurpose.REGISTRATION)
+        AuthService.send_email_otp(email, code, OTPPurpose.REGISTRATION, platform_name=platform_name)
 
         return Response(
             {"detail": "OTP sent to email. Verify to complete registration."},
@@ -837,7 +842,17 @@ class ForgotPasswordInitView(APIView):
         code = AuthService.create_email_otp(email=email, purpose=OTPPurpose.PASSWORD_RESET)
         
         # Send OTP
-        AuthService.send_email_otp(email=email, code=code, purpose=OTPPurpose.PASSWORD_RESET)
+        platform_name = (
+            serializer.validated_data.get('platform_name')
+            or request.data.get('platform_name')
+            or request.headers.get('X-Platform-Name')
+        )
+        AuthService.send_email_otp(
+            email=email,
+            code=code,
+            purpose=OTPPurpose.PASSWORD_RESET,
+            platform_name=platform_name
+        )
         
         return Response({"detail": "Password reset code sent to your email."}, status=status.HTTP_200_OK)
 

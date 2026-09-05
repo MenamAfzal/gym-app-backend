@@ -233,19 +233,23 @@ class AuthService:
         return code
 
     @staticmethod
-    def send_email_otp(email: str, code: str, purpose: str):
+    def send_email_otp(email: str, code: str, purpose: str, platform_name: str = None):
         """Send OTP email to user, called explicitly once."""
         is_registration = purpose == OTPPurpose.REGISTRATION
+        resolved_platform = platform_name or getattr(settings, 'PLATFORM_NAME', 'FitVerx')
         subject = (
-            "Welcome – Verify Your Email" if is_registration
-            else "Password Reset Code"
+            f"{resolved_platform} – Verify Your Email" if is_registration
+            else f"{resolved_platform} – Password Reset Code"
         )
         template = (
             "emails/registration_otp.html" if is_registration
             else "emails/password_reset_otp.html"
         )
 
-        html_message = render_to_string(template, {"code": code})
+        html_message = render_to_string(template, {
+            "code": code,
+            "platform_name": resolved_platform
+        })
         msg = EmailMultiAlternatives(subject, strip_tags(html_message), settings.DEFAULT_FROM_EMAIL, [email])
         msg.attach_alternative(html_message, "text/html")
         msg.send(fail_silently=False)
