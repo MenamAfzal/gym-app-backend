@@ -200,7 +200,7 @@ class AdminBadgeViewSet(viewsets.ModelViewSet):
         badge.image = image_file
         badge.save(update_fields=['image'])
         try:
-            badge.icon_url = request.build_absolute_uri(badge.image.url)
+            badge.icon_url = badge.image.url
             badge.save(update_fields=['icon_url'])
         except Exception:
             pass
@@ -563,8 +563,8 @@ class ClientBadgeView(APIView):
         ).annotate(awarded_count=Count('awarded_users'))
 
         return Response({
-            'earned_badges': UserBadgeSerializer(earned_user_badges, many=True).data,
-            'all_badges': BadgeSerializer(available_badges, many=True).data,
+            'earned_badges': UserBadgeSerializer(earned_user_badges, many=True, context={'request': request}).data,
+            'all_badges': BadgeSerializer(available_badges, many=True, context={'request': request}).data,
             'total_earned': len(earned_badge_ids),
             'total_available': available_badges.count()
         })

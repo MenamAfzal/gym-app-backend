@@ -63,6 +63,18 @@ class RewardRuleSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
+from urllib.parse import urlparse
+
+
+def _extract_server_path(url_str):
+    if not url_str or not isinstance(url_str, str):
+        return url_str
+    parsed = urlparse(url_str)
+    if parsed.path:
+        return f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
+    return url_str
+
+
 class BadgeSerializer(serializers.ModelSerializer):
     awarded_count = serializers.IntegerField(read_only=True, default=0)
     image = serializers.ImageField(required=False, allow_null=True)
@@ -95,15 +107,26 @@ class BadgeSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
-        if not ret.get('icon_url') and instance.image:
+
+        # Return only the server path without base URL for image and icon_url
+        if instance.image:
             try:
-                request = self.context.get('request')
-                if request:
-                    ret['icon_url'] = request.build_absolute_uri(instance.image.url)
-                else:
-                    ret['icon_url'] = instance.image.url
+                ret['image'] = instance.image.url
             except Exception:
-                pass
+                if ret.get('image'):
+                    ret['image'] = _extract_server_path(ret['image'])
+        elif ret.get('image'):
+            ret['image'] = _extract_server_path(ret['image'])
+
+        if instance.image:
+            try:
+                ret['icon_url'] = instance.image.url
+            except Exception:
+                if ret.get('icon_url'):
+                    ret['icon_url'] = _extract_server_path(ret['icon_url'])
+        elif ret.get('icon_url'):
+            ret['icon_url'] = _extract_server_path(ret['icon_url'])
+
         return ret
 
 
