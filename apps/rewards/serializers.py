@@ -128,10 +128,24 @@ class RewardCatalogItemSerializer(serializers.ModelSerializer):
         model = RewardCatalogItem
         fields = [
             'id', 'name', 'description', 'points_cost', 'item_type',
-            'stock_quantity', 'is_active', 'image_url', 'package_type',
+            'stock_quantity', 'is_active', 'image', 'image_url', 'package_type',
             'package_type_name', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
+
+    def to_internal_value(self, data):
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        else:
+            data = dict(data)
+        if 'file' in data and 'image' not in data:
+            data['image'] = data.pop('file')
+        return super().to_internal_value(data)
+
+    def validate_stock_quantity(self, value):
+        if value is not None and value < 0:
+            raise serializers.ValidationError("Stock quantity cannot be negative.")
+        return value
 
 
 class RewardPointLedgerSerializer(serializers.ModelSerializer):
@@ -178,23 +192,36 @@ class RewardWalletSerializer(serializers.ModelSerializer):
 class RewardRedemptionSerializer(serializers.ModelSerializer):
     catalog_item_name = serializers.ReadOnlyField(source='catalog_item.name')
     user_email = serializers.ReadOnlyField(source='user.email')
+    user_name = serializers.SerializerMethodField()
     fulfilled_by_email = serializers.ReadOnlyField(source='fulfilled_by.email')
+    granted_package_name = serializers.ReadOnlyField(source='granted_package.package_type.name')
 
     class Meta:
         model = RewardRedemption
         fields = [
-            'id', 'user', 'user_email', 'catalog_item', 'catalog_item_name',
+            'id', 'user', 'user_email', 'user_name', 'catalog_item', 'catalog_item_name',
             'points_spent', 'status', 'redemption_code', 'fulfilled_by_email',
-            'fulfilled_at', 'notes', 'created_at'
+            'fulfilled_at', 'granted_package', 'granted_package_name', 'notes', 'created_at'
         ]
         read_only_fields = [
-            'id', 'user', 'user_email', 'catalog_item_name', 'points_spent',
-            'redemption_code', 'fulfilled_by_email', 'fulfilled_at', 'created_at'
+            'id', 'user', 'user_email', 'user_name', 'catalog_item_name', 'points_spent',
+            'redemption_code', 'fulfilled_by_email', 'fulfilled_at', 'granted_package',
+            'granted_package_name', 'created_at'
         ]
+
+    def get_user_name(self, obj):
+        if obj.user:
+            return obj.user.get_full_name() or obj.user.email
+        return ""
 
 
 class RedemptionCreateSerializer(serializers.Serializer):
     catalog_item_id = serializers.UUIDField(required=True)
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class RedemptionCodeActionSerializer(serializers.Serializer):
+    code = serializers.CharField(required=True, max_length=50, trim_whitespace=True)
     notes = serializers.CharField(required=False, allow_blank=True, default="")
 
 

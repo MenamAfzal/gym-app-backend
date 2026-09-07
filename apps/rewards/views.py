@@ -16,7 +16,7 @@ from apps.rewards.models import (
     RewardProgram, RewardRule, Badge, RewardTier,
     RewardWallet, RewardPointLedger, UserBadge, UserStreak,
     RewardCatalogItem, RewardRedemption, RewardTransaction,
-    RewardRuleVersion, ProcessedRewardEvent
+    RewardRuleVersion, ProcessedRewardEvent, RedemptionStatus
 )
 from apps.rewards.serializers import (
     RewardProgramSerializer, RewardRuleSerializer, BadgeSerializer,
@@ -228,23 +228,42 @@ class AdminRewardTierViewSet(viewsets.ModelViewSet):
 class AdminRewardCatalogViewSet(viewsets.ModelViewSet):
     """
     CRUD management for the tenant's rewards store catalog.
-    Eagerly joins package_type.
+    Eagerly joins package_type and supports multipart image uploads.
     """
     serializer_class = RewardCatalogItemSerializer
     permission_classes = [IsAuthenticated, IsRewardAdminOrManager]
+    parser_classes = [parsers.JSONParser, parsers.MultiPartParser, parsers.FormParser]
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        return RewardCatalogItem.objects.filter(tenant=tenant).select_related('package_type')
+        return RewardCatalogItem.all_objects.filter(tenant=tenant).select_related('package_type')
 
     def perform_create(self, serializer):
         tenant = get_request_tenant(self.request)
         serializer.save(tenant=tenant)
 
+    @action(detail=True, methods=['post'], parser_classes=[parsers.MultiPartParser, parsers.FormParser], url_path='upload-image')
+    def upload_image(self, request, pk=None):
+        item = self.get_object()
+        image_file = request.FILES.get('image') or request.FILES.get('file')
+        if not image_file:
+            return Response({'error': 'No image or file provided in request.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        item.image = image_file
+        item.save(update_fields=['image'])
+        try:
+            item.image_url = request.build_absolute_uri(item.image.url)
+            item.save(update_fields=['image_url'])
+        except Exception:
+            pass
+
+        return Response(RewardCatalogItemSerializer(item, context={'request': request}).data)
+
 
 class AdminRewardRedemptionViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Staff review and fulfillment of member point redemptions.
+    Supports code verification, code fulfillment, approval, and cancellations.
     Eagerly joins user, catalog_item, and staff fulfiller.
     """
     serializer_class = RewardRedemptionSerializer
@@ -252,8 +271,8 @@ class AdminRewardRedemptionViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        qs = RewardRedemption.objects.filter(tenant=tenant).select_related(
-            'user', 'catalog_item', 'catalog_item__package_type', 'fulfilled_by'
+        qs = RewardRedemption.all_objects.filter(tenant=tenant).select_related(
+            'user', 'catalog_item', 'catalog_item__package_type', 'fulfilled_by', 'granted_package', 'granted_package__package_type'
         )
         status_param = self.request.query_params.get('status')
         code = self.request.query_params.get('code')
@@ -265,14 +284,71 @@ class AdminRewardRedemptionViewSet(viewsets.ReadOnlyModelViewSet):
 
         return qs
 
+    @action(detail=False, methods=['post'], url_path='verify-code')
+    def verify_code(self, request):
+        """
+        Validates a member's redemption code at front-desk.
+        """
+        tenant = get_request_tenant(request)
+        code = request.data.get('code')
+        if not code:
+            return Response({'error': 'Field "code" is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        result = RewardRedemptionService.verify_code(tenant_id=tenant.id, code=code)
+        if not result.get('valid') and 'error' in result:
+            return Response(result, status=status.HTTP_404_NOT_FOUND)
+        return Response(result, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='fulfill-by-code')
+    def fulfill_by_code(self, request):
+        """
+        Direct fulfillment at the front desk by scanning or entering voucher code.
+        """
+        tenant = get_request_tenant(request)
+        code = request.data.get('code')
+        notes = request.data.get('notes', '')
+        if not code:
+            return Response({'error': 'Field "code" is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            redemption = RewardRedemptionService.fulfill_by_code(
+                tenant_id=tenant.id,
+                code=code,
+                staff_user=request.user,
+                notes=notes
+            )
+            return Response(RewardRedemptionSerializer(redemption).data)
+        except ValueError as ex:
+            return Response({'error': str(ex)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        """
+        Staff approval of a pending redemption.
+        """
+        tenant = get_request_tenant(request)
+        notes = request.data.get('notes', '')
+        try:
+            redemption = RewardRedemptionService.approve_redemption(
+                tenant_id=tenant.id,
+                redemption_id=pk,
+                staff_user=request.user,
+                notes=notes
+            )
+            return Response(RewardRedemptionSerializer(redemption).data)
+        except ValueError as ex:
+            return Response({'error': str(ex)}, status=status.HTTP_400_BAD_REQUEST)
+
     @action(detail=True, methods=['post'])
     def fulfill(self, request, pk=None):
         tenant = get_request_tenant(request)
+        notes = request.data.get('notes', '')
         try:
             redemption = RewardRedemptionService.fulfill_redemption(
                 tenant_id=tenant.id,
                 redemption_id=pk,
-                staff_user=request.user
+                staff_user=request.user,
+                notes=notes
             )
             return Response(RewardRedemptionSerializer(redemption).data)
         except ValueError as ex:
@@ -519,7 +595,7 @@ class ClientRewardStoreViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        return RewardCatalogItem.objects.filter(
+        return RewardCatalogItem.all_objects.filter(
             tenant=tenant,
             is_active=True
         ).filter(
@@ -555,7 +631,7 @@ class ClientRedemptionViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        return RewardRedemption.objects.filter(
+        return RewardRedemption.all_objects.filter(
             tenant=tenant,
             user=self.request.user
         ).select_related('catalog_item', 'catalog_item__package_type', 'fulfilled_by')
@@ -579,6 +655,32 @@ class ClientRedemptionViewSet(viewsets.ModelViewSet):
                 RewardRedemptionSerializer(redemption).data,
                 status=status.HTTP_201_CREATED
             )
+        except ValueError as ex:
+            return Response({'error': str(ex)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, pk=None):
+        """
+        Allows a member to cancel their own pending voucher before fulfillment.
+        Refunds points, updates ledger, and restores stock.
+        """
+        tenant = get_request_tenant(request)
+        redemption = self.get_object()
+        if redemption.status != RedemptionStatus.PENDING:
+            return Response(
+                {'error': f'Only pending redemptions can be cancelled. Current status: {redemption.status}'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        reason = request.data.get('reason', 'Cancelled by member')
+        try:
+            cancelled = RewardRedemptionService.cancel_and_refund_redemption(
+                tenant_id=tenant.id,
+                redemption_id=redemption.id,
+                staff_user=request.user,
+                reason=reason
+            )
+            return Response(RewardRedemptionSerializer(cancelled).data)
         except ValueError as ex:
             return Response({'error': str(ex)}, status=status.HTTP_400_BAD_REQUEST)
 

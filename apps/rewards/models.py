@@ -492,7 +492,18 @@ class RewardCatalogItem(TenantAwareModel):
         help_text="Available inventory count (null for unlimited)"
     )
     is_active = models.BooleanField(default=True, db_index=True)
-    image_url = models.URLField(max_length=500, blank=True, null=True)
+    image = models.ImageField(
+        upload_to='catalog/%Y/%m/',
+        blank=True,
+        null=True,
+        help_text="Reward item image graphic upload"
+    )
+    image_url = models.URLField(
+        max_length=500,
+        blank=True,
+        null=True,
+        help_text="External URL or auto-populated from image upload"
+    )
     
     # Optional direct integration with packages
     package_type = models.ForeignKey(
@@ -514,6 +525,15 @@ class RewardCatalogItem(TenantAwareModel):
 
     def __str__(self):
         return f"{self.name} ({self.points_cost} pts)"
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if self.image and not self.image_url:
+            try:
+                self.image_url = self.image.url
+                super().save(update_fields=['image_url'])
+            except Exception:
+                pass
 
 
 class RewardRedemption(TenantAwareModel):
@@ -552,6 +572,14 @@ class RewardRedemption(TenantAwareModel):
         help_text="Staff user who marked the reward fulfilled"
     )
     fulfilled_at = models.DateTimeField(null=True, blank=True)
+    granted_package = models.ForeignKey(
+        'scheduling.Package',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='source_reward_redemptions',
+        help_text="Package granted to the member if catalog item is a package credit"
+    )
     notes = models.TextField(blank=True)
 
     class Meta:

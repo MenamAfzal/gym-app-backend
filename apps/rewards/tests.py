@@ -424,7 +424,7 @@ class RewardStoreRedemptionTests(RewardsBaseTestCase):
         )
 
         self.assertEqual(redemption.status, RedemptionStatus.PENDING)
-        self.assertTrue(redemption.redemption_code.startswith("RW-"))
+        self.assertTrue(redemption.redemption_code.startswith(("RW-", "RDM-")))
 
         # Wallet balance decremented
         self.member1_wallet.refresh_from_db()
@@ -901,3 +901,353 @@ class PlatformAppsWiringIntegrationTests(RewardsBaseTestCase):
         self.assertEqual(response_file.status_code, 201)
         self.assertIn("swimmer", response_file.data["image"])
         self.assertIsNotNone(response_file.data["icon_url"])
+
+
+class RewardMarketplaceLifecycleTests(RewardsBaseTestCase):
+    """
+    Comprehensive tests for the Reward Marketplace and Redemption Lifecycle:
+    - Catalog management with images and package links
+    - End-to-end client redemption flow with wallet lock and ledger recording
+    - Concurrency and out-of-stock / negative inventory prevention
+    - Front-desk voucher verification, approval, and fulfillment
+    - Cancellation, point refunds, ledger reversals, and inventory restocking
+    """
+    def setUp(self):
+        super().setUp()
+        from PIL import Image
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from io import BytesIO
+
+        def make_image_file(name="item.png", color="orange"):
+            img = Image.new('RGB', (60, 60), color=color)
+            buf = BytesIO()
+            img.save(buf, format='PNG')
+            buf.seek(0)
+            return SimpleUploadedFile(name, buf.read(), content_type="image/png")
+
+        self.make_image_file = make_image_file
+
+        # Fund member1 wallet
+        self.member1_wallet.balance = 600
+        self.member1_wallet.lifetime_earned = 600
+        self.member1_wallet.save()
+
+        # Create sample package type for class association
+        from apps.scheduling.models import Location, PackageType
+        self.location = Location.objects.create(
+            tenant=self.tenant1,
+            name="Main Gym Location",
+            address="123 Fitness St"
+        )
+        self.package_type = PackageType.objects.create(
+            tenant=self.tenant1,
+            location=self.location,
+            name="Free Recovery Session",
+            credit_count=1,
+            validity_days=30,
+            price=25.00
+        )
+
+    def test_catalog_management_with_image_upload_and_package_association(self):
+        self.client.force_authenticate(user=self.owner1)
+
+        # 1. Create catalog item with multipart image
+        image_file = self.make_image_file("towel.png", "purple")
+        response = self.client.post(
+            "/api/v1/rewards/admin/catalog/",
+            data={
+                "name": "Premium Gym Towel",
+                "description": "Microfiber gym towel",
+                "points_cost": 100,
+                "item_type": "MERCHANDISE",
+                "stock_quantity": 20,
+                "is_active": True,
+                "image": image_file
+            },
+            format="multipart"
+        )
+        self.assertEqual(response.status_code, 201)
+        item_id = response.data["id"]
+        self.assertIn("towel", response.data["image"])
+        self.assertIsNotNone(response.data["image_url"])
+
+        # 2. Upload/replace image via dedicated upload-image endpoint
+        image_file_v2 = self.make_image_file("towel_v2.png", "gold")
+        up_resp = self.client.post(
+            f"/api/v1/rewards/admin/catalog/{item_id}/upload-image/",
+            data={"image": image_file_v2},
+            format="multipart"
+        )
+        self.assertEqual(up_resp.status_code, 200)
+        self.assertIn("towel_v2", up_resp.data["image"])
+
+        # 3. Reject negative stock
+        bad_stock_resp = self.client.post(
+            "/api/v1/rewards/admin/catalog/",
+            data={
+                "name": "Negative Item",
+                "points_cost": 50,
+                "stock_quantity": -5
+            },
+            format="json"
+        )
+        self.assertEqual(bad_stock_resp.status_code, 400)
+
+    def test_complete_client_redemption_and_package_credit_flow(self):
+        # Catalog item linked to package
+        catalog_item = RewardCatalogItem.objects.create(
+            tenant=self.tenant1,
+            name="1 Free Recovery Class",
+            points_cost=200,
+            item_type="PACKAGE_CREDIT",
+            stock_quantity=10,
+            is_active=True,
+            package_type=self.package_type
+        )
+
+        self.client.force_authenticate(user=self.member1)
+        response = self.client.post(
+            "/api/v1/rewards/client/redemptions/",
+            data={"catalog_item_id": str(catalog_item.id), "notes": "Claiming for Saturday"},
+            format="json"
+        )
+        self.assertEqual(response.status_code, 201)
+        redemption_id = response.data["id"]
+        code = response.data["redemption_code"]
+        self.assertTrue(code.startswith("RDM-"))
+        self.assertEqual(response.data["status"], "PENDING")
+
+        # Check wallet decremented
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 400)
+        self.assertEqual(self.member1_wallet.lifetime_redeemed, 200)
+
+        # Check catalog stock decremented
+        catalog_item.refresh_from_db()
+        self.assertEqual(catalog_item.stock_quantity, 9)
+
+        # Check ledger entry
+        ledger = RewardPointLedger.objects.filter(redemption_id=redemption_id).first()
+        self.assertIsNotNone(ledger)
+        self.assertEqual(ledger.amount, -200)
+        self.assertEqual(ledger.balance_after, 400)
+        self.assertEqual(ledger.transaction_type, TransactionType.REDEEM)
+
+        # Check package granted
+        from apps.scheduling.models import Package
+        granted_pkg = Package.objects.filter(client=self.member1, package_type=self.package_type).first()
+        self.assertIsNotNone(granted_pkg)
+        self.assertEqual(granted_pkg.credits_remaining, 1)
+        self.assertEqual(granted_pkg.status, "active")
+
+    def test_stock_availability_and_overselling_prevention(self):
+        rare_item = RewardCatalogItem.objects.create(
+            tenant=self.tenant1,
+            name="Limited Edition Shaker",
+            points_cost=100,
+            stock_quantity=1,
+            is_active=True
+        )
+
+        # First redemption succeeds
+        self.client.force_authenticate(user=self.member1)
+        res1 = self.client.post(
+            "/api/v1/rewards/client/redemptions/",
+            data={"catalog_item_id": str(rare_item.id)},
+            format="json"
+        )
+        self.assertEqual(res1.status_code, 201)
+        rare_item.refresh_from_db()
+        self.assertEqual(rare_item.stock_quantity, 0)
+
+        # Second redemption fails due to zero inventory
+        res2 = self.client.post(
+            "/api/v1/rewards/client/redemptions/",
+            data={"catalog_item_id": str(rare_item.id)},
+            format="json"
+        )
+        self.assertEqual(res2.status_code, 400)
+        self.assertIn("out of stock", res2.data["error"])
+
+    def test_front_desk_code_verification_approval_and_fulfillment(self):
+        item = RewardCatalogItem.objects.create(
+            tenant=self.tenant1,
+            name="Gym Hoodie",
+            points_cost=150,
+            stock_quantity=5,
+            is_active=True
+        )
+
+        # Member redeems
+        self.client.force_authenticate(user=self.member1)
+        redeem_resp = self.client.post(
+            "/api/v1/rewards/client/redemptions/",
+            data={"catalog_item_id": str(item.id)},
+            format="json"
+        )
+        code = redeem_resp.data["redemption_code"]
+        redemption_id = redeem_resp.data["id"]
+
+        # Staff verifies code
+        self.client.force_authenticate(user=self.owner1)
+        verify_resp = self.client.post(
+            "/api/v1/rewards/admin/redemptions/verify-code/",
+            data={"code": code},
+            format="json"
+        )
+        self.assertEqual(verify_resp.status_code, 200)
+        self.assertTrue(verify_resp.data["valid"])
+        self.assertEqual(verify_resp.data["status"], "PENDING")
+        self.assertEqual(verify_resp.data["user_email"], self.member1.email)
+        self.assertEqual(verify_resp.data["catalog_item_name"], "Gym Hoodie")
+
+        # Staff approves
+        appr_resp = self.client.post(f"/api/v1/rewards/admin/redemptions/{redemption_id}/approve/", format="json")
+        self.assertEqual(appr_resp.status_code, 200)
+        self.assertEqual(appr_resp.data["status"], "APPROVED")
+
+        # Staff fulfills by code
+        fulfill_resp = self.client.post(
+            "/api/v1/rewards/admin/redemptions/fulfill-by-code/",
+            data={"code": code, "notes": "Handed size L hoodie to member"},
+            format="json"
+        )
+        self.assertEqual(fulfill_resp.status_code, 200)
+        self.assertEqual(fulfill_resp.data["status"], "FULFILLED")
+        self.assertEqual(fulfill_resp.data["fulfilled_by_email"], self.owner1.email)
+        self.assertIsNotNone(fulfill_resp.data["fulfilled_at"])
+
+        # Subsequent verification shows already fulfilled
+        verify_again = self.client.post(
+            "/api/v1/rewards/admin/redemptions/verify-code/",
+            data={"code": code},
+            format="json"
+        )
+        self.assertEqual(verify_again.status_code, 200)
+        self.assertFalse(verify_again.data["valid"])
+        self.assertIn("already fulfilled", verify_again.data["message"])
+
+        # Attempting to fulfill again fails
+        second_fulfill = self.client.post(
+            "/api/v1/rewards/admin/redemptions/fulfill-by-code/",
+            data={"code": code},
+            format="json"
+        )
+        self.assertEqual(second_fulfill.status_code, 400)
+
+    def test_client_self_cancellation_with_refund_and_restocking(self):
+        item = RewardCatalogItem.objects.create(
+            tenant=self.tenant1,
+            name="Foam Roller",
+            points_cost=100,
+            stock_quantity=3,
+            is_active=True
+        )
+
+        self.client.force_authenticate(user=self.member1)
+        redeem_resp = self.client.post(
+            "/api/v1/rewards/client/redemptions/",
+            data={"catalog_item_id": str(item.id)},
+            format="json"
+        )
+        redemption_id = redeem_resp.data["id"]
+
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 500)
+        item.refresh_from_db()
+        self.assertEqual(item.stock_quantity, 2)
+
+        # Client cancels redemption
+        cancel_resp = self.client.post(
+            f"/api/v1/rewards/client/redemptions/{redemption_id}/cancel/",
+            data={"reason": "Selected wrong item"},
+            format="json"
+        )
+        self.assertEqual(cancel_resp.status_code, 200)
+        self.assertEqual(cancel_resp.data["status"], "CANCELLED")
+
+        # Balance refunded
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 600)
+        self.assertEqual(self.member1_wallet.lifetime_redeemed, 0)
+
+        # Inventory restocked
+        item.refresh_from_db()
+        self.assertEqual(item.stock_quantity, 3)
+
+        # Ledger reversal entry
+        ledger_reversal = RewardPointLedger.objects.filter(
+            wallet=self.member1_wallet,
+            transaction_type=TransactionType.REVERSAL
+        ).first()
+        self.assertIsNotNone(ledger_reversal)
+        self.assertEqual(ledger_reversal.amount, 100)
+        self.assertEqual(ledger_reversal.balance_after, 600)
+
+    def test_gym_admin_and_manager_can_perform_all_front_desk_actions(self):
+        """
+        Verify that a Gym Admin and Gym Manager have full authority to execute
+        all front-desk operations: verifying vouchers, approving, fulfilling, and cancelling.
+        """
+        # Create a Gym Manager
+        gym_manager = User.objects.create_user(
+            email="manager@alphafit.com",
+            password="Password123!",
+            role=UserRole.GYM_MANAGER,
+            tenant=self.tenant1
+        )
+        # Create a Gym Admin user (using role 'gym_admin' or GYM_OWNER)
+        gym_admin = User.objects.create_user(
+            email="gymadmin@alphafit.com",
+            password="Password123!",
+            role="gym_admin",
+            tenant=self.tenant1
+        )
+
+        item = RewardCatalogItem.objects.create(
+            tenant=self.tenant1,
+            name="Electrolyte Drink",
+            points_cost=50,
+            stock_quantity=10,
+            is_active=True
+        )
+
+        # Member redeems
+        self.client.force_authenticate(user=self.member1)
+        redeem_resp = self.client.post(
+            "/api/v1/rewards/client/redemptions/",
+            data={"catalog_item_id": str(item.id)},
+            format="json"
+        )
+        self.assertEqual(redeem_resp.status_code, 201)
+        code = redeem_resp.data["redemption_code"]
+        redemption_id = redeem_resp.data["id"]
+
+        # 1. Gym Admin can verify the voucher code
+        self.client.force_authenticate(user=gym_admin)
+        verify_resp = self.client.post(
+            "/api/v1/rewards/admin/redemptions/verify-code/",
+            data={"code": code},
+            format="json"
+        )
+        self.assertEqual(verify_resp.status_code, 200)
+        self.assertTrue(verify_resp.data["valid"])
+
+        # 2. Gym Admin can approve the redemption
+        approve_resp = self.client.post(
+            f"/api/v1/rewards/admin/redemptions/{redemption_id}/approve/",
+            format="json"
+        )
+        self.assertEqual(approve_resp.status_code, 200)
+        self.assertEqual(approve_resp.data["status"], "APPROVED")
+
+        # 3. Gym Manager can fulfill the redemption by code
+        self.client.force_authenticate(user=gym_manager)
+        fulfill_resp = self.client.post(
+            "/api/v1/rewards/admin/redemptions/fulfill-by-code/",
+            data={"code": code, "notes": "Handed out by Gym Manager"},
+            format="json"
+        )
+        self.assertEqual(fulfill_resp.status_code, 200)
+        self.assertEqual(fulfill_resp.data["status"], "FULFILLED")
+        self.assertEqual(fulfill_resp.data["fulfilled_by_email"], gym_manager.email)

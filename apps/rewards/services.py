@@ -271,15 +271,20 @@ class RewardWalletService:
 class RewardRedemptionService:
     """
     Handles store redemptions, vouchers, and staff fulfillment.
+    Guarantees strict concurrency locking and non-negative inventory.
     """
 
     @classmethod
     def redeem_item(cls, tenant_id, user: User, catalog_item_id, notes: str = "") -> RewardRedemption:
         """
-        Redeems points for an item in the reward store.
+        Executes point redemption flow:
+        Client -> Select Reward -> Lock Item & Wallet -> Validate Points & Inventory ->
+        Deduct Points -> Decrement Inventory -> Create Ledger Entry -> Create Redemption ->
+        Generate Single-Use Code -> Associate Package (if configured).
         """
         with bypass_tenant_isolation():
             with transaction.atomic():
+                # 1. Lock catalog item
                 item = RewardCatalogItem.objects.select_for_update().filter(
                     tenant_id=tenant_id,
                     id=catalog_item_id,
@@ -289,30 +294,37 @@ class RewardRedemptionService:
                 if not item:
                     raise ValueError("Reward catalog item not found or inactive.")
 
-                if item.stock_quantity is not None:
-                    if item.stock_quantity <= 0:
-                        raise ValueError("Reward item is out of stock.")
-                    item.stock_quantity -= 1
-                    item.save(update_fields=['stock_quantity'])
-
-                # Lock wallet
+                # 2. Lock wallet
                 wallet, _ = RewardWallet.objects.select_for_update().get_or_create(
                     tenant_id=tenant_id,
                     user=user,
                     defaults={'balance': 0, 'lifetime_earned': 0, 'lifetime_redeemed': 0}
                 )
 
+                # 3. Validate points sufficiency
                 if wallet.balance < item.points_cost:
                     raise ValueError(f"Insufficient points. Required: {item.points_cost}, Available: {wallet.balance}")
 
-                # Deduct points
+                # 4. Validate inventory availability
+                if item.stock_quantity is not None:
+                    if item.stock_quantity <= 0:
+                        raise ValueError("Reward item is out of stock.")
+                    # Decrement inventory safely
+                    item.stock_quantity -= 1
+                    item.save(update_fields=['stock_quantity'])
+
+                # 5. Deduct points from wallet
                 wallet.balance -= item.points_cost
                 wallet.lifetime_redeemed += item.points_cost
                 wallet.save()
 
-                # Generate unique voucher code
-                voucher_code = f"RW-{secrets.token_hex(4).upper()}"
+                # 6. Generate cryptographically secure, non-predictable, unique single-use code
+                while True:
+                    voucher_code = f"RDM-{secrets.token_hex(4).upper()}"
+                    if not RewardRedemption.objects.filter(redemption_code=voucher_code).exists():
+                        break
 
+                # 7. Create Redemption
                 redemption = RewardRedemption.objects.create(
                     tenant_id=tenant_id,
                     user=user,
@@ -323,7 +335,7 @@ class RewardRedemptionService:
                     notes=notes
                 )
 
-                # Record Ledger Entry
+                # 8. Record Ledger Entry
                 RewardPointLedger.objects.create(
                     tenant_id=tenant_id,
                     wallet=wallet,
@@ -335,10 +347,10 @@ class RewardRedemptionService:
                     redemption=redemption
                 )
 
-                # If catalog item is linked to a package type, automatically grant the package credits!
+                # 9. If catalog item is linked to a package type, automatically grant the package credits!
                 if item.package_type_id:
                     from apps.scheduling.models import Package
-                    Package.objects.create(
+                    package = Package.objects.create(
                         tenant_id=tenant_id,
                         client=user,
                         package_type=item.package_type,
@@ -348,11 +360,60 @@ class RewardRedemptionService:
                         is_complimentary=True,
                         price=0.00
                     )
+                    redemption.granted_package = package
+                    redemption.save(update_fields=['granted_package'])
 
                 return redemption
 
     @classmethod
-    def fulfill_redemption(cls, tenant_id, redemption_id, staff_user: User) -> RewardRedemption:
+    def verify_code(cls, tenant_id, code: str) -> Dict[str, Any]:
+        """
+        Front-desk staff code verification.
+        Validates code existence, tenant ownership, redemption status, and member details.
+        """
+        cleaned_code = str(code).strip().upper()
+        with bypass_tenant_isolation():
+            redemption = RewardRedemption.objects.filter(
+                tenant_id=tenant_id,
+                redemption_code__iexact=cleaned_code
+            ).select_related('user', 'catalog_item', 'fulfilled_by').first()
+
+            if not redemption:
+                return {
+                    'valid': False,
+                    'error': 'Redemption code not found or belongs to another tenant.',
+                    'code': cleaned_code
+                }
+
+            is_valid_to_fulfill = (redemption.status == RedemptionStatus.PENDING) or (redemption.status == RedemptionStatus.APPROVED)
+
+            user_name = redemption.user.get_full_name() if redemption.user else ""
+            if not user_name and redemption.user:
+                user_name = redemption.user.email
+
+            return {
+                'valid': is_valid_to_fulfill,
+                'status': redemption.status,
+                'redemption_id': str(redemption.id),
+                'code': redemption.redemption_code,
+                'user_id': str(redemption.user_id),
+                'user_email': redemption.user.email if redemption.user else "",
+                'user_name': user_name,
+                'catalog_item_id': str(redemption.catalog_item_id),
+                'catalog_item_name': redemption.catalog_item.name,
+                'item_type': redemption.catalog_item.item_type,
+                'points_spent': redemption.points_spent,
+                'created_at': redemption.created_at.isoformat(),
+                'fulfilled_at': redemption.fulfilled_at.isoformat() if redemption.fulfilled_at else None,
+                'fulfilled_by_email': redemption.fulfilled_by.email if redemption.fulfilled_by else None,
+                'message': 'Code verified and ready for fulfillment.' if is_valid_to_fulfill else f'Redemption is already {redemption.status.lower()}.'
+            }
+
+    @classmethod
+    def approve_redemption(cls, tenant_id, redemption_id, staff_user: User, notes: str = "") -> RewardRedemption:
+        """
+        Staff approves a pending redemption before fulfillment.
+        """
         with bypass_tenant_isolation():
             with transaction.atomic():
                 redemption = RewardRedemption.objects.select_for_update().filter(
@@ -364,17 +425,84 @@ class RewardRedemptionService:
                     raise ValueError("Redemption record not found.")
 
                 if redemption.status == RedemptionStatus.FULFILLED:
+                    raise ValueError("Cannot approve an already fulfilled redemption.")
+                if redemption.status == RedemptionStatus.CANCELLED:
+                    raise ValueError("Cannot approve a cancelled redemption.")
+
+                redemption.status = RedemptionStatus.APPROVED
+                if notes:
+                    redemption.notes = f"{redemption.notes}\nApproved by {staff_user.email}: {notes}".strip()
+                redemption.save()
+
+                return redemption
+
+    @classmethod
+    def fulfill_redemption(cls, tenant_id, redemption_id, staff_user: User, notes: str = "") -> RewardRedemption:
+        """
+        Staff marks a redemption as fulfilled and records staff ID & timestamp.
+        """
+        with bypass_tenant_isolation():
+            with transaction.atomic():
+                redemption = RewardRedemption.objects.select_for_update().filter(
+                    tenant_id=tenant_id,
+                    id=redemption_id
+                ).first()
+
+                if not redemption:
+                    raise ValueError("Redemption record not found.")
+
+                if redemption.status == RedemptionStatus.CANCELLED:
+                    raise ValueError("Cannot fulfill a cancelled redemption.")
+
+                if redemption.status == RedemptionStatus.FULFILLED:
                     return redemption
 
                 redemption.status = RedemptionStatus.FULFILLED
                 redemption.fulfilled_by = staff_user
                 redemption.fulfilled_at = timezone.now()
+                if notes:
+                    redemption.notes = f"{redemption.notes}\nFulfilled by {staff_user.email}: {notes}".strip()
+                redemption.save()
+
+                return redemption
+
+    @classmethod
+    def fulfill_by_code(cls, tenant_id, code: str, staff_user: User, notes: str = "") -> RewardRedemption:
+        """
+        Staff fulfills a redemption directly by providing the voucher code.
+        """
+        cleaned_code = str(code).strip().upper()
+        with bypass_tenant_isolation():
+            with transaction.atomic():
+                redemption = RewardRedemption.objects.select_for_update().filter(
+                    tenant_id=tenant_id,
+                    redemption_code__iexact=cleaned_code
+                ).first()
+
+                if not redemption:
+                    raise ValueError("Redemption code not found or belongs to another tenant.")
+
+                if redemption.status == RedemptionStatus.CANCELLED:
+                    raise ValueError("Cannot fulfill a cancelled redemption.")
+
+                if redemption.status == RedemptionStatus.FULFILLED:
+                    raise ValueError("This redemption code has already been fulfilled.")
+
+                redemption.status = RedemptionStatus.FULFILLED
+                redemption.fulfilled_by = staff_user
+                redemption.fulfilled_at = timezone.now()
+                if notes:
+                    redemption.notes = f"{redemption.notes}\nFulfilled by {staff_user.email}: {notes}".strip()
                 redemption.save()
 
                 return redemption
 
     @classmethod
     def cancel_and_refund_redemption(cls, tenant_id, redemption_id, staff_user: Optional[User] = None, reason: str = "") -> RewardRedemption:
+        """
+        Cancels a redemption, refunds points to user wallet, creates ledger reversal entry,
+        restores catalog stock, and cancels any granted package credits.
+        """
         with bypass_tenant_isolation():
             with transaction.atomic():
                 redemption = RewardRedemption.objects.select_for_update().filter(
@@ -392,10 +520,10 @@ class RewardRedemptionService:
                     raise ValueError("Cannot cancel an already fulfilled redemption.")
 
                 redemption.status = RedemptionStatus.CANCELLED
-                redemption.notes = f"{redemption.notes}\nCancelled by {staff_user.email if staff_user else 'System'}: {reason}".strip()
+                redemption.notes = f"{redemption.notes}\nCancelled by {staff_user.email if staff_user else 'Member'}: {reason}".strip()
                 redemption.save()
 
-                # Refund points to wallet
+                # 1. Refund points to wallet
                 if redemption.points_spent > 0:
                     wallet = RewardWallet.objects.select_for_update().get(
                         tenant_id=tenant_id,
@@ -405,6 +533,7 @@ class RewardRedemptionService:
                     wallet.lifetime_redeemed -= redemption.points_spent
                     wallet.save()
 
+                    # 2. Record ledger reversal entry
                     RewardPointLedger.objects.create(
                         tenant_id=tenant_id,
                         wallet=wallet,
@@ -412,13 +541,18 @@ class RewardRedemptionService:
                         amount=redemption.points_spent,
                         balance_after=wallet.balance,
                         transaction_type=TransactionType.REVERSAL,
-                        description=f"Refund for cancelled redemption {redemption.redemption_code}",
+                        description=f"Refund for cancelled redemption {redemption.redemption_code}: {reason or 'Cancelled'}",
                         redemption=redemption
                     )
 
-                # Restock inventory item if applicable
+                # 3. Restock inventory item if applicable
                 if redemption.catalog_item.stock_quantity is not None:
                     redemption.catalog_item.stock_quantity += 1
                     redemption.catalog_item.save(update_fields=['stock_quantity'])
+
+                # 4. If a package was granted, cancel it
+                if redemption.granted_package:
+                    redemption.granted_package.status = 'canceled'
+                    redemption.granted_package.save(update_fields=['status'])
 
                 return redemption
