@@ -114,6 +114,7 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 # Media files (Uploaded by users)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'mediafiles'
+BASE_URL = os.environ.get('BASE_URL', 'http://16.171.26.53')
 
 
 # Default primary key field type
