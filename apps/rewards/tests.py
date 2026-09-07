@@ -844,3 +844,44 @@ class PlatformAppsWiringIntegrationTests(RewardsBaseTestCase):
         # Verify wallet credited
         self.member1_wallet.refresh_from_db()
         self.assertEqual(self.member1_wallet.balance, 500)
+
+    def test_badge_image_upload_direct_and_action(self):
+        from io import BytesIO
+        from PIL import Image
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        self.client.force_authenticate(user=self.owner1)
+
+        def make_image_file(name, color):
+            img = Image.new('RGB', (50, 50), color=color)
+            buf = BytesIO()
+            img.save(buf, format='PNG')
+            buf.seek(0)
+            return SimpleUploadedFile(name, buf.read(), content_type="image/png")
+
+        # 1. Create badge with image in multipart/form-data
+        dummy_image = make_image_file("runner_icon.png", "blue")
+        response = self.client.post(
+            "/api/v1/rewards/admin/badges/",
+            data={
+                "name": "Century Runner",
+                "slug": "century-runner",
+                "category": "workout",
+                "image": dummy_image
+            },
+            format="multipart"
+        )
+        self.assertEqual(response.status_code, 201)
+        badge_id = response.data["id"]
+        self.assertIn("runner_icon", response.data["image"])
+        self.assertIsNotNone(response.data["icon_url"])
+
+        # 2. Upload/replace image via dedicated action endpoint
+        dummy_image_v2 = make_image_file("runner_v2.png", "red")
+        action_res = self.client.post(
+            f"/api/v1/rewards/admin/badges/{badge_id}/upload-image/",
+            data={"image": dummy_image_v2},
+            format="multipart"
+        )
+        self.assertEqual(action_res.status_code, 200)
+        self.assertIn("runner_v2", action_res.data["image"])
+        self.assertIn("runner_v2", action_res.data["icon_url"])

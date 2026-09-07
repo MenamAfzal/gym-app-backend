@@ -5,7 +5,7 @@ Separates Business Admin configuration/fulfillment endpoints from Client-facing
 wallet and redemption interactions.
 Highly optimized with query annotations and eager joins to eliminate N+1 queries.
 """
-from rest_framework import viewsets, status, mixins
+from rest_framework import viewsets, status, mixins, parsers
 from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -141,18 +141,44 @@ class AdminRewardRuleVersionViewSet(viewsets.ReadOnlyModelViewSet):
 class AdminBadgeViewSet(viewsets.ModelViewSet):
     """
     CRUD management for tenant achievement badges.
+    Supports JSON and multipart/form-data for direct badge image uploads.
     Annotates awarded_count to eliminate N+1 queries.
     """
     serializer_class = BadgeSerializer
     permission_classes = [IsAuthenticated, IsRewardAdminOrManager]
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        return Badge.objects.filter(tenant=tenant).annotate(awarded_count=Count('awarded_users'))
+        return Badge.all_objects.filter(tenant=tenant).annotate(awarded_count=Count('awarded_users'))
 
     def perform_create(self, serializer):
         tenant = get_request_tenant(self.request)
         serializer.save(tenant=tenant)
+
+    @action(detail=True, methods=['post'], url_path='upload-image', parser_classes=[parsers.MultiPartParser, parsers.FormParser])
+    def upload_image(self, request, pk=None):
+        """
+        Dedicated endpoint to upload or update a badge image.
+        Multipart form field: 'image'
+        """
+        badge = self.get_object()
+        image_file = request.FILES.get('image')
+        if not image_file:
+            return Response(
+                {'error': 'No image file provided. Please attach a file under the "image" field.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        badge.image = image_file
+        badge.save(update_fields=['image'])
+        try:
+            badge.icon_url = request.build_absolute_uri(badge.image.url)
+            badge.save(update_fields=['icon_url'])
+        except Exception:
+            pass
+
+        return Response(BadgeSerializer(badge, context={'request': request}).data)
 
 
 class AdminRewardTierViewSet(viewsets.ModelViewSet):
@@ -428,7 +454,7 @@ class ClientBadgeView(APIView):
 
         earned_badge_ids = {ub.badge_id for ub in earned_user_badges}
 
-        available_badges = Badge.objects.filter(
+        available_badges = Badge.all_objects.filter(
             tenant=tenant,
             is_active=True
         ).annotate(awarded_count=Count('awarded_users'))

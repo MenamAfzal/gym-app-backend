@@ -229,11 +229,23 @@ class RewardRuleVersion(TenantAwareModel):
 class Badge(TenantAwareModel):
     """
     Represents an achievement badge that can be awarded to members.
+    Supports both direct image file uploads and external icon URLs.
     """
     name = models.CharField(max_length=150)
     slug = models.SlugField(max_length=150)
     description = models.TextField(blank=True)
-    icon_url = models.URLField(max_length=500, blank=True, null=True)
+    image = models.ImageField(
+        upload_to='badges/%Y/%m/',
+        blank=True,
+        null=True,
+        help_text="Badge graphic/icon image file upload"
+    )
+    icon_url = models.URLField(
+        max_length=500,
+        blank=True,
+        null=True,
+        help_text="External URL or auto-populated from image upload"
+    )
     category = models.CharField(max_length=50, default='general')
     is_active = models.BooleanField(default=True)
 
@@ -245,6 +257,15 @@ class Badge(TenantAwareModel):
 
     def __str__(self):
         return f"{self.name} ({self.tenant.name if self.tenant else 'No Tenant'})"
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if self.image and not self.icon_url:
+            try:
+                self.icon_url = self.image.url
+                super().save(update_fields=['icon_url'])
+            except Exception:
+                pass
 
 
 class RewardTier(TenantAwareModel):

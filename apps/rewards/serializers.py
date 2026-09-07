@@ -65,14 +65,28 @@ class RewardRuleSerializer(serializers.ModelSerializer):
 
 class BadgeSerializer(serializers.ModelSerializer):
     awarded_count = serializers.IntegerField(read_only=True, default=0)
+    image = serializers.ImageField(required=False, allow_null=True)
 
     class Meta:
         model = Badge
         fields = [
-            'id', 'name', 'slug', 'description', 'icon_url',
+            'id', 'name', 'slug', 'description', 'image', 'icon_url',
             'category', 'is_active', 'awarded_count', 'created_at'
         ]
         read_only_fields = ['id', 'created_at', 'awarded_count']
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        if not ret.get('icon_url') and instance.image:
+            try:
+                request = self.context.get('request')
+                if request:
+                    ret['icon_url'] = request.build_absolute_uri(instance.image.url)
+                else:
+                    ret['icon_url'] = instance.image.url
+            except Exception:
+                pass
+        return ret
 
 
 class RewardTierSerializer(serializers.ModelSerializer):
