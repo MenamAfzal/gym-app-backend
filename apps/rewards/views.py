@@ -37,14 +37,41 @@ from apps.core.tenants.context import get_current_tenant
 
 def get_request_tenant(request):
     """
-    Robust tenant resolver that checks request.tenant, request.user.tenant,
-    or active contextvars tenant.
+    Robust tenant resolver that checks:
+    1. request.tenant (set by middleware)
+    2. Header: X-Tenant-Id / X-Tenant-ID
+    3. request.data: tenant or tenant_id
+    4. request.user.tenant
+    5. active contextvars get_current_tenant()
+    6. Platform admin fallback to first active tenant
     """
     tenant = getattr(request, 'tenant', None)
+    if not tenant:
+        header_tenant_id = (
+            request.headers.get('X-Tenant-Id')
+            or request.headers.get('X-Tenant-ID')
+            or request.META.get('HTTP_X_TENANT_ID')
+        )
+        if not header_tenant_id and hasattr(request, 'data') and hasattr(request.data, 'get'):
+            header_tenant_id = request.data.get('tenant') or request.data.get('tenant_id')
+
+        if header_tenant_id:
+            try:
+                from apps.core.tenants.models import Tenant
+                tenant = Tenant.objects.filter(id=header_tenant_id).first()
+            except Exception:
+                pass
+
     if not tenant and getattr(request, 'user', None) and getattr(request.user, 'tenant', None):
         tenant = request.user.tenant
+
     if not tenant:
         tenant = get_current_tenant()
+
+    if not tenant and getattr(request, 'user', None) and getattr(request.user, 'role', '') == UserRole.PLATFORM_ADMIN:
+        from apps.core.tenants.models import Tenant
+        tenant = Tenant.objects.filter(is_active=True).first()
+
     return tenant
 
 
@@ -160,13 +187,13 @@ class AdminBadgeViewSet(viewsets.ModelViewSet):
     def upload_image(self, request, pk=None):
         """
         Dedicated endpoint to upload or update a badge image.
-        Multipart form field: 'image'
+        Accepts 'image' or 'file' in multipart form data.
         """
         badge = self.get_object()
-        image_file = request.FILES.get('image')
+        image_file = request.FILES.get('image') or request.FILES.get('file')
         if not image_file:
             return Response(
-                {'error': 'No image file provided. Please attach a file under the "image" field.'},
+                {'error': 'No image file provided. Please attach a file under the "image" or "file" field.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 

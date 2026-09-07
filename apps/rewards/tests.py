@@ -885,3 +885,19 @@ class PlatformAppsWiringIntegrationTests(RewardsBaseTestCase):
         self.assertEqual(action_res.status_code, 200)
         self.assertIn("runner_v2", action_res.data["image"])
         self.assertIn("runner_v2", action_res.data["icon_url"])
+
+        # 3. Create badge using field name 'file' (alias for 'image')
+        dummy_image_v3 = make_image_file("swimmer.png", "green")
+        response_file = self.client.post(
+            "/api/v1/rewards/admin/badges/",
+            data={
+                "name": "Master Swimmer",
+                "slug": "master-swimmer",
+                "category": "workout",
+                "file": dummy_image_v3
+            },
+            format="multipart"
+        )
+        self.assertEqual(response_file.status_code, 201)
+        self.assertIn("swimmer", response_file.data["image"])
+        self.assertIsNotNone(response_file.data["icon_url"])

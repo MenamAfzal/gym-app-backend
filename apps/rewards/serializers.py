@@ -66,14 +66,32 @@ class RewardRuleSerializer(serializers.ModelSerializer):
 class BadgeSerializer(serializers.ModelSerializer):
     awarded_count = serializers.IntegerField(read_only=True, default=0)
     image = serializers.ImageField(required=False, allow_null=True)
+    file = serializers.ImageField(required=False, write_only=True, allow_null=True)
 
     class Meta:
         model = Badge
         fields = [
-            'id', 'name', 'slug', 'description', 'image', 'icon_url',
+            'id', 'name', 'slug', 'description', 'image', 'file', 'icon_url',
             'category', 'is_active', 'awarded_count', 'created_at'
         ]
         read_only_fields = ['id', 'created_at', 'awarded_count']
+
+    def to_internal_value(self, data):
+        # Support both 'image' and 'file' field names in multipart uploads
+        if hasattr(data, 'copy') and hasattr(data, 'get'):
+            if data.get('file') and not data.get('image'):
+                data = data.copy()
+                data['image'] = data.get('file')
+        elif isinstance(data, dict):
+            if data.get('file') and not data.get('image'):
+                data = dict(data)
+                data['image'] = data.get('file')
+        ret = super().to_internal_value(data)
+        if 'file' in ret and not ret.get('image'):
+            ret['image'] = ret.pop('file')
+        elif 'file' in ret:
+            ret.pop('file')
+        return ret
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
