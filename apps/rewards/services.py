@@ -267,6 +267,36 @@ class RewardWalletService:
 
                 return wallet
 
+    @classmethod
+    def expire_points(cls, tenant_id, user: User, amount: int, reason: str = "Points expired") -> RewardWallet:
+        """
+        Deducts expired points from a member's wallet balance and records an EXPIRE ledger entry.
+        """
+        with bypass_tenant_isolation():
+            with transaction.atomic():
+                wallet, _ = RewardWallet.objects.select_for_update().get_or_create(
+                    tenant_id=tenant_id,
+                    user=user,
+                    defaults={'balance': 0, 'lifetime_earned': 0, 'lifetime_redeemed': 0}
+                )
+
+                deduct_amount = min(wallet.balance, max(0, amount))
+                wallet.balance -= deduct_amount
+                wallet.save()
+
+                RewardPointLedger.objects.create(
+                    tenant_id=tenant_id,
+                    wallet=wallet,
+                    user=user,
+                    amount=-deduct_amount,
+                    balance_after=wallet.balance,
+                    transaction_type=TransactionType.EXPIRE,
+                    description=reason,
+                    is_expired=True
+                )
+
+                return wallet
+
 
 class RewardRedemptionService:
     """
