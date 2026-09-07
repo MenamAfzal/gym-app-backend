@@ -12,9 +12,32 @@ from contextlib import contextmanager
 
 # Context variable to hold the current tenant (or None)
 _current_tenant: ContextVar[Optional[Union[UUID, object]]] = ContextVar('current_tenant', default=None)
+ 
+_current_request: ContextVar[Optional[object]] = ContextVar('current_request', default=None)
 
 # Context variable for bypassing tenant isolation (Super Admin Control Tower)
 _bypass_isolation: ContextVar[bool] = ContextVar('bypass_isolation', default=False)
+
+
+def get_current_request():
+    """
+    Get the active HTTP request for the current thread/request.
+    """
+    return _current_request.get()
+
+
+def set_current_request(request):
+    """
+    Set the active HTTP request for the current thread/request.
+    """
+    return _current_request.set(request)
+
+
+def reset_current_request(token):
+    """
+    Reset the request context.
+    """
+    _current_request.reset(token)
 
 def get_current_tenant():
     """

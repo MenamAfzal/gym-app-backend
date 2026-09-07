@@ -1310,11 +1310,11 @@ class PlatformAppsWiringIntegrationTests(RewardsBaseTestCase):
         badge_id = response.data["id"]
         self.assertIn("runner_icon", response.data["image"])
         self.assertIsNotNone(response.data["icon_url"])
-        # Verify no base URL (no scheme/host) and starts with server path
-        self.assertFalse(response.data["image"].startswith("http://") or response.data["image"].startswith("https://"))
-        self.assertTrue(response.data["image"].startswith("/media/"))
-        self.assertFalse(response.data["icon_url"].startswith("http://") or response.data["icon_url"].startswith("https://"))
-        self.assertTrue(response.data["icon_url"].startswith("/media/"))
+        # Verify base URL is included (starts with http:// or https://)
+        self.assertTrue(response.data["image"].startswith("http://") or response.data["image"].startswith("https://"))
+        self.assertIn("/media/", response.data["image"])
+        self.assertTrue(response.data["icon_url"].startswith("http://") or response.data["icon_url"].startswith("https://"))
+        self.assertIn("/media/", response.data["icon_url"])
 
         # 2. Upload/replace image via dedicated action endpoint
         dummy_image_v2 = make_image_file("runner_v2.png", "red")
@@ -1326,10 +1326,10 @@ class PlatformAppsWiringIntegrationTests(RewardsBaseTestCase):
         self.assertEqual(action_res.status_code, 200)
         self.assertIn("runner_v2", action_res.data["image"])
         self.assertIn("runner_v2", action_res.data["icon_url"])
-        self.assertFalse(action_res.data["image"].startswith("http://") or action_res.data["image"].startswith("https://"))
-        self.assertTrue(action_res.data["image"].startswith("/media/"))
-        self.assertFalse(action_res.data["icon_url"].startswith("http://") or action_res.data["icon_url"].startswith("https://"))
-        self.assertTrue(action_res.data["icon_url"].startswith("/media/"))
+        self.assertTrue(action_res.data["image"].startswith("http://") or action_res.data["image"].startswith("https://"))
+        self.assertIn("/media/", action_res.data["image"])
+        self.assertTrue(action_res.data["icon_url"].startswith("http://") or action_res.data["icon_url"].startswith("https://"))
+        self.assertIn("/media/", action_res.data["icon_url"])
 
         # 3. Create badge using field name 'file' (alias for 'image')
         dummy_image_v3 = make_image_file("swimmer.png", "green")
@@ -1347,12 +1347,12 @@ class PlatformAppsWiringIntegrationTests(RewardsBaseTestCase):
         self.assertEqual(response_file.status_code, 201)
         self.assertIn("swimmer", response_file.data["image"])
         self.assertIsNotNone(response_file.data["icon_url"])
-        self.assertFalse(response_file.data["image"].startswith("http://") or response_file.data["image"].startswith("https://"))
-        self.assertTrue(response_file.data["image"].startswith("/media/"))
-        self.assertFalse(response_file.data["icon_url"].startswith("http://") or response_file.data["icon_url"].startswith("https://"))
-        self.assertTrue(response_file.data["icon_url"].startswith("/media/"))
+        self.assertTrue(response_file.data["image"].startswith("http://") or response_file.data["image"].startswith("https://"))
+        self.assertIn("/media/", response_file.data["image"])
+        self.assertTrue(response_file.data["icon_url"].startswith("http://") or response_file.data["icon_url"].startswith("https://"))
+        self.assertIn("/media/", response_file.data["icon_url"])
 
-        # 4. Verify client badges endpoint returns server path without base URL
+        # 4. Verify client badges endpoint returns absolute URL with base URL
         self.client.force_authenticate(user=self.member1)
         client_res = self.client.get("/api/v1/rewards/client/badges/")
         self.assertEqual(client_res.status_code, 200)
@@ -1360,10 +1360,10 @@ class PlatformAppsWiringIntegrationTests(RewardsBaseTestCase):
         self.assertTrue(len(all_badges) > 0)
         swimmer_badge = next((b for b in all_badges if b["slug"] == "master-swimmer"), None)
         self.assertIsNotNone(swimmer_badge)
-        self.assertFalse(swimmer_badge["image"].startswith("http://") or swimmer_badge["image"].startswith("https://"))
-        self.assertTrue(swimmer_badge["image"].startswith("/media/"))
-        self.assertFalse(swimmer_badge["icon_url"].startswith("http://") or swimmer_badge["icon_url"].startswith("https://"))
-        self.assertTrue(swimmer_badge["icon_url"].startswith("/media/"))
+        self.assertTrue(swimmer_badge["image"].startswith("http://") or swimmer_badge["image"].startswith("https://"))
+        self.assertIn("/media/", swimmer_badge["image"])
+        self.assertTrue(swimmer_badge["icon_url"].startswith("http://") or swimmer_badge["icon_url"].startswith("https://"))
+        self.assertIn("/media/", swimmer_badge["icon_url"])
 
 
 class RewardMarketplaceLifecycleTests(RewardsBaseTestCase):

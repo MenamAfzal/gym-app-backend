@@ -200,7 +200,7 @@ class AdminBadgeViewSet(viewsets.ModelViewSet):
         badge.image = image_file
         badge.save(update_fields=['image'])
         try:
-            badge.icon_url = badge.image.url
+            badge.icon_url = request.build_absolute_uri(badge.image.url)
             badge.save(update_fields=['icon_url'])
         except Exception:
             pass

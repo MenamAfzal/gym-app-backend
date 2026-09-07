@@ -10,7 +10,10 @@ from django.conf import settings
 from django.http import Http404, HttpResponseForbidden
 from django.utils.deprecation import MiddlewareMixin
 from apps.core.tenants.models import Tenant
-from apps.core.tenants.context import set_current_tenant, reset_current_tenant
+from apps.core.tenants.context import (
+    set_current_tenant, reset_current_tenant,
+    set_current_request, reset_current_request
+)
 
 class TenantMiddleware(MiddlewareMixin):
     
@@ -69,6 +72,7 @@ class TenantMiddleware(MiddlewareMixin):
         # Set Context
         request.tenant = tenant
         request._tenant_context_token = set_current_tenant(tenant)
+        request._request_context_token = set_current_request(request)
 
         # Bypass tenant isolation for Django Admin (Platform Admin Control Tower)
         if request.path.startswith('/admin/'):
@@ -83,6 +87,10 @@ class TenantMiddleware(MiddlewareMixin):
         token = getattr(request, '_tenant_context_token', None)
         if token:
             reset_current_tenant(token)
+
+        req_token = getattr(request, '_request_context_token', None)
+        if req_token:
+            reset_current_request(req_token)
 
         bypass_token = getattr(request, '_bypass_isolation_token', None)
         if bypass_token:

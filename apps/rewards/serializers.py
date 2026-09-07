@@ -63,16 +63,9 @@ class RewardRuleSerializer(serializers.ModelSerializer):
         return super().update(instance, validated_data)
 
 
-from urllib.parse import urlparse
-
-
-def _extract_server_path(url_str):
-    if not url_str or not isinstance(url_str, str):
-        return url_str
-    parsed = urlparse(url_str)
-    if parsed.path:
-        return f"{parsed.path}?{parsed.query}" if parsed.query else parsed.path
-    return url_str
+import os
+from django.conf import settings
+from apps.core.tenants.context import get_current_request
 
 
 class BadgeSerializer(serializers.ModelSerializer):
@@ -107,25 +100,47 @@ class BadgeSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
+        request = self.context.get('request') or get_current_request()
 
-        # Return only the server path without base URL for image and icon_url
+        def _make_absolute(url):
+            if not url:
+                return None
+            url_str = str(url).strip()
+            if not url_str:
+                return None
+            # If already has scheme (http:// or https://), return as is
+            if url_str.startswith('http://') or url_str.startswith('https://'):
+                return url_str
+            if request and hasattr(request, 'build_absolute_uri'):
+                try:
+                    return request.build_absolute_uri(url_str)
+                except Exception:
+                    pass
+            # Fallback if request is not available
+            fallback = getattr(settings, 'BACKEND_URL', None) or getattr(settings, 'FRONTEND_URL', None) or os.environ.get('BASE_URL') or os.environ.get('FRONTEND_URL')
+            if fallback and url_str.startswith('/'):
+                return f"{fallback.rstrip('/')}{url_str}"
+            return url_str
+
+        # 1. Ensure image is an absolute URL with base URL
         if instance.image:
             try:
-                ret['image'] = instance.image.url
+                ret['image'] = _make_absolute(instance.image.url)
             except Exception:
                 if ret.get('image'):
-                    ret['image'] = _extract_server_path(ret['image'])
+                    ret['image'] = _make_absolute(ret['image'])
         elif ret.get('image'):
-            ret['image'] = _extract_server_path(ret['image'])
+            ret['image'] = _make_absolute(ret['image'])
 
+        # 2. Ensure icon_url is an absolute URL with base URL
         if instance.image:
             try:
-                ret['icon_url'] = instance.image.url
+                ret['icon_url'] = _make_absolute(instance.image.url)
             except Exception:
                 if ret.get('icon_url'):
-                    ret['icon_url'] = _extract_server_path(ret['icon_url'])
+                    ret['icon_url'] = _make_absolute(ret['icon_url'])
         elif ret.get('icon_url'):
-            ret['icon_url'] = _extract_server_path(ret['icon_url'])
+            ret['icon_url'] = _make_absolute(ret['icon_url'])
 
         return ret
 
