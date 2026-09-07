@@ -1426,6 +1426,20 @@ class MediaViewSet(viewsets.ModelViewSet):
 
             if serializer.is_valid():
                 new_media = serializer.save(user=request.user)
+ 
+                try:
+                    from apps.rewards.events import RewardEvent
+                    from apps.rewards.services import RewardEngineService
+                    tenant_id = getattr(request.user, 'tenant_id', None)
+                    if tenant_id:
+                        RewardEngineService.handle_event(RewardEvent.create_social_post_created(
+                            tenant_id=tenant_id,
+                            user_id=request.user.id,
+                            post_id=new_media.id
+                        ))
+                except Exception:
+                    pass
+
                 result = serializer.data
                 result['media_type'] = media_type
                 responses.append(result)
@@ -1517,6 +1531,21 @@ class MediaViewSet(viewsets.ModelViewSet):
         )
 
         if created:
+            # Emit Rewards Event
+            try:
+                from apps.rewards.events import RewardEvent
+                from apps.rewards.services import RewardEngineService
+                tenant_id = getattr(request.user, 'tenant_id', None)
+                if tenant_id:
+                    RewardEngineService.handle_event(RewardEvent.create_social_like_created(
+                        tenant_id=tenant_id,
+                        user_id=request.user.id,
+                        like_id=like.id,
+                        media_id=media.id
+                    ))
+            except Exception:
+                pass
+
             return Response({'status': 'liked!'}, status=status.HTTP_201_CREATED)
         return Response({'status': 'already liked'}, status=status.HTTP_200_OK)
     
@@ -1611,6 +1640,21 @@ class MediaViewSet(viewsets.ModelViewSet):
             object_id=media.id,
             parent=parent
         )
+
+        # Emit Rewards Event
+        try:
+            from apps.rewards.events import RewardEvent
+            from apps.rewards.services import RewardEngineService
+            tenant_id = getattr(request.user, 'tenant_id', None)
+            if tenant_id:
+                RewardEngineService.handle_event(RewardEvent.create_social_comment_created(
+                    tenant_id=tenant_id,
+                    user_id=request.user.id,
+                    comment_id=comment.id,
+                    media_id=media.id
+                ))
+        except Exception:
+            pass
 
         return Response(CommentSerializer(comment).data, status=status.HTTP_201_CREATED)
 
@@ -1888,6 +1932,21 @@ class UnifiedMediaUploadAPIView(APIView):
 
                 if serializer.is_valid():
                     media = serializer.save(user=user)
+
+                    # Emit Rewards Event
+                    try:
+                        from apps.rewards.events import RewardEvent
+                        from apps.rewards.services import RewardEngineService
+                        tenant_id = getattr(user, 'tenant_id', None)
+                        if tenant_id:
+                            RewardEngineService.handle_event(RewardEvent.create_social_post_created(
+                                tenant_id=tenant_id,
+                                user_id=user.id,
+                                post_id=media.id
+                            ))
+                    except Exception:
+                        pass
+
                     response_serializer = PhotoSerializer(media, context={
                         'request': request}) if media_type == 'photo' else VideoSerializer(media,
                                                                                            context={'request': request})

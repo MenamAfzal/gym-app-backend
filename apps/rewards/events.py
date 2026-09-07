@@ -245,6 +245,38 @@ class RewardEvent:
             payload={'post_id': str(post_id)}
         )
 
+    @classmethod
+    def create_social_like_created(
+        cls,
+        tenant_id: UUID,
+        user_id: UUID,
+        like_id: UUID,
+        media_id: Optional[UUID] = None
+    ) -> 'RewardEvent':
+        return cls(
+            tenant_id=tenant_id,
+            event_type='social.like_created',
+            user_id=user_id,
+            idempotency_key=f"social_like:{like_id}",
+            payload={'like_id': str(like_id), 'media_id': str(media_id) if media_id else None}
+        )
+
+    @classmethod
+    def create_social_comment_created(
+        cls,
+        tenant_id: UUID,
+        user_id: UUID,
+        comment_id: UUID,
+        media_id: Optional[UUID] = None
+    ) -> 'RewardEvent':
+        return cls(
+            tenant_id=tenant_id,
+            event_type='social.comment_created',
+            user_id=user_id,
+            idempotency_key=f"social_comment:{comment_id}",
+            payload={'comment_id': str(comment_id), 'media_id': str(media_id) if media_id else None}
+        )
+
     # --------------------------------------------------------------------------
     # Registration Events
     # --------------------------------------------------------------------------
@@ -261,4 +293,39 @@ class RewardEvent:
             user_id=user_id,
             idempotency_key=f"user_register:{user_id}",
             payload={'user_id': str(user_id), 'email': email}
+        )
+
+    # --------------------------------------------------------------------------
+    # Reflection & Assessment Events
+    # --------------------------------------------------------------------------
+    @classmethod
+    def create_reflection_logged(
+        cls,
+        tenant_id: UUID,
+        user_id: UUID,
+        reflection_id: UUID,
+        reflection_date: Optional[str] = None
+    ) -> 'RewardEvent':
+        return cls(
+            tenant_id=tenant_id,
+            event_type='reflection.logged',
+            user_id=user_id,
+            idempotency_key=f"reflection:{reflection_id}",
+            payload={'reflection_id': str(reflection_id), 'date': reflection_date}
+        )
+
+    @classmethod
+    def create_assessment_completed(
+        cls,
+        tenant_id: UUID,
+        user_id: UUID,
+        assessment_session_id: UUID,
+        user_level: str = ""
+    ) -> 'RewardEvent':
+        return cls(
+            tenant_id=tenant_id,
+            event_type='assessment.completed',
+            user_id=user_id,
+            idempotency_key=f"assessment:{assessment_session_id}",
+            payload={'assessment_session_id': str(assessment_session_id), 'user_level': user_level}
         )

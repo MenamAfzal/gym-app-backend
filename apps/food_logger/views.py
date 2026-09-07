@@ -671,6 +671,22 @@ class LogFoodAPIView(APIView):
         goal.daily_fat -= total_fats
         goal.save()
 
+        # Emit Rewards Event
+        try:
+            from apps.rewards.events import RewardEvent
+            from apps.rewards.services import RewardEngineService
+            tenant_id = getattr(user, 'tenant_id', None)
+            if tenant_id:
+                RewardEngineService.handle_event(RewardEvent.create_meal_logged(
+                    tenant_id=tenant_id,
+                    user_id=user.id,
+                    meal_id=logged_meal.id,
+                    meal_type=meal_type or "meal",
+                    calories=float(total_calories)
+                ))
+        except Exception:
+            pass
+
         return Response({
             "message": f"Logged successfully to {meal_type}",
             "meal_totals": {

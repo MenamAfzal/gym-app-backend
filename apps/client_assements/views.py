@@ -32,7 +32,24 @@ class AssessmentSessionAPIView(APIView):
         data['user'] = user.id
         serializer = AssessmentSessionSerializer(data=data, context={'request': request})
         if serializer.is_valid():
-            serializer.save(user=user, assigned_by=request.user)
+            session = serializer.save(user=user, assigned_by=request.user)
+
+            # Emit Rewards Event
+            try:
+                from apps.rewards.events import RewardEvent
+                from apps.rewards.services import RewardEngineService
+
+                tenant_id = getattr(session, 'tenant_id', None) or getattr(user, 'tenant_id', None)
+                if tenant_id:
+                    RewardEngineService.handle_event(RewardEvent.create_assessment_completed(
+                        tenant_id=tenant_id,
+                        user_id=session.user_id,
+                        assessment_session_id=session.id,
+                        user_level=session.user_level or ""
+                    ))
+            except Exception:
+                pass
+
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -78,4 +95,20 @@ class LatestAssessmentSessionViewSet(viewsets.ModelViewSet):
         return AssessmentSession.objects.none()
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        session = serializer.save(user=self.request.user)
+
+        # Emit Rewards Event
+        try:
+            from apps.rewards.events import RewardEvent
+            from apps.rewards.services import RewardEngineService
+
+            tenant_id = getattr(session, 'tenant_id', None) or getattr(self.request.user, 'tenant_id', None)
+            if tenant_id:
+                RewardEngineService.handle_event(RewardEvent.create_assessment_completed(
+                    tenant_id=tenant_id,
+                    user_id=session.user_id,
+                    assessment_session_id=session.id,
+                    user_level=session.user_level or ""
+                ))
+        except Exception:
+            pass

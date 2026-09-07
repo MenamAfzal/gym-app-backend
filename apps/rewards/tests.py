@@ -532,3 +532,256 @@ class RewardsRESTAPITests(RewardsBaseTestCase):
 
         self.assertEqual(rule_resp.status_code, status.HTTP_201_CREATED)
         self.assertEqual(rule_resp.data['name'], "Summer 10-Class Milestone")
+
+
+class PlatformAppsWiringIntegrationTests(RewardsBaseTestCase):
+    """
+    Integration tests verifying canonical event processing for all newly wired platform events.
+    """
+    def setUp(self):
+        super().setUp()
+        self.program = RewardProgram.objects.create(
+            tenant=self.tenant1,
+            name="Alpha Loyalty",
+            program_type='loyalty',
+            status='active'
+        )
+
+    def test_booking_created_and_cancelled_events(self):
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Booking Created Bonus",
+            event_type="booking.created",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 10}]
+        )
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Booking Cancelled Penalty/Audit",
+            event_type="booking.cancelled",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 5}]
+        )
+
+        booking_id = uuid.uuid4()
+        event_created = RewardEvent.create_booking_created(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            booking_id=booking_id,
+            class_name="HIIT 101",
+            category="hiit"
+        )
+        txs_created = RewardEngineService.handle_event(event_created)
+        self.assertEqual(len(txs_created), 1)
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 10)
+
+        event_cancelled = RewardEvent.create_booking_cancelled(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            booking_id=booking_id,
+            is_late_cancel=False
+        )
+        txs_cancelled = RewardEngineService.handle_event(event_cancelled)
+        self.assertEqual(len(txs_cancelled), 1)
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 15)
+
+    def test_facility_access_and_streak_advancement(self):
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Facility Access Points",
+            event_type="facility.access",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 25}]
+        )
+        event = RewardEvent.create_facility_access(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            location_id=uuid.uuid4(),
+            access_point="turnstile_1"
+        )
+        txs = RewardEngineService.handle_event(event)
+        self.assertEqual(len(txs), 1)
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 25)
+
+        streak = UserStreak.objects.get(tenant=self.tenant1, user=self.member1, activity_type="attendance")
+        self.assertEqual(streak.current_streak, 1)
+
+    def test_workout_weight_logged_event(self):
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Weight Logged Reward",
+            event_type="workout.weight_logged",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 15}]
+        )
+        event = RewardEvent.create_weight_logged(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            weight_entry_id=uuid.uuid4(),
+            weight_kg=75.5
+        )
+        txs = RewardEngineService.handle_event(event)
+        self.assertEqual(len(txs), 1)
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 15)
+
+    def test_nutrition_meal_and_water_logged_events(self):
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Meal Logged Reward",
+            event_type="nutrition.meal_logged",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 20}]
+        )
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Water Logged Reward",
+            event_type="nutrition.water_logged",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 10}]
+        )
+
+        event_meal = RewardEvent.create_meal_logged(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            meal_id=uuid.uuid4(),
+            meal_type="lunch",
+            calories=550.0
+        )
+        txs_meal = RewardEngineService.handle_event(event_meal)
+        self.assertEqual(len(txs_meal), 1)
+
+        event_water = RewardEvent.create_water_logged(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            log_id=uuid.uuid4(),
+            amount_ml=500
+        )
+        txs_water = RewardEngineService.handle_event(event_water)
+        self.assertEqual(len(txs_water), 1)
+
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 30)
+
+    def test_social_engagement_events(self):
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Social Post Reward",
+            event_type="social.post_created",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 30}]
+        )
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Social Like Reward",
+            event_type="social.like_created",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 5}]
+        )
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Social Comment Reward",
+            event_type="social.comment_created",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 10}]
+        )
+
+        media_id = uuid.uuid4()
+        event_post = RewardEvent.create_social_post_created(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            post_id=media_id
+        )
+        txs_post = RewardEngineService.handle_event(event_post)
+        self.assertEqual(len(txs_post), 1)
+
+        event_like = RewardEvent.create_social_like_created(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            like_id=uuid.uuid4(),
+            media_id=media_id
+        )
+        txs_like = RewardEngineService.handle_event(event_like)
+        self.assertEqual(len(txs_like), 1)
+
+        event_comment = RewardEvent.create_social_comment_created(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            comment_id=uuid.uuid4(),
+            media_id=media_id
+        )
+        txs_comment = RewardEngineService.handle_event(event_comment)
+        self.assertEqual(len(txs_comment), 1)
+
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 45)
+
+    def test_user_registration_welcome_event(self):
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Welcome Bonus",
+            event_type="user.registered",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 100}]
+        )
+        new_client = User.objects.create_user(
+            email="newclient@alphafit.com",
+            password="Password123!",
+            role=UserRole.CLIENT,
+            tenant=self.tenant1
+        )
+        wallet = RewardWallet.objects.get(user=new_client)
+        self.assertEqual(wallet.balance, 100)
+
+    def test_reflection_logged_emits_reward_event(self):
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Reflection Points",
+            event_type="reflection.logged",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 15}]
+        )
+        event = RewardEvent.create_reflection_logged(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            reflection_id=uuid.uuid4(),
+            reflection_date="2026-09-07"
+        )
+        txs = RewardEngineService.handle_event(event)
+        self.assertEqual(len(txs), 1)
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 15)
+
+    def test_assessment_completed_emits_reward_event(self):
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Assessment Points",
+            event_type="assessment.completed",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 50}]
+        )
+        event = RewardEvent.create_assessment_completed(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            assessment_session_id=uuid.uuid4(),
+            user_level="Rx1"
+        )
+        txs = RewardEngineService.handle_event(event)
+        self.assertEqual(len(txs), 1)
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 50)

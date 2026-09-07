@@ -22,3 +22,14 @@ def create_user_reward_wallet(sender, instance, created, **kwargs):
                 user=instance,
                 defaults={'balance': 0, 'lifetime_earned': 0, 'lifetime_redeemed': 0}
             )
+
+        try:
+            from apps.rewards.events import RewardEvent
+            from apps.rewards.services import RewardEngineService
+            RewardEngineService.handle_event(RewardEvent.create_user_registered(
+                tenant_id=instance.tenant_id,
+                user_id=instance.id,
+                email=instance.email or ""
+            ))
+        except Exception:
+            pass

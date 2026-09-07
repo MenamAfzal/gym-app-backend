@@ -475,6 +475,21 @@ class WaterIntakeAPIView(APIView):
             )
 
             serializer = DrinkSerializer(drink)
+ 
+            try:
+                from apps.rewards.events import RewardEvent
+                from apps.rewards.services import RewardEngineService
+                tenant_id = getattr(request.user, 'tenant_id', None)
+                if tenant_id:
+                    RewardEngineService.handle_event(RewardEvent.create_water_logged(
+                        tenant_id=tenant_id,
+                        user_id=request.user.id,
+                        log_id=drink.id,
+                        amount_ml=int(drink_in_oz * ML_TO_OZ)
+                    ))
+            except Exception:
+                pass
+
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         # ----------------------------

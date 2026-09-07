@@ -242,7 +242,23 @@ class LogWeightAPIView(APIView):
         """Log weight for an exercise, linked to a specific workout log"""
         serializer = WeightEntrySerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save(user=request.user)
+            weight_entry = serializer.save(user=request.user)
+
+            # Emit Rewards Event
+            try:
+                from apps.rewards.events import RewardEvent
+                from apps.rewards.services import RewardEngineService
+                tenant_id = getattr(weight_entry, 'tenant_id', None) or getattr(request.user, 'tenant_id', None)
+                if tenant_id:
+                    RewardEngineService.handle_event(RewardEvent.create_weight_logged(
+                        tenant_id=tenant_id,
+                        user_id=request.user.id,
+                        weight_entry_id=weight_entry.id,
+                        weight_kg=float(weight_entry.weight)
+                    ))
+            except Exception:
+                pass
+
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 class LogCompletionAPIView(APIView):

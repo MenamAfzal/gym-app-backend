@@ -484,6 +484,21 @@ class BookingViewSet(viewsets.ModelViewSet):
             }
         ))
 
+        # Emit Rewards Event
+        try:
+            from apps.rewards.events import RewardEvent
+            from apps.rewards.services import RewardEngineService
+            template = getattr(session, 'template', None)
+            RewardEngineService.handle_event(RewardEvent.create_booking_created(
+                tenant_id=booking.tenant_id,
+                user_id=booking.client_id,
+                booking_id=booking.id,
+                class_name=template.name if template else "",
+                category=template.category if template else ""
+            ))
+        except Exception:
+            pass
+
         return Response(BookingReadSerializer(booking).data, status=status.HTTP_201_CREATED)
 
     @transaction.atomic
@@ -524,6 +539,19 @@ class BookingViewSet(viewsets.ModelViewSet):
         # Trigger WaitlistPromotionJob
         from .tasks import process_waitlist_promotion_job
         process_waitlist_promotion_job.delay(str(session.id))
+
+        # Emit Rewards Event
+        try:
+            from apps.rewards.events import RewardEvent
+            from apps.rewards.services import RewardEngineService
+            RewardEngineService.handle_event(RewardEvent.create_booking_cancelled(
+                tenant_id=booking.tenant_id,
+                user_id=booking.client_id,
+                booking_id=booking.id,
+                is_late_cancel=not is_early_cancel
+            ))
+        except Exception:
+            pass
 
         return Response({
             "status": "cancelled",
@@ -1226,6 +1254,20 @@ class FacilityAccessViewSet(viewsets.ModelViewSet):
         if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
             qs = qs.filter(location__location_staff__staff=user).distinct()
         return qs
+
+    def perform_create(self, serializer):
+        access_log = serializer.save()
+        try:
+            from apps.rewards.events import RewardEvent
+            from apps.rewards.services import RewardEngineService
+            RewardEngineService.handle_event(RewardEvent.create_facility_access(
+                tenant_id=access_log.tenant_id,
+                user_id=access_log.client_id,
+                location_id=access_log.location_id,
+                access_point=getattr(access_log, 'access_point', 'main_turnstile')
+            ))
+        except Exception:
+            pass
 
     @action(detail=True, methods=['post'])
     def check_out(self, request, pk=None):

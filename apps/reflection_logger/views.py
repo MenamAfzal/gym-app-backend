@@ -45,6 +45,23 @@ class DailyReflectionAPIView(APIView):
             serializer = DailyReflectionSerializer(data=request.data, context={"request": request})
             serializer.is_valid(raise_exception=True)
             reflection = serializer.save()
+
+            # Emit Rewards Event
+            try:
+                from apps.rewards.events import RewardEvent
+                from apps.rewards.services import RewardEngineService
+
+                tenant_id = getattr(reflection, 'tenant_id', None) or getattr(request.user, 'tenant_id', None)
+                if tenant_id:
+                    RewardEngineService.handle_event(RewardEvent.create_reflection_logged(
+                        tenant_id=tenant_id,
+                        user_id=reflection.user_id,
+                        reflection_id=reflection.id,
+                        reflection_date=str(reflection.date) if hasattr(reflection, 'date') else None
+                    ))
+            except Exception as reward_err:
+                logger.debug(f"Rewards event dispatch failed for reflection: {reward_err}")
+
             out = DailyReflectionSerializer(reflection, context={"request": request})
             return Response(out.data, status=status.HTTP_201_CREATED)
         except Exception as e:
