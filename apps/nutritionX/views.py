@@ -127,6 +127,33 @@ class AddFoodToMealView(APIView):
                     brand_name_item_name = item.get("brand_name_item_name", ""),
 
                 )
+
+            # Emit Rewards Event
+            try:
+                from apps.rewards.events import RewardEvent
+                from apps.rewards.services import RewardEngineService
+                tenant_id = (
+                    getattr(request.user, 'tenant_id', None)
+                    or getattr(getattr(request, 'tenant', None), 'id', None)
+                    or getattr(getattr(request.user, 'tenant', None), 'id', None)
+                )
+                if tenant_id:
+                    total_cals = 0.0
+                    for item in food:
+                        try:
+                            total_cals += float(item.get("calories", 0) or 0)
+                        except (ValueError, TypeError):
+                            pass
+                    RewardEngineService.handle_event(RewardEvent.create_meal_logged(
+                        tenant_id=tenant_id,
+                        user_id=request.user.id,
+                        meal_id=meal_log.id,
+                        meal_type=meal_type or "meal",
+                        calories=total_cals
+                    ))
+            except Exception:
+                pass
+
             return Response(MealLogSerializer(meal_log).data, status=200)
         return Response({"message": "Error during Food saving"}, status=status.HTTP_200_OK)
 
@@ -216,7 +243,26 @@ class CustomFoodEntryAPIView(APIView):
         if not meal_log_name:
             serializer = FoodEntrySerializer(data=data)
             if serializer.is_valid():
-                serializer.save()
+                food_entry = serializer.save()
+                # Emit Rewards Event
+                try:
+                    from apps.rewards.events import RewardEvent
+                    from apps.rewards.services import RewardEngineService
+                    tenant_id = (
+                        getattr(request.user, 'tenant_id', None)
+                        or getattr(getattr(request, 'tenant', None), 'id', None)
+                        or getattr(getattr(request.user, 'tenant', None), 'id', None)
+                    )
+                    if tenant_id:
+                        RewardEngineService.handle_event(RewardEvent.create_meal_logged(
+                            tenant_id=tenant_id,
+                            user_id=request.user.id,
+                            meal_id=food_entry.id,
+                            meal_type="custom_meal",
+                            calories=float(getattr(food_entry, 'calories', 0) or 0)
+                        ))
+                except Exception:
+                    pass
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -268,6 +314,32 @@ class CustomFoodEntryAPIView(APIView):
                 brand_name_item_name=existing_custom_food.brand_name_item_name,
             )
             serializer = FoodEntrySerializer(new_food)
+
+            # Emit Rewards Event
+            try:
+                from apps.rewards.events import RewardEvent
+                from apps.rewards.services import RewardEngineService
+                tenant_id = (
+                    getattr(request.user, 'tenant_id', None)
+                    or getattr(getattr(request, 'tenant', None), 'id', None)
+                    or getattr(getattr(request.user, 'tenant', None), 'id', None)
+                )
+                if tenant_id:
+                    cals = 0.0
+                    try:
+                        cals = float(getattr(new_food, 'calories', 0) or 0)
+                    except (ValueError, TypeError):
+                        pass
+                    RewardEngineService.handle_event(RewardEvent.create_meal_logged(
+                        tenant_id=tenant_id,
+                        user_id=request.user.id,
+                        meal_id=meal_log.id if 'meal_log' in locals() and meal_log else new_food.id,
+                        meal_type=meal_log_name or "meal",
+                        calories=cals
+                    ))
+            except Exception:
+                pass
+
             return Response(
                 {"message": "Custom food reused for new meal.", "data": serializer.data},
                 status=status.HTTP_201_CREATED,

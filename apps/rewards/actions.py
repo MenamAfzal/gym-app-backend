@@ -179,15 +179,24 @@ class ActionHandlerRegistry:
             package_type = PackageType.objects.filter(tenant_id=tenant_id, id=package_type_id).first()
 
         if not package_type:
-            # Fallback to any active package type or create ad-hoc complimentary package
+            # Fallback to any package type or auto-create a complimentary package type for this tenant
             package_type = PackageType.objects.filter(tenant_id=tenant_id, is_active=True).first()
 
         if not package_type:
-            return ActionExecutionResult(
-                success=False,
-                action_type='PACKAGE_CREDIT',
-                result_data={},
-                error="No PackageType found to assign complimentary class credit."
+            from apps.scheduling.models import Location
+            loc = Location.objects.filter(tenant_id=tenant_id).first()
+            if not loc:
+                loc = Location.objects.create(tenant_id=tenant_id, name="Main Facility")
+            package_type, _ = PackageType.objects.get_or_create(
+                tenant_id=tenant_id,
+                name="Complimentary Reward Credit",
+                defaults={
+                    'location': loc,
+                    'credit_count': 1,
+                    'price': 0.00,
+                    'validity_days': validity_days,
+                    'is_active': True
+                }
             )
 
         expires_at = timezone.now() + timezone.timedelta(days=validity_days)

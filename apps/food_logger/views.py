@@ -425,7 +425,26 @@ class CustomMealView(APIView):
     def post(self, request):
         serializer = CustomMealSerializer(data=request.data, context={"request": request})
         if serializer.is_valid():
-            serializer.save(user=request.user)
+            meal = serializer.save(user=request.user)
+            # Emit Rewards Event
+            try:
+                from apps.rewards.events import RewardEvent
+                from apps.rewards.services import RewardEngineService
+                tenant_id = (
+                    getattr(request.user, 'tenant_id', None)
+                    or getattr(getattr(request, 'tenant', None), 'id', None)
+                    or getattr(getattr(request.user, 'tenant', None), 'id', None)
+                )
+                if tenant_id:
+                    RewardEngineService.handle_event(RewardEvent.create_meal_logged(
+                        tenant_id=tenant_id,
+                        user_id=request.user.id,
+                        meal_id=meal.id,
+                        meal_type="custom_meal",
+                        calories=float(getattr(meal, 'calories', 0) or 0)
+                    ))
+            except Exception:
+                pass
             return Response(serializer.data, status=201)
         return Response(serializer.errors, status=400)
 
@@ -484,7 +503,26 @@ class CustomFoodApiView(APIView):
             data=request.data, context={"request": request}
         )
         if serializer.is_valid():
-            serializer.save()
+            food = serializer.save()
+            # Emit Rewards Event
+            try:
+                from apps.rewards.events import RewardEvent
+                from apps.rewards.services import RewardEngineService
+                tenant_id = (
+                    getattr(request.user, 'tenant_id', None)
+                    or getattr(getattr(request, 'tenant', None), 'id', None)
+                    or getattr(getattr(request.user, 'tenant', None), 'id', None)
+                )
+                if tenant_id:
+                    RewardEngineService.handle_event(RewardEvent.create_meal_logged(
+                        tenant_id=tenant_id,
+                        user_id=request.user.id,
+                        meal_id=food.id,
+                        meal_type=request.data.get("meal_type", "custom_food"),
+                        calories=float(food.calories or 0)
+                    ))
+            except Exception:
+                pass
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -646,6 +684,20 @@ class LogFoodAPIView(APIView):
         food_item_data = request.data.get("food_item")
         food_id = request.data.get("food")
 
+        # Support direct flat payload: {"food_name": "...", "calories": 450, ...} or {"name": "...", ...}
+        if not food_item_data and not food_id:
+            flat_name = request.data.get("food_name") or request.data.get("name")
+            flat_calories = request.data.get("calories")
+            if flat_name or flat_calories is not None:
+                food_item_data = {
+                    "name": flat_name or "Custom Food",
+                    "calories": float(flat_calories or 0),
+                    "protein": float(request.data.get("protein", 0)),
+                    "carbs": float(request.data.get("carbs", 0)),
+                    "fats": float(request.data.get("fats", request.data.get("fat", 0))),
+                    "is_custom_food": True,
+                }
+
         if food_item_data:
             food_item_data["user"] = user
             custom_food = CustomFood.objects.create(**food_item_data)
@@ -675,14 +727,19 @@ class LogFoodAPIView(APIView):
         try:
             from apps.rewards.events import RewardEvent
             from apps.rewards.services import RewardEngineService
-            tenant_id = getattr(user, 'tenant_id', None)
+            tenant_id = (
+                getattr(user, 'tenant_id', None)
+                or getattr(getattr(request, 'tenant', None), 'id', None)
+                or getattr(getattr(user, 'tenant', None), 'id', None)
+            )
             if tenant_id:
+                reward_calories = float(total_calories) if total_calories > 0 else float(request.data.get("calories", 0) or 0)
                 RewardEngineService.handle_event(RewardEvent.create_meal_logged(
                     tenant_id=tenant_id,
                     user_id=user.id,
                     meal_id=logged_meal.id,
                     meal_type=meal_type or "meal",
-                    calories=float(total_calories)
+                    calories=reward_calories
                 ))
         except Exception:
             pass

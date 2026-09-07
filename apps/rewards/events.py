@@ -160,13 +160,16 @@ class RewardEvent:
         user_id: UUID,
         meal_id: UUID,
         meal_type: str = "lunch",
-        calories: float = 0.0
+        calories: float = 0.0,
+        idempotency_key: Optional[str] = None
     ) -> 'RewardEvent':
+        import uuid
+        key = idempotency_key or f"meal:{meal_id}:{uuid.uuid4().hex[:12]}"
         return cls(
             tenant_id=tenant_id,
             event_type='nutrition.meal_logged',
             user_id=user_id,
-            idempotency_key=f"meal:{meal_id}",
+            idempotency_key=key,
             payload={'meal_id': str(meal_id), 'meal_type': meal_type, 'calories': calories}
         )
 

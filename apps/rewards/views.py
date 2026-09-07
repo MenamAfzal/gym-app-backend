@@ -16,7 +16,7 @@ from apps.rewards.models import (
     RewardProgram, RewardRule, Badge, RewardTier,
     RewardWallet, RewardPointLedger, UserBadge, UserStreak,
     RewardCatalogItem, RewardRedemption, RewardTransaction,
-    RewardRuleVersion
+    RewardRuleVersion, ProcessedRewardEvent
 )
 from apps.rewards.serializers import (
     RewardProgramSerializer, RewardRuleSerializer, BadgeSerializer,
@@ -31,7 +31,7 @@ from apps.rewards.permissions import (
 from apps.rewards.services import (
     RewardWalletService, RewardRedemptionService
 )
-from apps.users.models import User
+from apps.users.models import User, UserRole
 from apps.core.tenants.context import get_current_tenant
 
 
@@ -528,3 +528,103 @@ class ClientRedemptionViewSet(viewsets.ModelViewSet):
             )
         except ValueError as ex:
             return Response({'error': str(ex)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ClientReferralView(APIView):
+    """
+    Client Referral Management & Testing API.
+    Provides members with their referral code/link, and processes referral completions
+    by emitting the canonical referral.completed event to the Rewards Engine.
+    """
+    permission_classes = [IsAuthenticated, IsRewardClient]
+
+    def get(self, request):
+        tenant = get_request_tenant(request)
+        user = request.user
+        code = f"REF-{user.id.hex[:8].upper()}"
+        base_url = request.build_absolute_uri('/')[:-1]
+
+        referral_count = ProcessedRewardEvent.objects.filter(
+            tenant=tenant,
+            event_type='referral.completed',
+            payload__referrer_id=str(user.id)
+        ).count()
+
+        return Response({
+            'referrer_id': str(user.id),
+            'referrer_email': user.email,
+            'referral_code': code,
+            'referral_link': f"{base_url}/join?ref={code}",
+            'total_referrals_completed': referral_count,
+            'description': "Share your referral code with friends. When they join, you earn reward points and package credits."
+        })
+
+    def post(self, request):
+        tenant = get_request_tenant(request)
+        referrer = request.user
+
+        referee_id = request.data.get('referee_id')
+        referee_email = request.data.get('referee_email')
+        referral_code = request.data.get('referral_code')
+
+        if not referee_id and not referee_email and not referral_code:
+            return Response(
+                {'error': 'Either referee_email or referee_id or referral_code is required.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        referee = None
+        if referee_id:
+            try:
+                import uuid
+                referee = User.objects.filter(id=uuid.UUID(str(referee_id))).first()
+            except (ValueError, TypeError):
+                return Response({'error': 'Invalid referee_id format.'}, status=status.HTTP_400_BAD_REQUEST)
+        elif referee_email:
+            referee_email = str(referee_email).strip().lower()
+            referee = User.objects.filter(email=referee_email).first()
+            if not referee:
+                import secrets
+                referee = User.objects.create_user(
+                    email=referee_email,
+                    password=secrets.token_urlsafe(12),
+                    tenant=tenant,
+                    role=UserRole.CLIENT
+                )
+        elif referral_code:
+            referee = User.objects.filter(id=referrer.id).first()
+
+        if not referee:
+            return Response({'error': 'Referee user could not be resolved.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if referee.id == referrer.id:
+            return Response({'error': 'Self-referrals are not permitted.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            from apps.rewards.events import RewardEvent
+            from apps.rewards.services import RewardEngineService
+
+            event = RewardEvent.create_referral_completed(
+                tenant_id=tenant.id,
+                referrer_id=referrer.id,
+                referee_id=referee.id
+            )
+            transactions = RewardEngineService.handle_event(event)
+            points_awarded = sum(
+                tx.action_payload.get('amount', 0)
+                for tx in transactions
+                if tx.action_type == 'POINTS' and tx.result_status == 'SUCCESS'
+            )
+            return Response({
+                'status': 'success',
+                'message': 'Referral completed successfully.',
+                'referrer_id': str(referrer.id),
+                'referrer_email': referrer.email,
+                'referee_id': str(referee.id),
+                'referee_email': referee.email,
+                'event_type': 'referral.completed',
+                'transactions_created': len(transactions),
+                'points_awarded': points_awarded
+            }, status=status.HTTP_201_CREATED)
+        except Exception as ex:
+            return Response({'error': f"Failed processing referral: {str(ex)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

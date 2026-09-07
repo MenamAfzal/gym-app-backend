@@ -10,7 +10,8 @@ from apps.rewards.views import (
     AdminRewardWalletViewSet, AdminRewardTransactionViewSet, AdminRewardAnalyticsView,
     AdminRewardRuleVersionViewSet,
     ClientRewardWalletView, ClientRewardLedgerView, ClientBadgeView,
-    ClientStreakView, ClientRewardStoreViewSet, ClientRedemptionViewSet
+    ClientStreakView, ClientRewardStoreViewSet, ClientRedemptionViewSet,
+    ClientReferralView
 )
 
 router_admin = DefaultRouter()
@@ -38,5 +39,7 @@ urlpatterns = [
     path('client/history/', ClientRewardLedgerView.as_view(), name='client-reward-history'),
     path('client/badges/', ClientBadgeView.as_view(), name='client-reward-badges'),
     path('client/streaks/', ClientStreakView.as_view(), name='client-reward-streaks'),
+    path('client/referrals/', ClientReferralView.as_view(), name='client-reward-referrals'),
+    path('client/referrals/complete/', ClientReferralView.as_view(), name='client-reward-referrals-complete'),
     path('client/', include(router_client.urls)),
 ]

@@ -11,7 +11,7 @@ from apps.nutritionX.views import WaterIntakeAPIView, ClientMacroHistoryListView
 router = DefaultRouter()
 router.register(r'medications', UserMedicationViewSet, basename='user-medication')
 urlpatterns = [ 
-    
+    path('', LogFoodAPIView.as_view(), name='food-root'),
     path('analyze-food/', AnalyzeFoodAPIView.as_view(), name='food-analyze-food'),
     path('scan-meal/', AnalyzeFoodAPIView.as_view(), name='food-scan-meal'),
     path('scan-food/', AnalyzeFoodAPIView.as_view(), name='food-scan-food'),

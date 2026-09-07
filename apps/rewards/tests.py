@@ -785,3 +785,62 @@ class PlatformAppsWiringIntegrationTests(RewardsBaseTestCase):
         self.assertEqual(len(txs), 1)
         self.member1_wallet.refresh_from_db()
         self.assertEqual(self.member1_wallet.balance, 50)
+
+    def test_food_logging_flat_payload_via_api_awards_points(self):
+        # Configure rule as in Step 4.1
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Meal Log Consistency Reward",
+            event_type="nutrition.meal_logged",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 15}]
+        )
+
+        self.client.force_authenticate(user=self.member1)
+        response = self.client.post(
+            "/api/v1/food/log-food/",
+            data={
+                "meal_type": "lunch",
+                "food_name": "Grilled Chicken Salad",
+                "calories": 450
+            },
+            format="json"
+        )
+        self.assertEqual(response.status_code, 201)
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 15)
+
+    def test_client_referral_api_creates_referral_and_awards_points(self):
+        # Configure rule as in Step 5.1
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Refer-a-Friend Bonus",
+            event_type="referral.completed",
+            status="active",
+            actions=[
+                {"type": "POINTS", "amount": 500, "description": "Referred a new member"},
+                {"type": "PACKAGE_CREDIT", "credits": 1, "validity_days": 30}
+            ]
+        )
+
+        self.client.force_authenticate(user=self.member1)
+
+        # GET referral code info
+        get_res = self.client.get("/api/v1/rewards/client/referrals/")
+        self.assertEqual(get_res.status_code, 200)
+        self.assertIn("referral_code", get_res.data)
+
+        # POST complete referral
+        post_res = self.client.post(
+            "/api/v1/rewards/client/referrals/",
+            data={"referee_email": "friend_alex@alphafit.com"},
+            format="json"
+        )
+        self.assertEqual(post_res.status_code, 201)
+        self.assertEqual(post_res.data["status"], "success")
+
+        # Verify wallet credited
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 500)
