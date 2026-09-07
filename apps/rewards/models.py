@@ -380,7 +380,7 @@ class UserStreak(TenantAwareModel):
         on_delete=models.CASCADE,
         related_name='activity_streaks'
     )
-    activity_type = models.CharField(max_length=50, help_text="e.g. 'attendance', 'workout', 'reflection'")
+    activity_type = models.CharField(max_length=50, help_text="e.g. 'attendance', 'workout', 'reflection', 'nutrition'")
     current_streak = models.PositiveIntegerField(default=0)
     longest_streak = models.PositiveIntegerField(default=0)
     last_activity_date = models.DateField(null=True, blank=True)

@@ -190,6 +190,8 @@ class RewardEngineService:
             activity_type = 'workout'
         elif event_type.startswith('reflection.'):
             activity_type = 'reflection'
+        elif event_type.startswith('nutrition.'):
+            activity_type = 'nutrition'
 
         if not activity_type:
             return

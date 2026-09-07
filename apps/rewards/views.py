@@ -578,7 +578,7 @@ class ClientStreakView(APIView):
 
     def get(self, request):
         tenant = get_request_tenant(request)
-        streaks = UserStreak.objects.filter(
+        streaks = UserStreak.all_objects.filter(
             tenant=tenant,
             user=request.user
         )

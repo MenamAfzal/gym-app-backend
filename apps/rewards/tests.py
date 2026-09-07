@@ -590,6 +590,64 @@ class MilestoneAndStreakComprehensiveTests(RewardsBaseTestCase):
         self.assertEqual(streak.current_streak, 1)
         self.assertEqual(streak.longest_streak, 2)
 
+    def test_nutrition_streak_tracking_and_api(self):
+        """Verify nutrition events update nutrition streak, deduplicate same day, and return in streak API."""
+        from django.utils import timezone
+        import uuid
+        today = timezone.localdate()
+        yesterday = today - timezone.timedelta(days=1)
+
+        # 1. Log a meal -> starts nutrition streak at 1
+        event1 = RewardEvent.create_meal_logged(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            meal_id=uuid.uuid4(),
+            meal_type="breakfast",
+            calories=400
+        )
+        RewardEngineService.handle_event(event1)
+
+        streak = UserStreak.objects.get(tenant=self.tenant1, user=self.member1, activity_type="nutrition")
+        self.assertEqual(streak.current_streak, 1)
+        self.assertEqual(streak.longest_streak, 1)
+        self.assertEqual(streak.last_activity_date, today)
+
+        # 2. Same-day water log -> keeps streak at 1
+        event2 = RewardEvent.create_water_logged(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            log_id=uuid.uuid4(),
+            amount_ml=500
+        )
+        RewardEngineService.handle_event(event2)
+        streak.refresh_from_db()
+        self.assertEqual(streak.current_streak, 1)
+
+        # 3. Simulate yesterday activity and continue to today -> increments to 2
+        streak.last_activity_date = yesterday
+        streak.save()
+
+        event3 = RewardEvent.create_meal_logged(
+            tenant_id=self.tenant1.id,
+            user_id=self.member1.id,
+            meal_id=uuid.uuid4(),
+            meal_type="dinner",
+            calories=650
+        )
+        RewardEngineService.handle_event(event3)
+        streak.refresh_from_db()
+        self.assertEqual(streak.current_streak, 2)
+        self.assertEqual(streak.longest_streak, 2)
+
+        # 4. Client streak API returns nutrition streak
+        self.client.force_authenticate(user=self.member1)
+        res = self.client.get("/api/v1/rewards/client/streaks/")
+        self.assertEqual(res.status_code, 200)
+        nutrition_streak_entry = next((s for s in res.data if s["activity_type"] == "nutrition"), None)
+        self.assertIsNotNone(nutrition_streak_entry)
+        self.assertEqual(nutrition_streak_entry["current_streak"], 2)
+        self.assertEqual(nutrition_streak_entry["longest_streak"], 2)
+
 
 class IdempotencyAndDeduplicationTests(RewardsBaseTestCase):
     """
