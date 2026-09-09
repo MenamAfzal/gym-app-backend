@@ -127,3 +127,25 @@ class NotificationServiceTests(TestCase):
 
         from apps.notifications.models import NotificationInbox
         self.assertEqual(NotificationInbox.all_objects.count(), 1)
+
+    def test_reward_earned_event_creates_inbox_with_custom_content(self):
+        """RewardEarnedEvent creates in-app notification with custom title & body."""
+        from apps.notifications.events import RewardEarnedEvent
+        from apps.notifications.models import NotificationInbox
+
+        event = RewardEarnedEvent(
+            tenant_id=self.tenant.id,
+            recipient_id=self.user.id,
+            context_data={
+                'title': 'Workout Milestone! 🏆',
+                'body': 'You earned 50 points for completing your workout!',
+                'points': 50
+            }
+        )
+        NotificationService.handle_event(event)
+
+        inbox = NotificationInbox.all_objects.filter(recipient=self.user).first()
+        self.assertIsNotNone(inbox)
+        self.assertEqual(inbox.title, 'Workout Milestone! 🏆')
+        self.assertEqual(inbox.body, 'You earned 50 points for completing your workout!')
+

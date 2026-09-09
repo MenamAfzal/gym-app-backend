@@ -54,7 +54,7 @@ class ActionHandlerRegistry:
                 return cls._handle_discount_code(action, user, tenant_id)
 
             elif action_type == 'NOTIFICATION':
-                return cls._handle_notification(action, user, tenant_id)
+                return cls._handle_notification(action, user, tenant_id, transaction_record)
 
             elif action_type == 'TIER_UPGRADE':
                 return cls._handle_tier_upgrade(action, user, tenant_id)
@@ -71,26 +71,21 @@ class ActionHandlerRegistry:
         base_points = int(action.get('amount', 0))
         if base_points <= 0:
             return ActionExecutionResult(success=True, action_type='POINTS', result_data={'points_added': 0})
-
-        # Lock the wallet row for concurrency safety
+ 
         wallet, _ = RewardWallet.objects.select_for_update().get_or_create(
             tenant_id=tenant_id,
             user=user,
             defaults={'balance': 0, 'lifetime_earned': 0, 'lifetime_redeemed': 0}
-        )
-
-        # Check for active tier multiplier
+        ) 
         multiplier = 1.0
         if wallet.current_tier and wallet.current_tier.multiplier:
             multiplier = float(wallet.current_tier.multiplier)
 
         points_awarded = int(base_points * multiplier)
-
-        # Update Wallet balance & lifetime stats
+ 
         wallet.balance += points_awarded
         wallet.lifetime_earned += points_awarded
-
-        # Check for Tier Progression
+ 
         next_tier = RewardTier.objects.filter(
             tenant_id=tenant_id,
             threshold_points__lte=wallet.lifetime_earned
@@ -102,8 +97,7 @@ class ActionHandlerRegistry:
             tier_upgraded = True
 
         wallet.save()
-
-        # Record Ledger Entry
+ 
         description = action.get('description') or f"Earned {points_awarded} points from reward rule"
         RewardPointLedger.objects.create(
             tenant_id=tenant_id,
@@ -114,7 +108,26 @@ class ActionHandlerRegistry:
             transaction_type=TransactionType.EARN,
             description=description,
             source_transaction=transaction_record
-        )
+        ) 
+        try:
+            import uuid
+            from apps.notifications.services import NotificationService
+            from apps.notifications.events import RewardEarnedEvent
+            tx_id = getattr(transaction_record, 'id', None) or uuid.uuid4()
+            NotificationService.handle_event(RewardEarnedEvent(
+                tenant_id=tenant_id,
+                recipient_id=user.id,
+                entity_id=tx_id,
+                context_data={
+                    'title': 'Points Earned! 🎉',
+                    'body': description or f"You earned {points_awarded} points!",
+                    'points': points_awarded,
+                    'new_balance': wallet.balance,
+                    'idempotency_key': f"points_notif:{user.id}:{tx_id}"
+                }
+            ))
+        except Exception:
+            pass
 
         return ActionExecutionResult(
             success=True,
@@ -147,14 +160,31 @@ class ActionHandlerRegistry:
                 result_data={},
                 error=f"Badge '{badge_slug or badge_id}' not found for tenant."
             )
-
-        # Idempotently award badge
+ 
         user_badge, created = UserBadge.objects.get_or_create(
             tenant_id=tenant_id,
             user=user,
             badge=badge,
             defaults={'source_rule': rule}
         )
+
+        if created:
+            try:
+                from apps.notifications.services import NotificationService
+                from apps.notifications.events import RewardEarnedEvent
+                NotificationService.handle_event(RewardEarnedEvent(
+                    tenant_id=tenant_id,
+                    recipient_id=user.id,
+                    entity_id=badge.id,
+                    context_data={
+                        'title': 'New Badge Unlocked! 🏆',
+                        'body': f"Congratulations! You unlocked the '{badge.name}' badge.",
+                        'badge_name': badge.name,
+                        'idempotency_key': f"badge_notif:{user.id}:{badge.id}"
+                    }
+                ))
+            except Exception:
+                pass
 
         return ActionExecutionResult(
             success=True,
@@ -178,8 +208,7 @@ class ActionHandlerRegistry:
         if package_type_id:
             package_type = PackageType.objects.filter(tenant_id=tenant_id, id=package_type_id).first()
 
-        if not package_type:
-            # Fallback to any package type or auto-create a complimentary package type for this tenant
+        if not package_type: 
             package_type = PackageType.objects.filter(tenant_id=tenant_id, is_active=True).first()
 
         if not package_type:
@@ -226,8 +255,7 @@ class ActionHandlerRegistry:
     def _handle_discount_code(cls, action: Dict[str, Any], user: User, tenant_id) -> ActionExecutionResult:
         discount_name = action.get('name', 'Reward Discount Voucher')
         discount_code = f"RW-{secrets.token_hex(4).upper()}"
-        
-        # Create a catalog item if needed or direct redemption
+         
         catalog_item, _ = RewardCatalogItem.objects.get_or_create(
             tenant_id=tenant_id,
             name=discount_name,
@@ -259,21 +287,25 @@ class ActionHandlerRegistry:
         )
 
     @classmethod
-    def _handle_notification(cls, action: Dict[str, Any], user: User, tenant_id) -> ActionExecutionResult:
+    def _handle_notification(cls, action: Dict[str, Any], user: User, tenant_id, transaction_record=None) -> ActionExecutionResult:
+        import uuid
         title = action.get('title', 'Reward Unlocked! 🎉')
         body = action.get('body', 'You earned a new reward!')
+        tx_id = getattr(transaction_record, 'id', None) or uuid.uuid4()
         
         try:
             from apps.notifications.services import NotificationService
-            from apps.notifications.events import NotificationEvent
+            from apps.notifications.events import RewardEarnedEvent
             
-            NotificationService.handle_event(NotificationEvent(
+            NotificationService.handle_event(RewardEarnedEvent(
                 tenant_id=tenant_id,
                 recipient_id=user.id,
+                entity_id=tx_id,
                 context_data={
                     'title': title,
                     'body': body,
                     'client_name': getattr(getattr(user, 'profile', None), 'first_name', user.email),
+                    'idempotency_key': f"action_notif:{user.id}:{tx_id}"
                 }
             ))
             return ActionExecutionResult(

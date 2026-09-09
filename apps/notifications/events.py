@@ -114,3 +114,9 @@ class PaymentFailedEvent(NotificationEvent):
 class MembershipExpiringEvent(NotificationEvent):
     """Emitted by the beat task for membership expiry warnings (7d, 3d, 1d)."""
     _event_type = 'membership_expiring'
+
+
+@dataclass
+class RewardEarnedEvent(NotificationEvent):
+    """Emitted when a client earns points, badges, or unlocks a reward."""
+    _event_type = 'reward_earned'

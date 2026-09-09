@@ -307,6 +307,10 @@ class NotificationService:
             # No automation configured — use sensible system defaults
             title, body, priority, notification_type, delivery_policy, is_mandatory = \
                 NotificationService._system_defaults(event)
+            if event.context_data and event.context_data.get('title'):
+                title = event.context_data.get('title')
+            if event.context_data and event.context_data.get('body'):
+                body = event.context_data.get('body')
 
         # Check user notification preference (unless mandatory)
         if not is_mandatory:
@@ -319,8 +323,12 @@ class NotificationService:
                 return
 
         # Idempotency check — prevent duplicate notifications on retries
-        entity_id_str = str(event.entity_id) if event.entity_id else 'none'
-        idempotency_key = f"{event.event_type}:{event.recipient_id}:{entity_id_str}"
+        if event.context_data and event.context_data.get('idempotency_key'):
+            idempotency_key = str(event.context_data['idempotency_key'])
+        elif event.entity_id:
+            idempotency_key = f"{event.event_type}:{event.recipient_id}:{event.entity_id}"
+        else:
+            idempotency_key = f"{event.event_type}:{event.recipient_id}:{uuid.uuid4()}"
 
         if NotificationInbox.all_objects.filter(idempotency_key=idempotency_key).exists():
             logger.debug(f"Notification already sent for key: {idempotency_key} — skipping")
