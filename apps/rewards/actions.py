@@ -198,9 +198,8 @@ class ActionHandlerRegistry:
 
     @classmethod
     def _handle_package_credit(cls, action: Dict[str, Any], user: User, tenant_id) -> ActionExecutionResult:
-        from apps.scheduling.models import Package, PackageType
-
-        package_type_id = action.get('package_type_id')
+        from apps.scheduling.models import Package, PackageType, PackageGrantSource
+        package_type_id = action.get('package_type_id') or action.get('package_type')
         credits = int(action.get('credits', 1))
         validity_days = int(action.get('validity_days', 30))
 
@@ -218,7 +217,7 @@ class ActionHandlerRegistry:
                 loc = Location.objects.create(tenant_id=tenant_id, name="Main Facility")
             package_type, _ = PackageType.objects.get_or_create(
                 tenant_id=tenant_id,
-                name="Complimentary Reward Credit",
+                name="Reward Credit",
                 defaults={
                     'location': loc,
                     'credit_count': 1,
@@ -236,7 +235,8 @@ class ActionHandlerRegistry:
             credits_remaining=credits,
             expires_at=expires_at,
             status='active',
-            is_complimentary=True,
+            grant_source=PackageGrantSource.REWARD_RULE,
+            is_complimentary=False,
             price=0.00
         )
 

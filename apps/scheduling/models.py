@@ -177,6 +177,14 @@ class PackageType(UUIDMixin, TimestampMixin, TenantMixin):
         return f"{self.name} - {self.credit_count} credits"
 
 
+class PackageGrantSource(models.TextChoices):
+    PURCHASE = 'PURCHASE', _('Direct Purchase / Stripe Subscription')
+    MANUAL_COMPLIMENTARY = 'MANUAL_COMPLIMENTARY', _('Manual Staff/Admin Complimentary Assignment')
+    REWARD_RULE = 'REWARD_RULE', _('Reward Rule Trigger')
+    REWARD_REDEMPTION = 'REWARD_REDEMPTION', _('Reward Store Redemption')
+    SYSTEM = 'SYSTEM', _('System / Other')
+
+
 class Package(UUIDMixin, TimestampMixin, TenantMixin):
     """
     An active instance of a purchased PackageType for a client.
@@ -209,9 +217,15 @@ class Package(UUIDMixin, TimestampMixin, TenantMixin):
         max_digits=10, decimal_places=2, null=True, blank=True,
         help_text="Price of the package at the time of purchase"
     )
+    grant_source = models.CharField(
+        max_length=30,
+        choices=PackageGrantSource.choices,
+        default=PackageGrantSource.PURCHASE,
+        help_text="Origin source of the package grant"
+    )
     is_complimentary = models.BooleanField(
         default=False,
-        help_text="Whether this package was granted as a free/complimentary package by gym staff"
+        help_text="Whether this package was granted as a free/complimentary package manually by gym staff/admin"
     )
     assigned_by = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True,

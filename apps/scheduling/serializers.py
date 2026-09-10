@@ -6,7 +6,7 @@ from django.db.models import Q
 from .models import (
     Location, Room, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
-    SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
+    SubstituteRequest, PackageType, Package, PackageGrantSource, Payment, CancellationPolicy,
     StaffClientAssignment, FacilityAccessLog
 )
 from apps.users.models import User, UserRole
@@ -305,11 +305,11 @@ class PackageSerializer(serializers.ModelSerializer):
             'id', 'client', 'client_name', 'client_email', 'package_type', 
             'package_type_name', 'credits_remaining', 'purchased_at', 'expires_at', 'created_at',
             'location', 'status', 'cancel_at_period_end', 'is_canceled',
-            'is_complimentary', 'assigned_by', 'assigned_by_email', 'price'
+            'grant_source', 'is_complimentary', 'assigned_by', 'assigned_by_email', 'price'
         ]
         read_only_fields = [
             'id', 'client_name', 'client_email', 'package_type_name', 'created_at',
-            'location', 'is_canceled', 'is_complimentary', 'assigned_by', 'assigned_by_email'
+            'location', 'is_canceled', 'grant_source', 'is_complimentary', 'assigned_by', 'assigned_by_email'
         ]
         extra_kwargs = {
             'credits_remaining': {'required': False},
@@ -375,7 +375,6 @@ class PackageSerializer(serializers.ModelSerializer):
                 if expires_at > max_validity:
                     raise serializers.ValidationError({"expires_at": "Expiration date exceeds the maximum allowable validity period."})
 
-            # Anti-Fraud 6: Monthly free package limit (max 3 per month per gym / tenant)
             if request and tenant:
                 now = timezone.now()
                 month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
@@ -383,7 +382,13 @@ class PackageSerializer(serializers.ModelSerializer):
                 monthly_tenant_free_count = Package.objects.filter(
                     tenant=tenant,
                     is_complimentary=True,
+                    assigned_by__isnull=False,
                     created_at__gte=month_start
+                ).exclude(
+                    grant_source__in=[
+                        PackageGrantSource.REWARD_RULE,
+                        PackageGrantSource.REWARD_REDEMPTION,
+                    ]
                 ).count()
 
                 if monthly_tenant_free_count >= 3:
@@ -395,7 +400,13 @@ class PackageSerializer(serializers.ModelSerializer):
                     tenant=tenant,
                     client=client,
                     is_complimentary=True,
+                    assigned_by__isnull=False,
                     created_at__gte=month_start
+                ).exclude(
+                    grant_source__in=[
+                        PackageGrantSource.REWARD_RULE,
+                        PackageGrantSource.REWARD_REDEMPTION,
+                    ]
                 ).count()
 
                 if monthly_client_free_count >= 3:
@@ -415,6 +426,7 @@ class PackageSerializer(serializers.ModelSerializer):
 
         # Mark as complimentary/free manual assignment
         validated_data['is_complimentary'] = True
+        validated_data['grant_source'] = PackageGrantSource.MANUAL_COMPLIMENTARY
         if validated_data.get('price') is None:
             from decimal import Decimal
             validated_data['price'] = Decimal('0.00')

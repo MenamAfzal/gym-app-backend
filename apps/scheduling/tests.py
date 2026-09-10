@@ -13,8 +13,15 @@ from apps.scheduling.models import (
 )
 from apps.scheduling.tasks import process_waitlist_promotion_job
 
+from unittest.mock import patch
+
 class GymSchedulingSystemTestCase(TestCase):
     def setUp(self):
+        # Mock Celery delay to avoid redis network dependency in unit test environments
+        self.patcher = patch('apps.scheduling.tasks.process_waitlist_promotion_job.delay')
+        self.mock_waitlist_delay = self.patcher.start()
+        self.addCleanup(self.patcher.stop)
+
         # Create a test tenant
         self.tenant = Tenant.objects.create(name="Ali Gym", subdomain="ali-gym")
         
@@ -400,6 +407,79 @@ class GymSchedulingSystemTestCase(TestCase):
         self.assertIn("inactive", str(response_inactive.data))
         self.client2.is_active = True
         self.client2.save()
+
+    def test_rewards_packages_do_not_affect_admin_monthly_complimentary_limit(self):
+        """Test that packages granted through rewards rules or redemptions do not consume Admin's 3/month complimentary limit."""
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.scheduling.views import PackageViewSet
+        from apps.scheduling.models import PackageGrantSource
+
+        factory = APIRequestFactory()
+        view = PackageViewSet.as_view({'post': 'create'})
+
+        # Clean existing packages
+        Package.objects.filter(tenant=self.tenant).delete()
+
+        # 1. Simulate member receiving 5 free packages via Reward Rules and Store Redemptions
+        for i in range(3):
+            Package.objects.create(
+                tenant=self.tenant,
+                client=self.client1,
+                package_type=self.package_type,
+                credits_remaining=self.package_type.credit_count,
+                expires_at=timezone.now() + timedelta(days=30),
+                status='active',
+                grant_source=PackageGrantSource.REWARD_RULE,
+                is_complimentary=False,
+                price=0.00
+            )
+
+        for i in range(2):
+            Package.objects.create(
+                tenant=self.tenant,
+                client=self.client2,
+                package_type=self.package_type,
+                credits_remaining=self.package_type.credit_count,
+                expires_at=timezone.now() + timedelta(days=30),
+                status='active',
+                grant_source=PackageGrantSource.REWARD_REDEMPTION,
+                is_complimentary=False,
+                price=0.00
+            )
+
+        # Member1 and Member2 currently have 5 reward packages total in this month
+        self.assertEqual(Package.objects.filter(tenant=self.tenant).count(), 5)
+
+        # 2. Gym Owner attempts manual complimentary assignment 1 -> SUCCESS
+        req1 = factory.post('/api/packages/', {'client': str(self.client1.id), 'package_type': str(self.package_type.id)}, format='json')
+        req1.tenant = self.tenant
+        force_authenticate(req1, user=self.owner)
+        resp1 = view(req1)
+        self.assertEqual(resp1.status_code, 201)
+        self.assertTrue(resp1.data['is_complimentary'])
+        self.assertEqual(resp1.data['grant_source'], PackageGrantSource.MANUAL_COMPLIMENTARY)
+
+        # 3. Manual complimentary assignment 2 -> SUCCESS
+        req2 = factory.post('/api/packages/', {'client': str(self.client2.id), 'package_type': str(self.package_type.id)}, format='json')
+        req2.tenant = self.tenant
+        force_authenticate(req2, user=self.owner)
+        resp2 = view(req2)
+        self.assertEqual(resp2.status_code, 201)
+
+        # 4. Manual complimentary assignment 3 -> SUCCESS
+        req3 = factory.post('/api/packages/', {'client': str(self.client1.id), 'package_type': str(self.package_type.id)}, format='json')
+        req3.tenant = self.tenant
+        force_authenticate(req3, user=self.owner)
+        resp3 = view(req3)
+        self.assertEqual(resp3.status_code, 201)
+
+        # 5. Manual complimentary assignment 4 (exceeds manual limit) -> FAILS 400
+        req4 = factory.post('/api/packages/', {'client': str(self.client2.id), 'package_type': str(self.package_type.id)}, format='json')
+        req4.tenant = self.tenant
+        force_authenticate(req4, user=self.owner)
+        resp4 = view(req4)
+        self.assertEqual(resp4.status_code, 400)
+        self.assertIn("Monthly limit of 3 free package assignments", str(resp4.data))
 
     def test_non_stripe_package_cancellation_flow(self):
         """Test that manually assigned/complimentary packages without Stripe sub cancel successfully."""

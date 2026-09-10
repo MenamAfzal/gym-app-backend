@@ -380,7 +380,7 @@ class RewardRedemptionService:
                 )
 
                 if item.package_type_id and getattr(item, 'allows_package_type', True):
-                    from apps.scheduling.models import Package
+                    from apps.scheduling.models import Package, PackageGrantSource
                     package = Package.objects.create(
                         tenant_id=tenant_id,
                         client=user,
@@ -388,7 +388,8 @@ class RewardRedemptionService:
                         credits_remaining=item.package_type.credit_count,
                         expires_at=timezone.now() + timezone.timedelta(days=item.package_type.validity_days),
                         status='active',
-                        is_complimentary=True,
+                        grant_source=PackageGrantSource.REWARD_REDEMPTION,
+                        is_complimentary=False,
                         price=0.00
                     )
                     redemption.granted_package = package

@@ -1555,11 +1555,13 @@ class RewardMarketplaceLifecycleTests(RewardsBaseTestCase):
         self.assertEqual(ledger.transaction_type, TransactionType.REDEEM)
 
         # Check package granted
-        from apps.scheduling.models import Package
+        from apps.scheduling.models import Package, PackageGrantSource
         granted_pkg = Package.objects.filter(client=self.member1, package_type=self.package_type).first()
         self.assertIsNotNone(granted_pkg)
         self.assertEqual(granted_pkg.credits_remaining, 1)
         self.assertEqual(granted_pkg.status, "active")
+        self.assertEqual(granted_pkg.grant_source, PackageGrantSource.REWARD_REDEMPTION)
+        self.assertFalse(granted_pkg.is_complimentary)
 
     def test_catalog_item_type_change_clears_package_configuration_and_prevents_granting(self):
         from apps.scheduling.models import Package
@@ -2352,4 +2354,122 @@ class RewardPaginationTests(RewardsBaseTestCase):
         self.assertEqual(tx_success.status_code, 200)
         self.assertEqual(tx_success.data["count"], 11)
         self.assertTrue(all(t["result_status"] == "SUCCESS" for t in tx_success.data["results"]))
+
+    def test_reward_packages_do_not_block_admin_complimentary_package_assignment(self):
+        """
+        Verify that receiving multiple packages/credits via reward rules and store redemptions
+        does NOT count against the Admin's monthly complimentary package assignment limit (3/month).
+        """
+        from apps.scheduling.models import Package, PackageGrantSource, Location, PackageType
+        from apps.scheduling.views import PackageViewSet
+        from rest_framework.test import APIRequestFactory, force_authenticate
+
+        # Clean existing packages for tenant1
+        Package.objects.filter(tenant=self.tenant1).delete()
+
+        loc, _ = Location.objects.get_or_create(tenant=self.tenant1, defaults={'name': 'Alpha Main'})
+        package_type, _ = PackageType.objects.get_or_create(
+            tenant=self.tenant1,
+            name="Free Recovery Session",
+            defaults={
+                'location': loc,
+                'credit_count': 1,
+                'price': 0.00,
+                'validity_days': 30,
+                'is_active': True
+            }
+        )
+
+        # 1. Member receives package via Reward Rule (e.g. referral)
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Referral Rule with Package",
+            event_type="referral.completed",
+            status="active",
+            actions=[
+                {"type": "PACKAGE_CREDIT", "credits": 2, "validity_days": 30}
+            ]
+        )
+
+        self.client.force_authenticate(user=self.member1)
+        ref_resp = self.client.post(
+            "/api/v1/rewards/client/referrals/",
+            data={"referee_email": "friend_bob@alphafit.com"},
+            format="json"
+        )
+        self.assertEqual(ref_resp.status_code, 201)
+
+        rule_pkg = Package.objects.filter(client=self.member1, grant_source=PackageGrantSource.REWARD_RULE).first()
+        self.assertIsNotNone(rule_pkg)
+        self.assertFalse(rule_pkg.is_complimentary)
+        self.assertEqual(rule_pkg.grant_source, PackageGrantSource.REWARD_RULE)
+
+        # 2. Member redeems 2 packages from the Reward Store
+        catalog_pkg_item = RewardCatalogItem.objects.create(
+            tenant=self.tenant1,
+            name="Free Class Voucher",
+            item_type="FREE_PACKAGE",
+            package_type=package_type,
+            points_cost=100,
+            stock_quantity=10,
+            is_active=True
+        )
+
+        self.member1_wallet.balance = 500
+        self.member1_wallet.save()
+
+        for _ in range(2):
+            rdm_resp = self.client.post(
+                "/api/v1/rewards/client/redemptions/",
+                data={"catalog_item_id": catalog_pkg_item.id},
+                format="json"
+            )
+            self.assertEqual(rdm_resp.status_code, 201)
+
+        # Member now has 3 total reward packages in the DB
+        self.assertEqual(Package.objects.filter(tenant=self.tenant1, client=self.member1).count(), 3)
+        self.assertTrue(all(not p.is_complimentary for p in Package.objects.filter(tenant=self.tenant1, client=self.member1)))
+
+        # 3. Gym Owner manually assigns 3 complimentary packages via PackageViewSet
+        member1_b = User.objects.create_user(
+            email="member1_b@alphafit.com",
+            password="Password123!",
+            role=UserRole.CLIENT,
+            tenant=self.tenant1
+        )
+        factory = APIRequestFactory()
+        view = PackageViewSet.as_view({'post': 'create'})
+
+        # Assignment 1 -> Success
+        req1 = factory.post('/api/packages/', {'client': str(self.member1.id), 'package_type': str(package_type.id)}, format='json')
+        req1.tenant = self.tenant1
+        force_authenticate(req1, user=self.owner1)
+        resp1 = view(req1)
+        self.assertEqual(resp1.status_code, 201)
+        self.assertTrue(resp1.data['is_complimentary'])
+        self.assertEqual(resp1.data['grant_source'], PackageGrantSource.MANUAL_COMPLIMENTARY)
+
+        # Assignment 2 -> Success
+        req2 = factory.post('/api/packages/', {'client': str(member1_b.id), 'package_type': str(package_type.id)}, format='json')
+        req2.tenant = self.tenant1
+        force_authenticate(req2, user=self.owner1)
+        resp2 = view(req2)
+        self.assertEqual(resp2.status_code, 201)
+
+        # Assignment 3 -> Success
+        req3 = factory.post('/api/packages/', {'client': str(self.member1.id), 'package_type': str(package_type.id)}, format='json')
+        req3.tenant = self.tenant1
+        force_authenticate(req3, user=self.owner1)
+        resp3 = view(req3)
+        self.assertEqual(resp3.status_code, 201)
+
+        # Assignment 4 (4th manual complimentary package exceeds the 3/month manual limit) -> Fails 400
+        req4 = factory.post('/api/packages/', {'client': str(member1_b.id), 'package_type': str(package_type.id)}, format='json')
+        req4.tenant = self.tenant1
+        force_authenticate(req4, user=self.owner1)
+        resp4 = view(req4)
+        self.assertEqual(resp4.status_code, 400)
+        self.assertIn("Monthly limit of 3 free package assignments", str(resp4.data))
+
 
