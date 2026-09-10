@@ -52,7 +52,9 @@ class CatalogItemType(models.TextChoices):
     DISCOUNT_CODE = 'DISCOUNT_CODE', _('Discount Voucher')
     FREE_CLASS = 'FREE_CLASS', _('Free Class Credit')
     PACKAGE_CREDIT = 'PACKAGE_CREDIT', _('Package Credit')
+    FREE_PACKAGE = 'FREE_PACKAGE', _('Free Package')
     CUSTOM = 'CUSTOM', _('Custom Reward')
+    CUSTOM_REWARD = 'CUSTOM_REWARD', _('Custom Reward')
 
 
 class RedemptionStatus(models.TextChoices):
@@ -523,10 +525,24 @@ class RewardCatalogItem(TenantAwareModel):
             models.Index(fields=['tenant', 'is_active']),
         ]
 
-    def __str__(self):
-        return f"{self.name} ({self.points_cost} pts)"
+    @property
+    def allows_package_type(self) -> bool:
+        return self.item_type in [
+            CatalogItemType.FREE_CLASS,
+            CatalogItemType.PACKAGE_CREDIT,
+            CatalogItemType.FREE_PACKAGE
+        ]
+
+    def clean(self):
+        super().clean()
+        if not self.allows_package_type and self.package_type_id:
+            self.package_type = None
 
     def save(self, *args, **kwargs):
+        if not self.allows_package_type and self.package_type_id is not None:
+            self.package_type = None
+            if 'update_fields' in kwargs and kwargs['update_fields'] is not None:
+                kwargs['update_fields'] = set(kwargs['update_fields']).union({'package_type'})
         super().save(*args, **kwargs)
         if self.image and not self.image_url:
             try:

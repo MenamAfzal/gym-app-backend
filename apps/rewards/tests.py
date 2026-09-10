@@ -1561,6 +1561,82 @@ class RewardMarketplaceLifecycleTests(RewardsBaseTestCase):
         self.assertEqual(granted_pkg.credits_remaining, 1)
         self.assertEqual(granted_pkg.status, "active")
 
+    def test_catalog_item_type_change_clears_package_configuration_and_prevents_granting(self):
+        from apps.scheduling.models import Package
+        self.client.force_authenticate(user=self.owner1)
+ 
+        create_resp = self.client.post(
+            "/api/v1/rewards/admin/catalog/",
+            data={
+                "name": "Gym Hoodie",
+                "item_type": "MERCHANDISE",
+                "points_cost": 300,
+                "stock_quantity": 5
+            },
+            format="json"
+        )
+        self.assertEqual(create_resp.status_code, 201)
+        item_id = create_resp.data["id"]
+        self.assertIsNone(create_resp.data["package_type"])
+        self.assertIsNone(create_resp.data["package_type_name"])
+ 
+        patch_resp = self.client.patch(
+            f"/api/v1/rewards/admin/catalog/{item_id}/",
+            data={
+                "item_type": "FREE_PACKAGE",
+                "package_type": str(self.package_type.id)
+            },
+            format="json"
+        )
+        self.assertEqual(patch_resp.status_code, 200)
+        self.assertEqual(patch_resp.data["package_type"], self.package_type.id)
+        self.assertEqual(patch_resp.data["package_type_name"], self.package_type.name)
+ 
+        patch_resp2 = self.client.patch(
+            f"/api/v1/rewards/admin/catalog/{item_id}/",
+            data={
+                "item_type": "CUSTOM_REWARD"
+            },
+            format="json"
+        )
+        self.assertEqual(patch_resp2.status_code, 200)
+        self.assertEqual(patch_resp2.data["item_type"], "CUSTOM_REWARD")
+        self.assertIsNone(patch_resp2.data["package_type"])
+        self.assertIsNone(patch_resp2.data["package_type_name"])
+ 
+        db_item = RewardCatalogItem.objects.get(id=item_id)
+        self.assertIsNone(db_item.package_type)
+ 
+        self.client.force_authenticate(user=self.member1)
+        store_resp = self.client.get("/api/v1/rewards/client/store/")
+        self.assertEqual(store_resp.status_code, 200)
+        matched_item = next(i for i in store_resp.data["catalog_items"] if i["id"] == item_id)
+        self.assertIsNone(matched_item["package_type"])
+        self.assertIsNone(matched_item["package_type_name"])
+ 
+        initial_pkg_count = Package.objects.filter(client=self.member1).count()
+        rdm_resp = self.client.post(
+            "/api/v1/rewards/client/redemptions/",
+            data={"catalog_item_id": item_id},
+            format="json"
+        )
+        self.assertEqual(rdm_resp.status_code, 201)
+        redemption_id = rdm_resp.data["id"]
+        self.assertIsNone(rdm_resp.data["granted_package"])
+
+        # Verify no package created for client
+        self.assertEqual(Package.objects.filter(client=self.member1).count(), initial_pkg_count)
+
+        # 6. Admin fulfills redemption
+        self.client.force_authenticate(user=self.owner1)
+        fulfill_resp = self.client.post(f"/api/v1/rewards/admin/redemptions/{redemption_id}/fulfill/")
+        self.assertEqual(fulfill_resp.status_code, 200)
+        self.assertEqual(fulfill_resp.data["status"], "FULFILLED")
+        self.assertIsNone(fulfill_resp.data["granted_package"])
+
+        # Final check: no package was granted
+        self.assertEqual(Package.objects.filter(client=self.member1).count(), initial_pkg_count)
+
     def test_stock_availability_and_overselling_prevention(self):
         rare_item = RewardCatalogItem.objects.create(
             tenant=self.tenant1,

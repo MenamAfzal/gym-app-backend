@@ -8,8 +8,9 @@ from rest_framework import serializers
 from apps.rewards.models import (
     RewardProgram, RewardRule, RewardRuleVersion, Badge, RewardTier,
     RewardWallet, RewardPointLedger, UserBadge, UserStreak,
-    RewardCatalogItem, RewardRedemption, RewardTransaction
+    RewardCatalogItem, RewardRedemption, RewardTransaction, CatalogItemType
 )
+from apps.scheduling.models import PackageType
 
 
 class RewardProgramSerializer(serializers.ModelSerializer):
@@ -81,8 +82,7 @@ class BadgeSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'awarded_count']
 
-    def to_internal_value(self, data):
-        # Support both 'image' and 'file' field names in multipart uploads
+    def to_internal_value(self, data): 
         if hasattr(data, 'copy') and hasattr(data, 'get'):
             if data.get('file') and not data.get('image'):
                 data = data.copy()
@@ -107,22 +107,19 @@ class BadgeSerializer(serializers.ModelSerializer):
                 return None
             url_str = str(url).strip()
             if not url_str:
-                return None
-            # If already has scheme (http:// or https://), return as is
+                return None 
             if url_str.startswith('http://') or url_str.startswith('https://'):
                 return url_str
             if request and hasattr(request, 'build_absolute_uri'):
                 try:
                     return request.build_absolute_uri(url_str)
                 except Exception:
-                    pass
-            # Fallback if request is not available
+                    pass 
             fallback = getattr(settings, 'BACKEND_URL', None) or getattr(settings, 'FRONTEND_URL', None) or os.environ.get('BASE_URL') or os.environ.get('FRONTEND_URL')
             if fallback and url_str.startswith('/'):
                 return f"{fallback.rstrip('/')}{url_str}"
             return url_str
 
-        # 1. Ensure image is an absolute URL with base URL
         if instance.image:
             try:
                 ret['image'] = _make_absolute(instance.image.url)
@@ -131,8 +128,7 @@ class BadgeSerializer(serializers.ModelSerializer):
                     ret['image'] = _make_absolute(ret['image'])
         elif ret.get('image'):
             ret['image'] = _make_absolute(ret['image'])
-
-        # 2. Ensure icon_url is an absolute URL with base URL
+ 
         if instance.image:
             try:
                 ret['icon_url'] = _make_absolute(instance.image.url)
@@ -161,6 +157,11 @@ class RewardTierSerializer(serializers.ModelSerializer):
 
 class RewardCatalogItemSerializer(serializers.ModelSerializer):
     package_type_name = serializers.ReadOnlyField(source='package_type.name')
+    package_type = serializers.PrimaryKeyRelatedField(
+        queryset=PackageType.all_objects.all(),
+        required=False,
+        allow_null=True
+    )
 
     class Meta:
         model = RewardCatalogItem
@@ -179,6 +180,34 @@ class RewardCatalogItemSerializer(serializers.ModelSerializer):
         if 'file' in data and 'image' not in data:
             data['image'] = data.pop('file')
         return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        target_item_type = attrs.get('item_type')
+        if not target_item_type and self.instance:
+            target_item_type = self.instance.item_type
+
+        package_bearing = [
+            CatalogItemType.FREE_CLASS,
+            CatalogItemType.PACKAGE_CREDIT,
+            getattr(CatalogItemType, 'FREE_PACKAGE', 'FREE_PACKAGE')
+        ]
+        if target_item_type and target_item_type not in package_bearing:
+            attrs['package_type'] = None
+
+        return attrs
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        package_bearing = [
+            CatalogItemType.FREE_CLASS,
+            CatalogItemType.PACKAGE_CREDIT,
+            getattr(CatalogItemType, 'FREE_PACKAGE', 'FREE_PACKAGE')
+        ]
+        if instance.item_type not in package_bearing:
+            ret['package_type'] = None
+            ret['package_type_name'] = None
+        return ret
 
     def validate_stock_quantity(self, value):
         if value is not None and value < 0:

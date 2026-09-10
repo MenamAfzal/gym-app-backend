@@ -138,7 +138,7 @@ class ValueExtractor:
         elif source_type in ['attendance', 'attendance_count']:
             from apps.scheduling.models import Booking
             time_window = condition.get('time_window')
-            qs = Booking.objects.filter(tenant_id=tenant_id, client=user, status='checked_in')
+            qs = Booking.objects.filter(tenant_id=tenant_id, client=user, status__in=['attended', 'checked_in'])
             if time_window and isinstance(time_window, dict):
                 days = time_window.get('days')
                 if days:

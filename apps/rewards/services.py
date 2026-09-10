@@ -379,8 +379,7 @@ class RewardRedemptionService:
                     redemption=redemption
                 )
 
-                # 9. If catalog item is linked to a package type, automatically grant the package credits!
-                if item.package_type_id:
+                if item.package_type_id and getattr(item, 'allows_package_type', True):
                     from apps.scheduling.models import Package
                     package = Package.objects.create(
                         tenant_id=tenant_id,
