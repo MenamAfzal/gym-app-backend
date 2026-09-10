@@ -2104,3 +2104,252 @@ class RedemptionAndAPISecurityEdgeCaseTests(RewardsBaseTestCase):
         self.client.force_authenticate(user=self.member2)
         resp4 = self.client.post(f"/api/v1/rewards/client/redemptions/{redemption.id}/cancel/")
         self.assertEqual(resp4.status_code, 404)
+
+
+class RewardPaginationTests(RewardsBaseTestCase):
+    """
+    Comprehensive tests for consistent pagination across all Rewards module tabs.
+    Validates page sizing, next/previous navigation, current/total pages, count,
+    search/filter integration, empty states, and pagination bypass (?pagination=false).
+    """
+    def setUp(self):
+        super().setUp()
+        self.program = RewardProgram.objects.create(
+            tenant=self.tenant1,
+            name="Alpha Loyalty",
+            program_type='loyalty',
+            status='active'
+        )
+
+    def test_admin_programs_pagination_and_navigation(self):
+        """Verify AdminRewardProgramViewSet pagination, search, sorting, and navigation."""
+        self.client.force_authenticate(user=self.owner1)
+
+        # Create 25 programs
+        for i in range(25):
+            RewardProgram.objects.create(
+                tenant=self.tenant1,
+                name=f"Program {i:02d}",
+                description=f"Description for program {i}",
+                status='active' if i % 2 == 0 else 'draft'
+            )
+
+        # 1. Default page 1 (page_size = 20)
+        res1 = self.client.get("/api/v1/rewards/admin/programs/")
+        self.assertEqual(res1.status_code, 200)
+        self.assertEqual(res1.data["count"], 26)  # 25 + 1 from setUp
+        self.assertEqual(res1.data["total_pages"], 2)
+        self.assertEqual(res1.data["current_page"], 1)
+        self.assertEqual(res1.data["page_size"], 20)
+        self.assertEqual(len(res1.data["results"]), 20)
+        self.assertIsNotNone(res1.data["next"])
+        self.assertIsNone(res1.data["previous"])
+
+        # 2. Page 2
+        res2 = self.client.get("/api/v1/rewards/admin/programs/?page=2")
+        self.assertEqual(res2.status_code, 200)
+        self.assertEqual(res2.data["current_page"], 2)
+        self.assertEqual(len(res2.data["results"]), 6)
+        self.assertIsNone(res2.data["next"])
+        self.assertIsNotNone(res2.data["previous"])
+
+        # 3. Custom page size
+        res3 = self.client.get("/api/v1/rewards/admin/programs/?page_size=5&page=3")
+        self.assertEqual(res3.status_code, 200)
+        self.assertEqual(res3.data["total_pages"], 6)
+        self.assertEqual(res3.data["current_page"], 3)
+        self.assertEqual(res3.data["page_size"], 5)
+        self.assertEqual(len(res3.data["results"]), 5)
+
+        # 4. Filter by status + pagination
+        res_filter = self.client.get("/api/v1/rewards/admin/programs/?status=draft")
+        self.assertEqual(res_filter.status_code, 200)
+        self.assertEqual(res_filter.data["count"], 12)
+        self.assertTrue(all(p["status"] == "draft" for p in res_filter.data["results"]))
+
+        # 5. Search + pagination
+        res_search = self.client.get("/api/v1/rewards/admin/programs/?search=Program 01")
+        self.assertEqual(res_search.status_code, 200)
+        self.assertEqual(res_search.data["count"], 1)
+        self.assertEqual(res_search.data["results"][0]["name"], "Program 01")
+
+        # 6. Pagination bypass (?pagination=false)
+        res_all = self.client.get("/api/v1/rewards/admin/programs/?pagination=false")
+        self.assertEqual(res_all.status_code, 200)
+        self.assertIsInstance(res_all.data, list)
+        self.assertEqual(len(res_all.data), 26)
+
+    def test_admin_rules_pagination_and_filtering(self):
+        """Verify AdminRewardRuleViewSet pagination and filters."""
+        self.client.force_authenticate(user=self.owner1)
+
+        for i in range(25):
+            RewardRule.objects.create(
+                tenant=self.tenant1,
+                program=self.program,
+                name=f"Rule {i:02d}",
+                event_type="booking.attended" if i % 2 == 0 else "nutrition.water_logged",
+                status="active" if i % 3 == 0 else "draft",
+                actions=[{"type": "POINTS", "amount": 10 * (i + 1)}]
+            )
+
+        # Page 1
+        res = self.client.get("/api/v1/rewards/admin/rules/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["count"], 25)
+        self.assertEqual(res.data["total_pages"], 2)
+        self.assertEqual(len(res.data["results"]), 20)
+
+        # Filter by event_type
+        res_event = self.client.get("/api/v1/rewards/admin/rules/?event_type=nutrition.water_logged")
+        self.assertEqual(res_event.status_code, 200)
+        self.assertEqual(res_event.data["count"], 12)
+        self.assertTrue(all(r["event_type"] == "nutrition.water_logged" for r in res_event.data["results"]))
+
+    def test_admin_catalog_and_client_store_pagination(self):
+        """Verify Admin & Client Catalog items pagination and affordability indicators."""
+        # Create 25 catalog items
+        for i in range(25):
+            RewardCatalogItem.objects.create(
+                tenant=self.tenant1,
+                name=f"Store Item {i:02d}",
+                points_cost=100 + (i * 50),
+                stock_quantity=10,
+                is_active=True
+            )
+
+        # 1. Admin Catalog pagination
+        self.client.force_authenticate(user=self.owner1)
+        admin_res = self.client.get("/api/v1/rewards/admin/catalog/?page_size=10&page=2")
+        self.assertEqual(admin_res.status_code, 200)
+        self.assertEqual(admin_res.data["count"], 25)
+        self.assertEqual(admin_res.data["total_pages"], 3)
+        self.assertEqual(admin_res.data["current_page"], 2)
+        self.assertEqual(len(admin_res.data["results"]), 10)
+
+        # 2. Client Store pagination
+        self.member1_wallet.balance = 300
+        self.member1_wallet.save()
+
+        self.client.force_authenticate(user=self.member1)
+        client_res = self.client.get("/api/v1/rewards/client/store/?page_size=10&page=1")
+        self.assertEqual(client_res.status_code, 200)
+        self.assertEqual(client_res.data["count"], 25)
+        self.assertEqual(client_res.data["total_pages"], 3)
+        self.assertEqual(client_res.data["current_page"], 1)
+        self.assertEqual(client_res.data["wallet_balance"], 300)
+        self.assertEqual(len(client_res.data["results"]), 10)
+        self.assertEqual(len(client_res.data["catalog_items"]), 10)
+
+        # Check affordability logic on paginated results
+        for item in client_res.data["results"]:
+            if item["points_cost"] <= 300:
+                self.assertTrue(item["can_afford"])
+                self.assertEqual(item["points_remaining_needed"], 0)
+            else:
+                self.assertFalse(item["can_afford"])
+                self.assertEqual(item["points_remaining_needed"], item["points_cost"] - 300)
+
+    def test_client_history_ledger_pagination(self):
+        """Verify ClientRewardLedgerView pagination, entry_type filtering, and sorting."""
+        # Create 25 ledger entries
+        for i in range(25):
+            RewardPointLedger.objects.create(
+                tenant=self.tenant1,
+                user=self.member1,
+                wallet=self.member1_wallet,
+                transaction_type=TransactionType.EARN if i % 2 == 0 else TransactionType.REDEEM,
+                amount=50 if i % 2 == 0 else -50,
+                balance_after=100 + i,
+                description=f"Ledger entry {i:02d}"
+            )
+
+        self.client.force_authenticate(user=self.member1)
+
+        # 1. Page 1 (page_size = 10)
+        res1 = self.client.get("/api/v1/rewards/client/history/?page_size=10&page=1")
+        self.assertEqual(res1.status_code, 200)
+        self.assertEqual(res1.data["count"], 25)
+        self.assertEqual(res1.data["total_pages"], 3)
+        self.assertEqual(res1.data["current_page"], 1)
+        self.assertEqual(len(res1.data["results"]), 10)
+        self.assertIsNotNone(res1.data["next"])
+
+        # 2. Page 3 (final page)
+        res3 = self.client.get("/api/v1/rewards/client/history/?page_size=10&page=3")
+        self.assertEqual(res3.status_code, 200)
+        self.assertEqual(res3.data["current_page"], 3)
+        self.assertEqual(len(res3.data["results"]), 5)
+        self.assertIsNone(res3.data["next"])
+        self.assertIsNotNone(res3.data["previous"])
+
+        # 3. Search on ledger
+        res_search = self.client.get("/api/v1/rewards/client/history/?search=entry 05")
+        self.assertEqual(res_search.status_code, 200)
+        self.assertEqual(res_search.data["count"], 1)
+        self.assertEqual(res_search.data["results"][0]["description"], "Ledger entry 05")
+
+    def test_admin_wallets_and_transactions_pagination(self):
+        """Verify Admin Wallets and Transactions pagination."""
+        self.client.force_authenticate(user=self.owner1)
+
+        # Create additional users and wallets
+        for i in range(15):
+            u = User.objects.create_user(
+                email=f"user_{i}@alphafit.com",
+                password="Password123!",
+                role=UserRole.CLIENT,
+                tenant=self.tenant1
+            )
+            w = RewardWalletService.get_or_create_wallet(tenant_id=self.tenant1.id, user=u)
+            w.lifetime_earned = (i + 1) * 100
+            w.save()
+
+        # Admin Wallets pagination
+        wallets_res = self.client.get("/api/v1/rewards/admin/wallets/?page_size=10&page=1")
+        self.assertEqual(wallets_res.status_code, 200)
+        self.assertTrue(wallets_res.data["count"] >= 16)
+        self.assertEqual(len(wallets_res.data["results"]), 10)
+        self.assertEqual(wallets_res.data["current_page"], 1)
+
+        # Create transactions
+        rule = RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Tx Rule",
+            event_type="test.event",
+            actions=[{"type": "POINTS", "amount": 10}]
+        )
+        event_record = ProcessedRewardEvent.objects.create(
+            tenant=self.tenant1,
+            user=self.member1,
+            event_type="test.event",
+            idempotency_key=f"test:{uuid.uuid4()}",
+            occurred_at=datetime.now(timezone.utc),
+            payload={}
+        )
+        for i in range(22):
+            RewardTransaction.objects.create(
+                tenant=self.tenant1,
+                user=self.member1,
+                rule=rule,
+                rule_version=1,
+                rule_config_snapshot={"name": "Tx Rule"},
+                event_record=event_record,
+                action_type="POINTS",
+                action_payload={"amount": 10},
+                result_status="SUCCESS" if i % 2 == 0 else "FAILED"
+            )
+
+        tx_res = self.client.get("/api/v1/rewards/admin/transactions/?page_size=10&page=1")
+        self.assertEqual(tx_res.status_code, 200)
+        self.assertEqual(tx_res.data["count"], 22)
+        self.assertEqual(tx_res.data["total_pages"], 3)
+        self.assertEqual(len(tx_res.data["results"]), 10)
+
+        # Filter by result_status
+        tx_success = self.client.get("/api/v1/rewards/admin/transactions/?result_status=SUCCESS")
+        self.assertEqual(tx_success.status_code, 200)
+        self.assertEqual(tx_success.data["count"], 11)
+        self.assertTrue(all(t["result_status"] == "SUCCESS" for t in tx_success.data["results"]))
+

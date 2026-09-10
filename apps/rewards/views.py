@@ -4,12 +4,15 @@ Reward Engine Views & ViewSets
 Separates Business Admin configuration/fulfillment endpoints from Client-facing
 wallet and redemption interactions.
 Highly optimized with query annotations and eager joins to eliminate N+1 queries.
+Provides uniform pagination, filtering, search, and sorting across all tabs.
 """
-from rest_framework import viewsets, status, mixins, parsers
+from collections import OrderedDict
+from rest_framework import viewsets, status, mixins, parsers, filters
 from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.pagination import PageNumberPagination
 from django.db.models import Sum, Count, Q
 
 from apps.rewards.models import (
@@ -33,6 +36,33 @@ from apps.rewards.services import (
 )
 from apps.users.models import User, UserRole
 from apps.core.tenants.context import get_current_tenant
+
+
+class RewardPagination(PageNumberPagination):
+    """
+    Standard pagination class for all Reward Engine tabs & listings.
+    Default page size: 20 records.
+    Supports ?page=N, ?page_size=M, and ?pagination=false bypass.
+    """
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 1000
+
+    def paginate_queryset(self, queryset, request, view=None):
+        if request.query_params.get('pagination', '').lower() in ['false', '0', 'no']:
+            return None
+        return super().paginate_queryset(queryset, request, view)
+
+    def get_paginated_response(self, data):
+        return Response(OrderedDict([
+            ('count', self.page.paginator.count),
+            ('total_pages', self.page.paginator.num_pages),
+            ('current_page', self.page.number),
+            ('page_size', self.get_page_size(self.request)),
+            ('next', self.get_next_link()),
+            ('previous', self.get_previous_link()),
+            ('results', data),
+        ]))
 
 
 def get_request_tenant(request):
@@ -86,10 +116,19 @@ class AdminRewardProgramViewSet(viewsets.ModelViewSet):
     """
     serializer_class = RewardProgramSerializer
     permission_classes = [IsAuthenticated, IsRewardAdminOrManager]
+    pagination_class = RewardPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['name', 'description', 'program_type']
+    ordering_fields = ['name', 'status', 'program_type', 'created_at', 'updated_at']
+    ordering = ['-created_at']
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        return RewardProgram.objects.filter(tenant=tenant).annotate(rules_count=Count('rules'))
+        qs = RewardProgram.all_objects.filter(tenant=tenant).annotate(rules_count=Count('rules'))
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param)
+        return qs
 
     def perform_create(self, serializer):
         tenant = get_request_tenant(self.request)
@@ -114,10 +153,15 @@ class AdminRewardRuleViewSet(viewsets.ModelViewSet):
     """
     serializer_class = RewardRuleSerializer
     permission_classes = [IsAuthenticated, IsRewardAdminOrManager]
+    pagination_class = RewardPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['name', 'description', 'event_type', 'program__name']
+    ordering_fields = ['name', 'status', 'event_type', 'priority', 'created_at', 'updated_at']
+    ordering = ['-created_at']
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        qs = RewardRule.objects.filter(tenant=tenant).select_related('program').prefetch_related('versions', 'versions__created_by')
+        qs = RewardRule.all_objects.filter(tenant=tenant).select_related('program').prefetch_related('versions', 'versions__created_by')
         event_type = self.request.query_params.get('event_type')
         status_param = self.request.query_params.get('status')
         program_id = self.request.query_params.get('program_id')
@@ -153,16 +197,21 @@ class AdminRewardRuleVersionViewSet(viewsets.ReadOnlyModelViewSet):
     """
     serializer_class = RewardRuleVersionSerializer
     permission_classes = [IsAuthenticated, IsRewardAdminOrManager]
+    pagination_class = RewardPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['name', 'description', 'event_type', 'change_summary']
+    ordering_fields = ['version', 'created_at']
+    ordering = ['-version']
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        qs = RewardRuleVersion.objects.filter(rule__tenant=tenant).select_related('created_by')
+        qs = RewardRuleVersion.all_objects.filter(rule__tenant=tenant).select_related('created_by')
         
         rule_id = self.request.query_params.get('rule_id')
         if rule_id:
             qs = qs.filter(rule_id=rule_id)
             
-        return qs.order_by('-version')
+        return qs
 
 
 class AdminBadgeViewSet(viewsets.ModelViewSet):
@@ -174,10 +223,25 @@ class AdminBadgeViewSet(viewsets.ModelViewSet):
     serializer_class = BadgeSerializer
     permission_classes = [IsAuthenticated, IsRewardAdminOrManager]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
+    pagination_class = RewardPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['name', 'description', 'category', 'slug']
+    ordering_fields = ['name', 'category', 'is_active', 'created_at']
+    ordering = ['-created_at']
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        return Badge.all_objects.filter(tenant=tenant).annotate(awarded_count=Count('awarded_users'))
+        qs = Badge.all_objects.filter(tenant=tenant).annotate(awarded_count=Count('awarded_users'))
+        category = self.request.query_params.get('category')
+        is_active = self.request.query_params.get('is_active')
+        if category:
+            qs = qs.filter(category=category)
+        if is_active is not None and is_active != '':
+            if is_active.lower() in ['true', '1']:
+                qs = qs.filter(is_active=True)
+            elif is_active.lower() in ['false', '0']:
+                qs = qs.filter(is_active=False)
+        return qs
 
     def perform_create(self, serializer):
         tenant = get_request_tenant(self.request)
@@ -215,10 +279,19 @@ class AdminRewardTierViewSet(viewsets.ModelViewSet):
     """
     serializer_class = RewardTierSerializer
     permission_classes = [IsAuthenticated, IsRewardAdminOrManager]
+    pagination_class = RewardPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['name', 'perks_description', 'program__name']
+    ordering_fields = ['name', 'threshold_points', 'multiplier', 'level', 'created_at']
+    ordering = ['threshold_points', 'level']
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        return RewardTier.objects.filter(tenant=tenant).select_related('badge', 'program')
+        qs = RewardTier.all_objects.filter(tenant=tenant).select_related('badge', 'program')
+        program_id = self.request.query_params.get('program_id')
+        if program_id:
+            qs = qs.filter(program_id=program_id)
+        return qs
 
     def perform_create(self, serializer):
         tenant = get_request_tenant(self.request)
@@ -233,10 +306,25 @@ class AdminRewardCatalogViewSet(viewsets.ModelViewSet):
     serializer_class = RewardCatalogItemSerializer
     permission_classes = [IsAuthenticated, IsRewardAdminOrManager]
     parser_classes = [parsers.JSONParser, parsers.MultiPartParser, parsers.FormParser]
+    pagination_class = RewardPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['name', 'description', 'item_type', 'package_type__name']
+    ordering_fields = ['name', 'points_cost', 'item_type', 'is_active', 'stock_quantity', 'created_at']
+    ordering = ['-created_at']
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        return RewardCatalogItem.all_objects.filter(tenant=tenant).select_related('package_type')
+        qs = RewardCatalogItem.all_objects.filter(tenant=tenant).select_related('package_type')
+        item_type = self.request.query_params.get('item_type')
+        is_active = self.request.query_params.get('is_active')
+        if item_type:
+            qs = qs.filter(item_type=item_type)
+        if is_active is not None and is_active != '':
+            if is_active.lower() in ['true', '1']:
+                qs = qs.filter(is_active=True)
+            elif is_active.lower() in ['false', '0']:
+                qs = qs.filter(is_active=False)
+        return qs
 
     def perform_create(self, serializer):
         tenant = get_request_tenant(self.request)
@@ -268,6 +356,11 @@ class AdminRewardRedemptionViewSet(viewsets.ReadOnlyModelViewSet):
     """
     serializer_class = RewardRedemptionSerializer
     permission_classes = [IsAuthenticated, IsRewardStaffOrAdmin]
+    pagination_class = RewardPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['redemption_code', 'user__email', 'user__first_name', 'user__last_name', 'catalog_item__name']
+    ordering_fields = ['created_at', 'points_spent', 'status', 'fulfilled_at']
+    ordering = ['-created_at']
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
@@ -276,11 +369,14 @@ class AdminRewardRedemptionViewSet(viewsets.ReadOnlyModelViewSet):
         )
         status_param = self.request.query_params.get('status')
         code = self.request.query_params.get('code')
+        user_id = self.request.query_params.get('user_id')
 
         if status_param:
             qs = qs.filter(status=status_param)
         if code:
             qs = qs.filter(redemption_code__iexact=code.strip())
+        if user_id:
+            qs = qs.filter(user_id=user_id)
 
         return qs
 
@@ -376,10 +472,22 @@ class AdminRewardWalletViewSet(mixins.ListModelMixin, mixins.RetrieveModelMixin,
     """
     serializer_class = RewardWalletSerializer
     permission_classes = [IsAuthenticated, IsRewardStaffOrAdmin]
+    pagination_class = RewardPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['user__email', 'user__first_name', 'user__last_name', 'current_tier__name']
+    ordering_fields = ['balance', 'lifetime_earned', 'lifetime_redeemed', 'created_at', 'updated_at']
+    ordering = ['-lifetime_earned']
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        return RewardWallet.objects.filter(tenant=tenant).select_related('user', 'current_tier')
+        qs = RewardWallet.all_objects.filter(tenant=tenant).select_related('user', 'current_tier')
+        current_tier_id = self.request.query_params.get('current_tier_id')
+        user_id = self.request.query_params.get('user_id')
+        if current_tier_id:
+            qs = qs.filter(current_tier_id=current_tier_id)
+        if user_id:
+            qs = qs.filter(user_id=user_id)
+        return qs
 
     def perform_update(self, serializer):
         wallet = self.get_object()
@@ -430,10 +538,33 @@ class AdminRewardTransactionViewSet(viewsets.ReadOnlyModelViewSet):
     """
     serializer_class = RewardTransactionSerializer
     permission_classes = [IsAuthenticated, IsRewardAdminOrManager]
+    pagination_class = RewardPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['user__email', 'user__first_name', 'user__last_name', 'rule__name', 'action_type', 'event_record__event_type']
+    ordering_fields = ['created_at', 'action_type', 'result_status', 'rule_version']
+    ordering = ['-created_at']
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        return RewardTransaction.objects.filter(tenant=tenant).select_related('user', 'rule')
+        qs = RewardTransaction.all_objects.filter(tenant=tenant).select_related('user', 'rule', 'event_record')
+        result_status = self.request.query_params.get('result_status')
+        event_type = self.request.query_params.get('event_type')
+        action_type = self.request.query_params.get('action_type')
+        user_id = self.request.query_params.get('user_id')
+        rule_id = self.request.query_params.get('rule_id')
+
+        if result_status:
+            qs = qs.filter(result_status=result_status)
+        if event_type:
+            qs = qs.filter(event_record__event_type=event_type)
+        if action_type:
+            qs = qs.filter(action_type=action_type)
+        if user_id:
+            qs = qs.filter(user_id=user_id)
+        if rule_id:
+            qs = qs.filter(rule_id=rule_id)
+
+        return qs
 
 
 class AdminRewardAnalyticsView(APIView):
@@ -445,22 +576,22 @@ class AdminRewardAnalyticsView(APIView):
     def get(self, request):
         tenant = get_request_tenant(request)
 
-        wallets_agg = RewardWallet.objects.filter(tenant=tenant).aggregate(
+        wallets_agg = RewardWallet.all_objects.filter(tenant=tenant).aggregate(
             total_active_points=Sum('balance'),
             total_lifetime_earned=Sum('lifetime_earned'),
             total_lifetime_redeemed=Sum('lifetime_redeemed'),
             member_count=Count('id')
         )
 
-        active_rules_count = RewardRule.objects.filter(tenant=tenant, status='active').count()
-        badges_awarded_count = UserBadge.objects.filter(tenant=tenant).count()
-        pending_redemptions_count = RewardRedemption.objects.filter(tenant=tenant, status='PENDING').count()
+        active_rules_count = RewardRule.all_objects.filter(tenant=tenant, status='active').count()
+        badges_awarded_count = UserBadge.all_objects.filter(tenant=tenant).count()
+        pending_redemptions_count = RewardRedemption.all_objects.filter(tenant=tenant, status='PENDING').count()
 
-        top_members = list(RewardWallet.objects.filter(tenant=tenant).select_related('user').order_by('-lifetime_earned')[:5].values(
+        top_members = list(RewardWallet.all_objects.filter(tenant=tenant).select_related('user').order_by('-lifetime_earned')[:5].values(
             'user__email', 'balance', 'lifetime_earned'
         ))
 
-        successful_rules = list(RewardTransaction.objects.filter(
+        successful_rules = list(RewardTransaction.all_objects.filter(
             tenant=tenant, result_status='SUCCESS'
         ).values('rule__name', 'rule__program__name').annotate(
             execution_count=Count('id')
@@ -496,7 +627,7 @@ class ClientRewardWalletView(APIView):
         wallet = RewardWalletService.get_or_create_wallet(tenant_id=tenant.id, user=user)
 
         # Calculate next tier goal if available
-        next_tier = RewardTier.objects.filter(
+        next_tier = RewardTier.all_objects.filter(
             tenant=tenant,
             threshold_points__gt=wallet.lifetime_earned
         ).order_by('threshold_points').first()
@@ -532,12 +663,32 @@ class ClientRewardLedgerView(APIView):
 
     def get(self, request):
         tenant = get_request_tenant(request)
-        entries = RewardPointLedger.objects.filter(
+        qs = RewardPointLedger.all_objects.filter(
             tenant=tenant,
             user=request.user
-        ).order_by('-created_at')[:50]
+        )
+        tx_type = request.query_params.get('transaction_type') or request.query_params.get('entry_type')
+        if tx_type:
+            qs = qs.filter(transaction_type__iexact=tx_type.strip())
 
-        return Response(RewardPointLedgerSerializer(entries, many=True).data)
+        search = request.query_params.get('search')
+        if search:
+            qs = qs.filter(Q(description__icontains=search) | Q(transaction_type__icontains=search))
+
+        ordering = request.query_params.get('ordering', '-created_at')
+        if ordering in ['created_at', '-created_at', 'amount', '-amount', 'balance_after', '-balance_after']:
+            qs = qs.order_by(ordering)
+        else:
+            qs = qs.order_by('-created_at')
+
+        paginator = RewardPagination()
+        page = paginator.paginate_queryset(qs, request, view=self)
+        if page is not None:
+            serializer = RewardPointLedgerSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+
+        serializer = RewardPointLedgerSerializer(qs, many=True)
+        return Response(serializer.data)
 
 
 class ClientBadgeView(APIView):
@@ -550,7 +701,7 @@ class ClientBadgeView(APIView):
         user = request.user
         tenant = get_request_tenant(request)
 
-        earned_user_badges = UserBadge.objects.filter(
+        earned_user_badges = UserBadge.all_objects.filter(
             tenant=tenant,
             user=user
         ).select_related('badge')
@@ -592,20 +743,44 @@ class ClientRewardStoreViewSet(viewsets.ReadOnlyModelViewSet):
     """
     serializer_class = RewardCatalogItemSerializer
     permission_classes = [IsAuthenticated, IsRewardClient]
+    pagination_class = RewardPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['name', 'description']
+    ordering_fields = ['points_cost', 'name', 'created_at']
+    ordering = ['points_cost']
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        return RewardCatalogItem.all_objects.filter(
+        qs = RewardCatalogItem.all_objects.filter(
             tenant=tenant,
             is_active=True
         ).filter(
             Q(stock_quantity__isnull=True) | Q(stock_quantity__gt=0)
         ).select_related('package_type')
 
+        item_type = self.request.query_params.get('item_type')
+        if item_type:
+            qs = qs.filter(item_type=item_type)
+
+        return qs
+
     def list(self, request, *args, **kwargs):
         tenant = get_request_tenant(request)
         queryset = self.filter_queryset(self.get_queryset())
         wallet = RewardWalletService.get_or_create_wallet(tenant_id=tenant.id, user=request.user)
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            items_data = serializer.data
+            for item in items_data:
+                item['can_afford'] = wallet.balance >= item['points_cost']
+                item['points_remaining_needed'] = max(0, item['points_cost'] - wallet.balance)
+
+            response = self.get_paginated_response(items_data)
+            response.data['wallet_balance'] = wallet.balance
+            response.data['catalog_items'] = items_data
+            return response
 
         serializer = self.get_serializer(queryset, many=True)
         items_data = serializer.data
@@ -617,7 +792,8 @@ class ClientRewardStoreViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response({
             'wallet_balance': wallet.balance,
-            'catalog_items': items_data
+            'catalog_items': items_data,
+            'results': items_data
         })
 
 
@@ -628,13 +804,22 @@ class ClientRedemptionViewSet(viewsets.ModelViewSet):
     """
     serializer_class = RewardRedemptionSerializer
     permission_classes = [IsAuthenticated, IsRewardClient]
+    pagination_class = RewardPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['redemption_code', 'catalog_item__name']
+    ordering_fields = ['created_at', 'points_spent', 'status']
+    ordering = ['-created_at']
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
-        return RewardRedemption.all_objects.filter(
+        qs = RewardRedemption.all_objects.filter(
             tenant=tenant,
             user=self.request.user
         ).select_related('catalog_item', 'catalog_item__package_type', 'fulfilled_by')
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param)
+        return qs
 
     def create(self, request, *args, **kwargs):
         tenant = get_request_tenant(request)
@@ -699,7 +884,7 @@ class ClientReferralView(APIView):
         code = f"REF-{user.id.hex[:8].upper()}"
         base_url = request.build_absolute_uri('/')[:-1]
 
-        referral_count = ProcessedRewardEvent.objects.filter(
+        referral_count = ProcessedRewardEvent.all_objects.filter(
             tenant=tenant,
             event_type='referral.completed',
             payload__referrer_id=str(user.id)
