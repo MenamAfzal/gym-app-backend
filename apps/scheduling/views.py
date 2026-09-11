@@ -210,6 +210,8 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         return [IsAuthenticated()]
 
     def get_queryset(self):
+        ClassSession.auto_complete_past_sessions()
+
         qs = ClassSession.objects.select_related(
             'template', 'template__location', 'room', 'staff', 'staff__profile'
         ).prefetch_related(
@@ -254,8 +256,10 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         # 3. Status filter
         status_param = params.get('status')
         if status_param and status_param.lower() != 'all':
-            if status_param.lower() == 'active':
+            if status_param.lower() in ['active', 'upcoming', 'scheduled']:
                 qs = qs.filter(status='scheduled')
+            elif status_param.lower() in ['past', 'completed', 'finished']:
+                qs = qs.filter(status='completed')
             else:
                 qs = qs.filter(status__iexact=status_param)
                 
@@ -671,6 +675,8 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        Appointment.auto_complete_past_appointments()
+
         user = self.request.user
         qs = Appointment.objects.select_related('provider', 'provider__profile', 'client', 'client__profile', 'location', 'room')
         if user.role == UserRole.CLIENT:
@@ -680,6 +686,15 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         elif user.role == UserRole.TRAINER:
             qs = qs.filter(Q(provider=user) | Q(location__location_staff__staff=user)).distinct()
         
+        status_param = self.request.query_params.get('status')
+        if status_param and status_param.lower() != 'all':
+            if status_param.lower() in ['active', 'upcoming', 'scheduled']:
+                qs = qs.filter(status='scheduled')
+            elif status_param.lower() in ['past', 'completed', 'finished']:
+                qs = qs.filter(status='completed')
+            else:
+                qs = qs.filter(status__iexact=status_param)
+
         client_id = self.request.query_params.get('client')
         if client_id:
             qs = qs.filter(client_id=client_id)

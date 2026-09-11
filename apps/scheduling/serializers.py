@@ -125,6 +125,13 @@ class ClassSessionSerializer(serializers.ModelSerializer):
             'created_at'
         ]
 
+    def to_representation(self, instance):
+        if instance.status == 'scheduled' and instance.end_at and instance.end_at <= timezone.now():
+            instance.status = 'completed'
+            if getattr(instance, 'pk', None):
+                ClassSession.all_objects.filter(id=instance.id, status='scheduled').update(status='completed')
+        return super().to_representation(instance)
+
     def get_staff_name(self, obj):
         if not obj.staff:
             return ""
@@ -492,6 +499,13 @@ class AppointmentSerializer(serializers.ModelSerializer):
             'start_at', 'end_at', 'status', 'credit_source', 'created_at'
         ]
         read_only_fields = ['id', 'client_email', 'provider_name', 'location_name', 'room_name', 'created_at']
+
+    def to_representation(self, instance):
+        if instance.status == 'scheduled' and instance.end_at and instance.end_at <= timezone.now():
+            instance.status = 'completed'
+            if getattr(instance, 'pk', None):
+                Appointment.all_objects.filter(id=instance.id, status='scheduled').update(status='completed')
+        return super().to_representation(instance)
 
     def validate(self, data):
         start = data.get('start_at')

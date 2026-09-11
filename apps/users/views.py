@@ -245,6 +245,8 @@ class UserViewSet(viewsets.ModelViewSet):
             user_ids = [u.id for u in page]
             
             from apps.scheduling.models import StaffLocation, StaffAvailability, ClassSession, Appointment, StaffClientAssignment, SubstituteRequest
+            ClassSession.auto_complete_past_sessions()
+            Appointment.auto_complete_past_appointments()
             
             # Fetch all staff location mappings
             staff_locs = StaffLocation.objects.filter(staff_id__in=user_ids).select_related('location')
@@ -313,6 +315,8 @@ class UserViewSet(viewsets.ModelViewSet):
         
         # Optimize queries by prefetching relationships for this single user
         from apps.scheduling.models import Booking, Appointment, Package, FacilityAccessLog, Waitlist, StaffLocation, StaffAvailability, StaffClientAssignment, SubstituteRequest, ClassSession
+        ClassSession.auto_complete_past_sessions()
+        Appointment.auto_complete_past_appointments()
         
         if user.role == UserRole.CLIENT:
             user.prefetched_bookings = list(Booking.objects.filter(client=user).select_related(
@@ -372,7 +376,10 @@ class UserViewSet(viewsets.ModelViewSet):
                         pkg.save()
                     
                     # Trigger waitlist promotion
-                    process_waitlist_promotion_job.delay(str(booking.session.id))
+                    try:
+                        process_waitlist_promotion_job.delay(str(booking.session.id))
+                    except Exception:
+                        pass
                     
                 return Response({
                     "detail": "User deactivated successfully.",

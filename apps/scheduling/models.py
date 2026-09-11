@@ -118,6 +118,27 @@ class ClassSession(UUIDMixin, TimestampMixin, TenantMixin):
     def __str__(self):
         return f"{self.template.name} on {self.start_at} ({self.status})"
 
+    @classmethod
+    def auto_complete_past_sessions(cls, tenant=None):
+        """
+        Bulk updates all past scheduled sessions whose end time has passed to 'completed'.
+        """
+        now = timezone.now()
+        qs = cls.all_objects.filter(status='scheduled', end_at__lte=now)
+        if tenant:
+            qs = qs.filter(tenant=tenant)
+        return qs.update(status='completed')
+
+    def refresh_status(self, save=True):
+        """
+        Checks if the session's scheduled end time has passed and transitions status to 'completed'.
+        """
+        if self.status == 'scheduled' and self.end_at and self.end_at <= timezone.now():
+            self.status = 'completed'
+            if save and self.pk:
+                ClassSession.all_objects.filter(id=self.id, status='scheduled').update(status='completed')
+        return self.status
+
     @property
     def is_full(self):
         return self.bookings.filter(status__in=['booked', 'checked_in', 'attended']).count() >= self.capacity
@@ -299,6 +320,27 @@ class Appointment(UUIDMixin, TimestampMixin, TenantMixin):
 
     def __str__(self):
         return f"1-on-1: {self.client.email} with {self.provider.email} at {self.start_at}"
+
+    @classmethod
+    def auto_complete_past_appointments(cls, tenant=None):
+        """
+        Bulk updates all past scheduled appointments whose end time has passed to 'completed'.
+        """
+        now = timezone.now()
+        qs = cls.all_objects.filter(status='scheduled', end_at__lte=now)
+        if tenant:
+            qs = qs.filter(tenant=tenant)
+        return qs.update(status='completed')
+
+    def refresh_status(self, save=True):
+        """
+        Checks if the appointment's scheduled end time has passed and transitions status to 'completed'.
+        """
+        if self.status == 'scheduled' and self.end_at and self.end_at <= timezone.now():
+            self.status = 'completed'
+            if save and self.pk:
+                Appointment.all_objects.filter(id=self.id, status='scheduled').update(status='completed')
+        return self.status
 
 
 class Waitlist(UUIDMixin, TimestampMixin, TenantMixin):

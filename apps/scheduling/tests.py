@@ -9,9 +9,10 @@ from apps.core.tenants.models import Tenant
 from apps.core.tenants.context import set_current_tenant
 from apps.scheduling.models import (
     Location, Room, ClassTemplate, RecurrenceRule, ClassSession,
-    Booking, PackageType, Package, Waitlist, CancellationPolicy
+    Booking, PackageType, Package, Waitlist, CancellationPolicy,
+    Appointment
 )
-from apps.scheduling.tasks import process_waitlist_promotion_job
+from apps.scheduling.tasks import process_waitlist_promotion_job, run_no_show_marking_job
 
 from unittest.mock import patch
 
@@ -901,6 +902,184 @@ class GymSchedulingSystemTestCase(TestCase):
         force_authenticate(request3, user=self.client1)
         response3 = view_create(request3)
         self.assertEqual(response3.status_code, 201)
+
+    def test_past_session_auto_transitions_to_completed_on_api_query(self):
+        """Verify that a session whose end time has passed automatically transitions from scheduled to completed."""
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.scheduling.views import ClassSessionViewSet
+        factory = APIRequestFactory()
+
+        now = timezone.now()
+        past_session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=now - timedelta(hours=2),
+            end_at=now - timedelta(hours=1),
+            capacity=10,
+            status='scheduled'
+        )
+
+        upcoming_session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=now + timedelta(hours=1),
+            end_at=now + timedelta(hours=2),
+            capacity=10,
+            status='scheduled'
+        )
+
+        view = ClassSessionViewSet.as_view({'get': 'list'})
+        request = factory.get('/api/scheduling/sessions/')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.owner)
+
+        response = view(request)
+        self.assertEqual(response.status_code, 200)
+
+        # In DB and API response, past session must now be 'completed'
+        past_session.refresh_from_db()
+        self.assertEqual(past_session.status, 'completed')
+
+        upcoming_session.refresh_from_db()
+        self.assertEqual(upcoming_session.status, 'scheduled')
+
+        results = response.data.get('results', response.data)
+        past_item = next(item for item in results if item['id'] == str(past_session.id))
+        upcoming_item = next(item for item in results if item['id'] == str(upcoming_session.id))
+
+        self.assertEqual(past_item['status'], 'completed')
+        self.assertEqual(upcoming_item['status'], 'scheduled')
+
+    def test_session_status_filtering_upcoming_and_past(self):
+        """Verify filtering sessions by status=scheduled/active/upcoming vs status=completed/past."""
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.scheduling.views import ClassSessionViewSet
+        factory = APIRequestFactory()
+
+        now = timezone.now()
+        past_session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=now - timedelta(hours=3),
+            end_at=now - timedelta(hours=2),
+            capacity=10,
+            status='scheduled'
+        )
+
+        upcoming_session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=now + timedelta(hours=4),
+            end_at=now + timedelta(hours=5),
+            capacity=10,
+            status='scheduled'
+        )
+
+        view = ClassSessionViewSet.as_view({'get': 'list'})
+
+        # Filter by scheduled/upcoming -> Should only contain upcoming_session
+        req_scheduled = factory.get('/api/scheduling/sessions/?status=scheduled')
+        req_scheduled.tenant = self.tenant
+        force_authenticate(req_scheduled, user=self.owner)
+        resp_scheduled = view(req_scheduled)
+        res_scheduled = resp_scheduled.data.get('results', resp_scheduled.data)
+        scheduled_ids = [item['id'] for item in res_scheduled]
+        self.assertIn(str(upcoming_session.id), scheduled_ids)
+        self.assertNotIn(str(past_session.id), scheduled_ids)
+
+        # Filter by past/completed -> Should contain past_session
+        req_past = factory.get('/api/scheduling/sessions/?status=past')
+        req_past.tenant = self.tenant
+        force_authenticate(req_past, user=self.owner)
+        resp_past = view(req_past)
+        res_past = resp_past.data.get('results', resp_past.data)
+        past_ids = [item['id'] for item in res_past]
+        self.assertIn(str(past_session.id), past_ids)
+        self.assertNotIn(str(upcoming_session.id), past_ids)
+
+    def test_refresh_status_model_method(self):
+        """Test ClassSession.refresh_status() and Appointment.refresh_status()."""
+        now = timezone.now()
+        past_session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=now - timedelta(hours=5),
+            end_at=now - timedelta(hours=4),
+            capacity=10,
+            status='scheduled'
+        )
+        self.assertEqual(past_session.status, 'scheduled')
+        new_status = past_session.refresh_status()
+        self.assertEqual(new_status, 'completed')
+        past_session.refresh_from_db()
+        self.assertEqual(past_session.status, 'completed')
+
+    def test_past_appointment_auto_transitions_to_completed(self):
+        """Verify that past appointments automatically transition to completed when queried."""
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.scheduling.views import AppointmentViewSet
+        factory = APIRequestFactory()
+
+        now = timezone.now()
+        past_appt = Appointment.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            provider=self.trainer,
+            location=self.location,
+            room=self.room,
+            start_at=now - timedelta(hours=3),
+            end_at=now - timedelta(hours=2),
+            status='scheduled'
+        )
+
+        view = AppointmentViewSet.as_view({'get': 'list'})
+        request = factory.get('/api/scheduling/appointments/')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.owner)
+        response = view(request)
+        self.assertEqual(response.status_code, 200)
+
+        past_appt.refresh_from_db()
+        self.assertEqual(past_appt.status, 'completed')
+
+    def test_run_no_show_marking_job_processes_all_past_sessions(self):
+        """Verify Celery task run_no_show_marking_job marks past sessions as completed and missed bookings as no_show."""
+        now = timezone.now()
+        session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=now - timedelta(hours=6),
+            end_at=now - timedelta(hours=5),
+            capacity=10,
+            status='scheduled'
+        )
+
+        booking = Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            session=session,
+            status='booked',
+            checked_in_at=None
+        )
+
+        run_no_show_marking_job()
+
+        session.refresh_from_db()
+        booking.refresh_from_db()
+        self.assertEqual(session.status, 'completed')
+        self.assertEqual(booking.status, 'no_show')
 
 
 

@@ -91,15 +91,17 @@ def process_waitlist_promotion_job(session_id):
 @shared_task
 def run_no_show_marking_job():
     """
-    Scheduled task. Checks sessions that have completed and marks missed bookings as no_show.
+    Scheduled task. Checks sessions and appointments that have completed,
+    updates their status to 'completed', and marks missed bookings as no_show.
     """
     logger.info("Running NoShowMarkingJob...")
     now = timezone.now()
     from apps.core.tenants.context import set_current_tenant, reset_current_tenant
+    from .models import Appointment
 
+    # 1. Process Class Sessions
     sessions = ClassSession.all_objects.filter(
         end_at__lte=now,
-        end_at__gte=now - timedelta(hours=4),
         status='scheduled'
     )
 
@@ -108,7 +110,7 @@ def run_no_show_marking_job():
         try:
             with transaction.atomic():
                 session.status = 'completed'
-                session.save()
+                session.save(update_fields=['status'])
 
                 # Find bookings that were not checked in
                 bookings = Booking.objects.select_for_update().filter(
@@ -118,10 +120,16 @@ def run_no_show_marking_job():
                 )
                 for booking in bookings:
                     booking.status = 'no_show'
-                    booking.save()
+                    booking.save(update_fields=['status'])
                     logger.info(f"Booking {booking.id} marked as no_show.")
         finally:
             reset_current_tenant(token)
+
+    # 2. Process Appointments
+    Appointment.all_objects.filter(
+        end_at__lte=now,
+        status='scheduled'
+    ).update(status='completed')
 
 
 def cancel_session_bookings_and_refund(session):
