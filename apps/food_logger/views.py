@@ -1115,6 +1115,8 @@ class AnalyzeFoodAPIView(APIView):
             user=request.user if request.user.is_authenticated else None,
             request_host=host_uri
         )
+        if result.get('status') == 'error' or result.get('is_food') is False:
+            return Response(result, status=status.HTTP_400_BAD_REQUEST)
         return Response(result, status=status.HTTP_200_OK)
 
     
