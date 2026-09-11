@@ -2208,6 +2208,28 @@ class RewardPaginationTests(RewardsBaseTestCase):
         self.assertEqual(res_event.data["count"], 12)
         self.assertTrue(all(r["event_type"] == "nutrition.water_logged" for r in res_event.data["results"]))
 
+    def test_admin_tiers_pagination_and_ordering(self):
+        """Verify AdminRewardTierViewSet pagination, search, and ordering without level field error."""
+        self.client.force_authenticate(user=self.owner1)
+
+        # Create tiers with varying threshold_points
+        for i in range(5):
+            RewardTier.objects.create(
+                tenant=self.tenant1,
+                program=self.program,
+                name=f"Tier {i}",
+                threshold_points=(i + 1) * 500,
+                multiplier=1.0 + (i * 0.1)
+            )
+
+        res = self.client.get("/api/v1/rewards/admin/tiers/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["count"], 5)
+        self.assertEqual(len(res.data["results"]), 5)
+        # Ensure ordered by threshold_points
+        points = [t["threshold_points"] for t in res.data["results"]]
+        self.assertEqual(points, sorted(points))
+
     def test_admin_catalog_and_client_store_pagination(self):
         """Verify Admin & Client Catalog items pagination and affordability indicators."""
         # Create 25 catalog items

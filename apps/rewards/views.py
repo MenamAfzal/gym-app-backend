@@ -282,8 +282,8 @@ class AdminRewardTierViewSet(viewsets.ModelViewSet):
     pagination_class = RewardPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['name', 'perks_description', 'program__name']
-    ordering_fields = ['name', 'threshold_points', 'multiplier', 'level', 'created_at']
-    ordering = ['threshold_points', 'level']
+    ordering_fields = ['name', 'threshold_points', 'multiplier', 'created_at']
+    ordering = ['threshold_points', 'name']
 
     def get_queryset(self):
         tenant = get_request_tenant(self.request)
