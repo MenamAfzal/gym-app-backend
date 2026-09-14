@@ -147,17 +147,33 @@ class RecurrenceRuleViewSet(viewsets.ModelViewSet):
         end_date = rule.end_date
         days_of_week = [d.lower() for d in rule.days_of_week]
         
+        # Determine location timezone
+        tz_name = getattr(rule.template.location, 'timezone', 'UTC') if rule.template and rule.template.location else 'UTC'
+        import zoneinfo
+        try:
+            loc_tz = zoneinfo.ZoneInfo(tz_name)
+        except Exception:
+            loc_tz = datetime_timezone.utc
+
+        now = timezone.now()
         current_date = start_date
         sessions_to_create = []
 
         while current_date <= end_date:
             weekday_name = current_date.strftime('%A').lower()
             if weekday_name in days_of_week:
-                # Build start_at and end_at in UTC
                 naive_start = datetime.combine(current_date, rule.start_time)
-                # Assume UTC timezone for storage
-                start_at = timezone.make_aware(naive_start, datetime_timezone.utc)
+                try:
+                    if loc_tz != datetime_timezone.utc:
+                        local_start = naive_start.replace(tzinfo=loc_tz)
+                        start_at = local_start.astimezone(datetime_timezone.utc)
+                    else:
+                        start_at = timezone.make_aware(naive_start, datetime_timezone.utc)
+                except Exception:
+                    start_at = timezone.make_aware(naive_start, datetime_timezone.utc)
+
                 end_at = start_at + timedelta(minutes=rule.template.duration_min)
+                initial_status = 'completed' if end_at <= now else 'scheduled'
 
                 # Check conflict
                 # Room Conflict check
@@ -189,7 +205,8 @@ class RecurrenceRuleViewSet(viewsets.ModelViewSet):
                         staff=rule.staff,
                         start_at=start_at,
                         end_at=end_at,
-                        capacity=rule.template.default_capacity
+                        capacity=rule.template.default_capacity,
+                        status=initial_status
                     )
                 )
 
@@ -208,6 +225,14 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsOwnerOrManager()]
         return [IsAuthenticated()]
+
+    def list(self, request, *args, **kwargs):
+        ClassSession.auto_complete_past_sessions()
+        return super().list(request, *args, **kwargs)
+
+    def retrieve(self, request, *args, **kwargs):
+        ClassSession.auto_complete_past_sessions()
+        return super().retrieve(request, *args, **kwargs)
 
     def get_queryset(self):
         ClassSession.auto_complete_past_sessions()
@@ -346,7 +371,19 @@ class BookingViewSet(viewsets.ModelViewSet):
             return BookingEditSerializer
         return BookingReadSerializer
 
+    def list(self, request, *args, **kwargs):
+        ClassSession.auto_complete_past_sessions()
+        Appointment.auto_complete_past_appointments()
+        return super().list(request, *args, **kwargs)
+
+    def retrieve(self, request, *args, **kwargs):
+        ClassSession.auto_complete_past_sessions()
+        Appointment.auto_complete_past_appointments()
+        return super().retrieve(request, *args, **kwargs)
+
     def get_queryset(self):
+        ClassSession.auto_complete_past_sessions()
+        Appointment.auto_complete_past_appointments()
         user = self.request.user
         qs = Booking.objects.select_related(
             'session', 'session__template', 'session__template__location',
@@ -673,6 +710,14 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     queryset = Appointment.all_objects.all()
     serializer_class = AppointmentSerializer
     permission_classes = [IsAuthenticated]
+
+    def list(self, request, *args, **kwargs):
+        Appointment.auto_complete_past_appointments()
+        return super().list(request, *args, **kwargs)
+
+    def retrieve(self, request, *args, **kwargs):
+        Appointment.auto_complete_past_appointments()
+        return super().retrieve(request, *args, **kwargs)
 
     def get_queryset(self):
         Appointment.auto_complete_past_appointments()

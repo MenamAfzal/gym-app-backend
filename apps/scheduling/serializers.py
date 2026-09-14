@@ -126,11 +126,37 @@ class ClassSessionSerializer(serializers.ModelSerializer):
         ]
 
     def to_representation(self, instance):
-        if instance.status == 'scheduled' and instance.end_at and instance.end_at <= timezone.now():
+        now = timezone.now()
+        is_past = (instance.end_at and instance.end_at <= now) or (not instance.end_at and instance.start_at and instance.start_at <= now)
+        if instance.status == 'scheduled' and is_past:
             instance.status = 'completed'
             if getattr(instance, 'pk', None):
                 ClassSession.all_objects.filter(id=instance.id, status='scheduled').update(status='completed')
         return super().to_representation(instance)
+
+    def create(self, validated_data):
+        start_at = validated_data.get('start_at')
+        end_at = validated_data.get('end_at')
+        template = validated_data.get('template')
+
+        if not end_at and template and start_at:
+            duration = template.duration_min or 60
+            end_at = start_at + timedelta(minutes=duration)
+            validated_data['end_at'] = end_at
+
+        if not validated_data.get('capacity') and template:
+            validated_data['capacity'] = template.default_capacity
+
+        now = timezone.now()
+        is_past = (end_at and end_at <= now) or (not end_at and start_at and start_at <= now)
+        if is_past and validated_data.get('status', 'scheduled') == 'scheduled':
+            validated_data['status'] = 'completed'
+
+        request = self.context.get('request')
+        if request and not validated_data.get('tenant'):
+            validated_data['tenant'] = getattr(request, 'tenant', None) or (request.user.tenant if getattr(request, 'user', None) else None)
+
+        return super().create(validated_data)
 
     def get_staff_name(self, obj):
         if not obj.staff:
@@ -501,11 +527,27 @@ class AppointmentSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'client_email', 'provider_name', 'location_name', 'room_name', 'created_at']
 
     def to_representation(self, instance):
-        if instance.status == 'scheduled' and instance.end_at and instance.end_at <= timezone.now():
+        now = timezone.now()
+        is_past = (instance.end_at and instance.end_at <= now) or (not instance.end_at and instance.start_at and instance.start_at <= now)
+        if instance.status == 'scheduled' and is_past:
             instance.status = 'completed'
             if getattr(instance, 'pk', None):
                 Appointment.all_objects.filter(id=instance.id, status='scheduled').update(status='completed')
         return super().to_representation(instance)
+
+    def create(self, validated_data):
+        start_at = validated_data.get('start_at')
+        end_at = validated_data.get('end_at')
+        now = timezone.now()
+        is_past = (end_at and end_at <= now) or (not end_at and start_at and start_at <= now)
+        if is_past and validated_data.get('status', 'scheduled') == 'scheduled':
+            validated_data['status'] = 'completed'
+
+        request = self.context.get('request')
+        if request and not validated_data.get('tenant'):
+            validated_data['tenant'] = getattr(request, 'tenant', None) or (request.user.tenant if getattr(request, 'user', None) else None)
+
+        return super().create(validated_data)
 
     def validate(self, data):
         start = data.get('start_at')

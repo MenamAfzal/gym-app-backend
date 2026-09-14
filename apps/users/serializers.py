@@ -435,6 +435,8 @@ class ClientDetailedSchedulingSerializer(serializers.ModelSerializer):
         } for p in all_packages]
 
     def get_bookings(self, obj):
+        from django.utils import timezone
+        now = timezone.now()
         all_bookings = getattr(obj, 'prefetched_bookings', list(obj.bookings.all()))
         all_bookings.sort(key=lambda b: b.session.start_at, reverse=True)
         return [{
@@ -447,12 +449,15 @@ class ClientDetailedSchedulingSerializer(serializers.ModelSerializer):
             "room_name": b.session.room.name if b.session.room else "",
             "staff_name": b.session.staff.profile.nickname if b.session.staff and hasattr(b.session.staff, 'profile') else (b.session.staff.email if b.session.staff else ""),
             "status": b.status,
+            "session_status": 'completed' if (b.session.status == 'scheduled' and ((b.session.end_at and b.session.end_at <= now) or (not b.session.end_at and b.session.start_at and b.session.start_at <= now))) else b.session.status,
             "join_mode": b.join_mode,
             "music_preference": b.music_preference,
             "checked_in_at": b.checked_in_at.isoformat() if b.checked_in_at else None
         } for b in all_bookings]
 
     def get_appointments(self, obj):
+        from django.utils import timezone
+        now = timezone.now()
         all_appointments = getattr(obj, 'prefetched_appointments', list(obj.appointments.all()))
         all_appointments.sort(key=lambda a: a.start_at, reverse=True)
         return [{
@@ -462,7 +467,7 @@ class ClientDetailedSchedulingSerializer(serializers.ModelSerializer):
             "end_at": a.end_at.isoformat(),
             "location_name": a.location.name,
             "room_name": a.room.name if a.room else "",
-            "status": a.status
+            "status": 'completed' if (a.status == 'scheduled' and ((a.end_at and a.end_at <= now) or (not a.end_at and a.start_at and a.start_at <= now))) else a.status
         } for a in all_appointments]
 
     def get_facility_access_logs(self, obj):
@@ -571,10 +576,11 @@ class StaffDetailedSchedulingSerializer(serializers.ModelSerializer):
         now = timezone.now()
         
         all_sessions = getattr(obj, 'prefetched_sessions', list(obj.sessions.all()))
-        past = [s for s in all_sessions if s.start_at <= now]
+        past = [s for s in all_sessions if s.start_at <= now or s.status == 'completed']
         if not past:
             return None
         prev_session = max(past, key=lambda s: s.start_at)
+        s_status = 'completed' if (prev_session.status == 'scheduled' and ((prev_session.end_at and prev_session.end_at <= now) or (not prev_session.end_at and prev_session.start_at and prev_session.start_at <= now))) else prev_session.status
         return {
             "session_id": str(prev_session.id),
             "class_name": prev_session.template.name,
@@ -582,7 +588,7 @@ class StaffDetailedSchedulingSerializer(serializers.ModelSerializer):
             "end_at": prev_session.end_at.isoformat(),
             "location_name": prev_session.template.location.name,
             "room_name": prev_session.room.name if prev_session.room else "",
-            "status": prev_session.status
+            "status": s_status
         }
 
     def get_next_appointment(self, obj):
@@ -614,6 +620,7 @@ class StaffDetailedSchedulingSerializer(serializers.ModelSerializer):
         if not past:
             return None
         prev_appt = max(past, key=lambda a: a.start_at)
+        a_status = 'completed' if (prev_appt.status == 'scheduled' and ((prev_appt.end_at and prev_appt.end_at <= now) or (not prev_appt.end_at and prev_appt.start_at and prev_appt.start_at <= now))) else prev_appt.status
         return {
             "appointment_id": str(prev_appt.id),
             "client_email": prev_appt.client.email,
@@ -622,7 +629,7 @@ class StaffDetailedSchedulingSerializer(serializers.ModelSerializer):
             "end_at": prev_appt.end_at.isoformat(),
             "location_name": prev_appt.location.name,
             "room_name": prev_appt.room.name if prev_appt.room else "",
-            "status": prev_appt.status
+            "status": a_status
         }
 
     def get_locations(self, obj):
@@ -653,6 +660,8 @@ class StaffDetailedSchedulingSerializer(serializers.ModelSerializer):
         } for ac in all_clients]
 
     def get_recent_classes_led(self, obj):
+        from django.utils import timezone
+        now = timezone.now()
         all_sessions = getattr(obj, 'prefetched_sessions', list(obj.sessions.all()))
         all_sessions.sort(key=lambda s: s.start_at, reverse=True)
         return [{
@@ -662,11 +671,13 @@ class StaffDetailedSchedulingSerializer(serializers.ModelSerializer):
             "end_at": s.end_at.isoformat(),
             "location_name": s.template.location.name,
             "room_name": s.room.name if s.room else "",
-            "status": s.status,
+            "status": 'completed' if (s.status == 'scheduled' and ((s.end_at and s.end_at <= now) or (not s.end_at and s.start_at and s.start_at <= now))) else s.status,
             "capacity": s.capacity
         } for s in all_sessions[:20]]
 
     def get_recent_appointments(self, obj):
+        from django.utils import timezone
+        now = timezone.now()
         all_appointments = getattr(obj, 'prefetched_provider_appointments', list(obj.provider_appointments.all()))
         all_appointments.sort(key=lambda a: a.start_at, reverse=True)
         return [{
@@ -677,7 +688,7 @@ class StaffDetailedSchedulingSerializer(serializers.ModelSerializer):
             "end_at": a.end_at.isoformat(),
             "location_name": a.location.name,
             "room_name": a.room.name if a.room else "",
-            "status": a.status
+            "status": 'completed' if (a.status == 'scheduled' and ((a.end_at and a.end_at <= now) or (not a.end_at and a.start_at and a.start_at <= now))) else a.status
         } for a in all_appointments[:20]]
 
     def get_substitute_requests_raised(self, obj):

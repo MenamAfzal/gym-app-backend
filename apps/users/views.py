@@ -154,6 +154,10 @@ class UserViewSet(viewsets.ModelViewSet):
                 Q(profile__phone_number__icontains=search_query)
             )
 
+        from apps.scheduling.models import ClassSession, Appointment
+        ClassSession.auto_complete_past_sessions()
+        Appointment.auto_complete_past_appointments()
+
         # Optimize queries by prefetching related data for the paginated page.
         # Pagination must happen first, so we only fetch related data for the active page!
         paginator = ClientDetailedSchedulingPagination()
@@ -162,7 +166,7 @@ class UserViewSet(viewsets.ModelViewSet):
         if page is not None:
             user_ids = [u.id for u in page]
             
-            from apps.scheduling.models import Booking, Appointment, Package, FacilityAccessLog, Waitlist
+            from apps.scheduling.models import Booking, Package, FacilityAccessLog, Waitlist
             
             # Fetch all matching packages
             packages = Package.objects.filter(client_id__in=user_ids).select_related('package_type')

@@ -1008,7 +1008,7 @@ class GymSchedulingSystemTestCase(TestCase):
     def test_refresh_status_model_method(self):
         """Test ClassSession.refresh_status() and Appointment.refresh_status()."""
         now = timezone.now()
-        past_session = ClassSession.objects.create(
+        past_session = ClassSession(
             tenant=self.tenant,
             template=self.template,
             room=self.room,
@@ -1019,8 +1019,11 @@ class GymSchedulingSystemTestCase(TestCase):
             status='scheduled'
         )
         self.assertEqual(past_session.status, 'scheduled')
-        new_status = past_session.refresh_status()
+        new_status = past_session.refresh_status(save=False)
         self.assertEqual(new_status, 'completed')
+        self.assertEqual(past_session.status, 'completed')
+
+        past_session.save()
         past_session.refresh_from_db()
         self.assertEqual(past_session.status, 'completed')
 

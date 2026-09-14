@@ -1,7 +1,7 @@
 from celery import shared_task
 from django.utils import timezone
 from datetime import timedelta
-from django.db import transaction
+from django.db import transaction, models
 import logging
 
 from .models import (
@@ -101,16 +101,16 @@ def run_no_show_marking_job():
 
     # 1. Process Class Sessions
     sessions = ClassSession.all_objects.filter(
-        end_at__lte=now,
-        status='scheduled'
+        models.Q(end_at__lte=now) | models.Q(end_at__isnull=True, start_at__lte=now)
     )
 
     for session in sessions:
         token = set_current_tenant(session.tenant)
         try:
             with transaction.atomic():
-                session.status = 'completed'
-                session.save(update_fields=['status'])
+                if session.status == 'scheduled':
+                    session.status = 'completed'
+                    session.save(update_fields=['status'])
 
                 # Find bookings that were not checked in
                 bookings = Booking.objects.select_for_update().filter(
@@ -127,8 +127,9 @@ def run_no_show_marking_job():
 
     # 2. Process Appointments
     Appointment.all_objects.filter(
-        end_at__lte=now,
-        status='scheduled'
+        models.Q(status='scheduled') & (
+            models.Q(end_at__lte=now) | models.Q(end_at__isnull=True, start_at__lte=now)
+        )
     ).update(status='completed')
 
 

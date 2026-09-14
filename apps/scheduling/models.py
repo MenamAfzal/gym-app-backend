@@ -118,13 +118,25 @@ class ClassSession(UUIDMixin, TimestampMixin, TenantMixin):
     def __str__(self):
         return f"{self.template.name} on {self.start_at} ({self.status})"
 
+    def save(self, *args, **kwargs):
+        if self.status == 'scheduled':
+            now = timezone.now()
+            if (self.end_at and self.end_at <= now) or (not self.end_at and self.start_at and self.start_at <= now):
+                self.status = 'completed'
+        super().save(*args, **kwargs)
+
     @classmethod
     def auto_complete_past_sessions(cls, tenant=None):
         """
         Bulk updates all past scheduled sessions whose end time has passed to 'completed'.
         """
         now = timezone.now()
-        qs = cls.all_objects.filter(status='scheduled', end_at__lte=now)
+        qs = cls.all_objects.filter(
+            models.Q(status='scheduled') & (
+                models.Q(end_at__lte=now) |
+                models.Q(end_at__isnull=True, start_at__lte=now)
+            )
+        )
         if tenant:
             qs = qs.filter(tenant=tenant)
         return qs.update(status='completed')
@@ -133,7 +145,9 @@ class ClassSession(UUIDMixin, TimestampMixin, TenantMixin):
         """
         Checks if the session's scheduled end time has passed and transitions status to 'completed'.
         """
-        if self.status == 'scheduled' and self.end_at and self.end_at <= timezone.now():
+        now = timezone.now()
+        is_past = (self.end_at and self.end_at <= now) or (not self.end_at and self.start_at and self.start_at <= now)
+        if self.status == 'scheduled' and is_past:
             self.status = 'completed'
             if save and self.pk:
                 ClassSession.all_objects.filter(id=self.id, status='scheduled').update(status='completed')
@@ -321,13 +335,25 @@ class Appointment(UUIDMixin, TimestampMixin, TenantMixin):
     def __str__(self):
         return f"1-on-1: {self.client.email} with {self.provider.email} at {self.start_at}"
 
+    def save(self, *args, **kwargs):
+        if self.status == 'scheduled':
+            now = timezone.now()
+            if (self.end_at and self.end_at <= now) or (not self.end_at and self.start_at and self.start_at <= now):
+                self.status = 'completed'
+        super().save(*args, **kwargs)
+
     @classmethod
     def auto_complete_past_appointments(cls, tenant=None):
         """
         Bulk updates all past scheduled appointments whose end time has passed to 'completed'.
         """
         now = timezone.now()
-        qs = cls.all_objects.filter(status='scheduled', end_at__lte=now)
+        qs = cls.all_objects.filter(
+            models.Q(status='scheduled') & (
+                models.Q(end_at__lte=now) |
+                models.Q(end_at__isnull=True, start_at__lte=now)
+            )
+        )
         if tenant:
             qs = qs.filter(tenant=tenant)
         return qs.update(status='completed')
@@ -336,7 +362,9 @@ class Appointment(UUIDMixin, TimestampMixin, TenantMixin):
         """
         Checks if the appointment's scheduled end time has passed and transitions status to 'completed'.
         """
-        if self.status == 'scheduled' and self.end_at and self.end_at <= timezone.now():
+        now = timezone.now()
+        is_past = (self.end_at and self.end_at <= now) or (not self.end_at and self.start_at and self.start_at <= now)
+        if self.status == 'scheduled' and is_past:
             self.status = 'completed'
             if save and self.pk:
                 Appointment.all_objects.filter(id=self.id, status='scheduled').update(status='completed')
