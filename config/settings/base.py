@@ -111,10 +111,15 @@ STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 
-# Media files (Uploaded by users)
+# Media files (Stored locally on server filesystem)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'mediafiles'
 BASE_URL = os.environ.get('BASE_URL', 'http://16.171.26.53')
+
+# Ensure local media directories exist
+os.makedirs(MEDIA_ROOT, exist_ok=True)
+for _sub_dir in ['meal_scans', 'recipe_images', 'beverage_images', 'profile_images', 'tenant_logos', 'badges', 'catalog', 'photos', 'videos', 'pending_uploads']:
+    os.makedirs(MEDIA_ROOT / _sub_dir, exist_ok=True)
 
 
 # Default primary key field type

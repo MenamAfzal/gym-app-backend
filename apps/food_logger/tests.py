@@ -170,3 +170,128 @@ class AIAnalyzeFoodAPITests(TestCase):
         self.assertGreater(result['calories'], 0)
         self.assertTrue(result['image'].startswith('/media/meal_scans/'))
 
+
+class LogFoodAPITests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            email='client_logger@test.com',
+            password='TestPassword123!',
+            role=UserRole.CLIENT
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def test_log_food_with_ai_analyzer_output(self):
+        """Verify logging food using the exact payload output structure from the AI analyzer."""
+        payload = {
+            "meal_type": "breakfast",
+            "date": "2026-09-13",
+            "serving": 1,
+            "food_item": {
+                "status": "success",
+                "is_food": True,
+                "message": "Meal analyzed successfully with AI",
+                "name": "Banana Fruit",
+                "calories": 105.0,
+                "protein": 1.3,
+                "carbs": 26.9,
+                "fats": 0.4,
+                "fiber": "3.1",
+                "sugars": "14.4",
+                "sodium": "1.2",
+                "potassium": "422.4",
+                "cholesterol": "0.0",
+                "saturated_fat": "0.1",
+                "serving_qty": "1",
+                "serving_unit": "medium (7\" to 7-7/8\" long)",
+                "serving_info": "1 medium (7\" to 7-7/8\" long) (118g)",
+                "serving_weight_grams": "118",
+                "image": "http://16.171.26.53/media/meal_scans/bc978241-6b2f-444c-8c22-66bc93c2944f.jpg?query=param&token=abcdef1234567890",
+                "tag_name": "banana fruit",
+                "brand_name_item_name": "Banana Fruit",
+                "locale": "en-US",
+                "nix_item_id": "kimi_86af7f6ef588",
+                "nix_brand_id": "kimi_ai_vision",
+                "items": [{"name": "Banana"}],
+                "foods": [{"name": "Banana"}],
+                "ai_provider": "kimi"
+            }
+        }
+
+        response = self.client.post(
+            "/api/v1/foodlogger/log-food/",
+            payload,
+            format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertIn("meal_totals", response.data)
+        self.assertEqual(response.data["meal_totals"]["calories"], 105.0)
+
+    def test_log_food_alias_route_foodloger(self):
+        """Verify POST /api/v1/foodloger/log-food/ (alias route) works without DataError."""
+        payload = {
+            "meal_type": "Lunch",
+            "date": "2026-09-13",
+            "serving": 2,
+            "food_item": {
+                "name": "Grilled Chicken Breast with Steamed Broccoli and Brown Rice",
+                "calories": 250.0,
+                "protein": 35.0,
+                "carbs": 15.0,
+                "fats": 4.0,
+                "serving_qty": "1",
+                "serving_unit": "portion (approx 250g with vegetables and dressing)",
+                "serving_info": "1 portion (approx 250g with vegetables and dressing)",
+                "image": "https://example-s3-bucket.s3.amazonaws.com/meals/photos/custom/2026/09/13/photo_with_long_url_parameter_query_string.jpg?auth=very_long_security_token_string_here",
+                "tag_name": "grilled chicken breast with steamed broccoli and brown rice"
+            }
+        }
+
+        response = self.client.post(
+            "/api/v1/foodloger/log-food/",
+            payload,
+            format="json"
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["meal_totals"]["calories"], 500.0)
+        self.assertEqual(response.data["meal_totals"]["protein"], 70.0)
+
+    def test_log_food_flat_payload_and_retrieve_and_delete(self):
+        """Verify flat payload logging, GET /log-food/?date=..., and DELETE item."""
+        flat_payload = {
+            "meal_type": "dinner",
+            "food_name": "Salmon Fillet",
+            "calories": 300,
+            "protein": 34,
+            "carbs": 0,
+            "fats": 18,
+            "serving": 1,
+            "date": "2026-09-13"
+        }
+
+        # 1. Log food
+        post_resp = self.client.post(
+            "/api/v1/foodlogger/log-food/",
+            flat_payload,
+            format="json"
+        )
+        self.assertEqual(post_resp.status_code, status.HTTP_201_CREATED)
+
+        # 2. Get logged meals
+        get_resp = self.client.get(
+            "/api/v1/foodlogger/log-food/?date=2026-09-13"
+        )
+        self.assertEqual(get_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(get_resp.data["meals"]), 1)
+        logged_items = get_resp.data["meals"][0]["items"]
+        self.assertEqual(len(logged_items), 1)
+        item_id = logged_items[0]["id"]
+
+        # 3. Delete item
+        del_resp = self.client.delete(
+            f"/api/v1/foodlogger/log-food/?logged_meal_id={item_id}"
+        )
+        self.assertEqual(del_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(del_resp.data["detail"], "Item deleted successfully")
+
+

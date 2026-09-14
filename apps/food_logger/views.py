@@ -1,4 +1,6 @@
 import io
+import json
+import re
 from datetime import date
 from zoneinfo import ZoneInfo
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
@@ -7,7 +9,7 @@ from .permissions import IsOwnerOrStaffReadOnly
 from django.core.files.base import ContentFile
 from django.db.models import Prefetch
 from django.shortcuts import get_object_or_404
-from django.utils.dateparse import parse_date
+from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -29,8 +31,8 @@ from rest_framework import generics, permissions, filters
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 
-# Fallback S3 upload helper for recipe images
-def food_loger_s3(file_obj, obj):
+# Local file upload helper for recipe images (saved to local media directory)
+def save_local_recipe_image(file_obj, obj):
     import os
     import uuid
     from django.core.files.storage import FileSystemStorage
@@ -50,6 +52,9 @@ def food_loger_s3(file_obj, obj):
         obj.image = url
         obj.save()
     return url
+
+# Backward compatibility alias
+food_loger_s3 = save_local_recipe_image
 
 # Permission Classes
 def is_staff_user(user):
@@ -595,28 +600,162 @@ class GetAllFoodApiView(APIView):
         serializer = UserFoodSerializer(paginated_qs, many=True)
         return paginator.get_paginated_response(serializer.data)
 
+def _safe_float(val, default=0.0):
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, str):
+        match = re.search(r'[-+]?\d*\.?\d+', val)
+        if match:
+            try:
+                return float(match.group(0))
+            except ValueError:
+                pass
+    return default
+
+
+def _safe_str(val, max_len=None):
+    if val is None:
+        return None
+    val_str = str(val).strip()
+    if max_len and len(val_str) > max_len:
+        return val_str[:max_len]
+    return val_str
+
+
+def sanitize_custom_food_data(raw_data, user, date_val=None):
+    """
+    Safely extracts and maps raw food payloads (from AI scanner, Nutritionix, or frontend)
+    to valid CustomFood fields, preventing DataError and unexpected argument TypeErrors.
+    """
+    if not isinstance(raw_data, dict):
+        if isinstance(raw_data, str):
+            try:
+                raw_data = json.loads(raw_data)
+            except Exception:
+                raw_data = {"name": raw_data}
+        else:
+            return None
+
+    if not isinstance(raw_data, dict):
+        return None
+
+    # If payload is wrapped inside "food_item", unwrap if needed
+    if "food_item" in raw_data and isinstance(raw_data["food_item"], dict):
+        inner = raw_data["food_item"]
+        merged = dict(inner)
+        for k, v in raw_data.items():
+            if k != "food_item" and v is not None:
+                merged[k] = v
+        raw_data = merged
+
+    name = _safe_str(
+        raw_data.get("name")
+        or raw_data.get("food_name")
+        or raw_data.get("food_item_name")
+        or "Custom Food",
+        max_len=255
+    )
+
+    calories = _safe_float(raw_data.get("calories", 0.0))
+    protein = _safe_float(raw_data.get("protein", 0.0))
+    carbs = _safe_float(raw_data.get("carbs", 0.0))
+    fats = _safe_float(raw_data.get("fats", raw_data.get("fat", 0.0)))
+
+    image = _safe_str(raw_data.get("image") or raw_data.get("image_url") or raw_data.get("photo"))
+
+    serving_qty = _safe_str(raw_data.get("serving_qty") or "1", max_len=100)
+    serving_unit = _safe_str(raw_data.get("serving_unit") or "serving", max_len=100)
+    serving_info = _safe_str(
+        raw_data.get("serving_info") or f"{serving_qty} {serving_unit}",
+        max_len=255
+    )
+    serving_weight_grams = _safe_str(raw_data.get("serving_weight_grams"), max_len=100)
+
+    cholesterol = _safe_str(raw_data.get("cholesterol"), max_len=100)
+    saturated_fat = _safe_str(raw_data.get("saturated_fat"), max_len=100)
+    sodium = _safe_str(raw_data.get("sodium"), max_len=100)
+    sugars = _safe_str(raw_data.get("sugars"), max_len=100)
+    potassium = _safe_str(raw_data.get("potassium"), max_len=100)
+    fiber = _safe_str(raw_data.get("fiber"), max_len=100)
+
+    brand_name_item_name = _safe_str(
+        raw_data.get("brand_name_item_name") or name,
+        max_len=255
+    )
+    tag_name = _safe_str(raw_data.get("tag_name") or name.lower(), max_len=100)
+    tag_id = _safe_str(raw_data.get("tag_id"), max_len=100)
+    locale = _safe_str(raw_data.get("locale") or "en-US", max_len=100)
+    nix_item_id = _safe_str(raw_data.get("nix_item_id"), max_len=100)
+    nix_brand_id = _safe_str(raw_data.get("nix_brand_id"), max_len=100)
+
+    is_custom_food = bool(raw_data.get("is_custom_food", True))
+    date = date_val or timezone.localdate()
+
+    return {
+        "user": user,
+        "is_custom_food": is_custom_food,
+        "name": name,
+        "calories": calories,
+        "protein": protein,
+        "carbs": carbs,
+        "fats": fats,
+        "image": image,
+        "serving_qty": serving_qty,
+        "serving_unit": serving_unit,
+        "serving_info": serving_info,
+        "serving_weight_grams": serving_weight_grams,
+        "cholesterol": cholesterol,
+        "saturated_fat": saturated_fat,
+        "sodium": sodium,
+        "sugars": sugars,
+        "potassium": potassium,
+        "fiber": fiber,
+        "brand_name_item_name": brand_name_item_name,
+        "tag_name": tag_name,
+        "tag_id": tag_id,
+        "locale": locale,
+        "nix_item_id": nix_item_id,
+        "nix_brand_id": nix_brand_id,
+        "date": date,
+    }
+
+
 class LogFoodAPIView(APIView):
     permission_classes = [IsAuthenticated, IsClientUser]
 
     def post(self, request):
         user = request.user
-        meal_type = request.data.get("meal_type")
-        serving = float(request.data.get("serving", 1))
-         
+
+        # 1. Parse & normalize serving
+        try:
+            serving = float(request.data.get("serving", 1) or 1)
+        except (ValueError, TypeError):
+            serving = 1.0
+        if serving <= 0:
+            serving = 1.0
+
+        # 2. Parse & normalize meal_type
+        raw_meal_type = request.data.get("meal_type")
+        if raw_meal_type and isinstance(raw_meal_type, str):
+            meal_type = raw_meal_type.strip().lower()
+        else:
+            meal_type = "breakfast"
+
+        # 3. Parse date
         date_input = request.data.get("date") or request.query_params.get("date")
         today = None
         if date_input:
-            from django.utils.dateparse import parse_date, parse_datetime
             today = parse_date(str(date_input))
             if not today:
                 parsed_dt = parse_datetime(str(date_input))
                 if parsed_dt:
                     today = parsed_dt.date()
-        
         if not today:
             today = timezone.localdate()
 
-        # 1. Create/Get logged meal for today
+        # 4. Create/Get logged meal for date
         logged_meal, _ = LoggedMeal.objects.get_or_create(
             user=user,
             meal_type=meal_type,
@@ -624,106 +763,125 @@ class LogFoodAPIView(APIView):
         )
 
         # Running totals
-        total_calories = total_protein = total_carbs = total_fats = 0
+        total_calories = 0.0
+        total_protein = 0.0
+        total_carbs = 0.0
+        total_fats = 0.0
 
-        # Map request keys → model
+        # Helper to log item
+        def log_item(item, extra_kwargs=None):
+            nonlocal total_calories, total_protein, total_carbs, total_fats
+            if extra_kwargs is None:
+                extra_kwargs = {}
+
+            item_name = _safe_str(getattr(item, "name", "") or "Meal Item", max_len=255)
+            cal = _safe_float(getattr(item, "calories", 0.0)) * serving
+            prot = _safe_float(getattr(item, "protein", 0.0)) * serving
+            carb = _safe_float(getattr(item, "carbs", 0.0)) * serving
+            fat = _safe_float(getattr(item, "fats", getattr(item, "fat", 0.0))) * serving
+
+            LoggedMealItem.objects.create(
+                logged_meal=logged_meal,
+                name=item_name,
+                calories=cal,
+                protein=prot,
+                carbs=carb,
+                fats=fat,
+                logged_serving_qty=serving,
+                **extra_kwargs
+            )
+
+            total_calories += cal
+            total_protein += prot
+            total_carbs += carb
+            total_fats += fat
+
+        # 5. Process mapped sources (staff_recipe_item, user_recipe_item, meal)
         source_map = {
             "staff_recipe_item": StaffRecipeItem,
             "user_recipe_item": UserRecipeItem,
             "meal": MealItem,
         }
-
-        # ---------- Helper to log item ----------
-        def log_item(item, extra_kwargs):
-            nonlocal total_calories, total_protein, total_carbs, total_fats
-
-            # Multiply nutrients by servings
-            calories = item.calories * serving
-            protein = item.protein * serving
-            carbs = item.carbs * serving
-            fats = item.fats * serving
-
-            # Create LoggedMealItem
-            LoggedMealItem.objects.create(
-                logged_meal=logged_meal,
-                name=item.name,
-                calories=calories,
-                protein=protein,
-                carbs=carbs,
-                fats=fats,
-                logged_serving_qty=serving,
-                **extra_kwargs
-            )
-
-            # Update totals
-            total_calories += calories
-            total_protein += protein
-            total_carbs += carbs
-            total_fats += fats
-
-        # ---------- Process mapped sources ----------
         for key, model in source_map.items():
             ids = request.data.get(key)
             if not ids:
                 continue
+            if isinstance(ids, (int, str)):
+                ids = [ids]
+            elif isinstance(ids, list):
+                ids = [i for i in ids if i is not None]
+            else:
+                continue
 
             items = model.objects.filter(id__in=ids)
             if not items:
-                return Response({"detail": "Item not found"}, status=404)
+                return Response({"detail": f"{key} not found"}, status=status.HTTP_404_NOT_FOUND)
 
             for item in items:
                 log_item(item, {key: item})
 
-        # ---------- Food Suggestion ----------
+        # 6. Process Food Suggestion
         suggestion_id = request.data.get("suggestion")
         if suggestion_id:
-            suggestion = get_object_or_404(FoodSuggestion, id=suggestion_id)
-            log_item(suggestion, {"suggestion": suggestion})
+            suggestion = FoodSuggestion.objects.filter(id=suggestion_id).first()
+            if suggestion:
+                log_item(suggestion, {"suggestion": suggestion})
 
-        # ---------- Custom food payload ----------
+        # 7. Process Custom food payload (supports raw dict, AI scan result, foods/items lists, flat fields)
         food_item_data = request.data.get("food_item")
+        food_items_list = request.data.get("food_items") or request.data.get("foods")
         food_id = request.data.get("food")
 
-        # Support direct flat payload: {"food_name": "...", "calories": 450, ...} or {"name": "...", ...}
-        if not food_item_data and not food_id:
+        # If food_id was provided as an int/str referring to CustomFood
+        if food_id and isinstance(food_id, (int, str)):
+            food_item = CustomFood.objects.filter(id=food_id).first()
+            if food_item:
+                log_item(food_item, {"food": food_item})
+        elif isinstance(food_id, dict):
+            food_item_data = food_id
+
+        # If food_item is a list
+        if isinstance(food_item_data, list):
+            food_items_list = food_item_data
+            food_item_data = None
+
+        if food_items_list and isinstance(food_items_list, list):
+            for raw_item in food_items_list:
+                cleaned = sanitize_custom_food_data(raw_item, user=user, date_val=today)
+                if cleaned:
+                    custom_food = CustomFood.objects.create(**cleaned)
+                    log_item(custom_food, {"food": custom_food})
+        elif food_item_data:
+            cleaned = sanitize_custom_food_data(food_item_data, user=user, date_val=today)
+            if cleaned:
+                custom_food = CustomFood.objects.create(**cleaned)
+                log_item(custom_food, {"food": custom_food})
+        elif not food_id:
+            # Check for direct flat payload e.g. {"name": "...", "calories": 450, ...} or {"food_name": "...", ...}
             flat_name = request.data.get("food_name") or request.data.get("name")
             flat_calories = request.data.get("calories")
             if flat_name or flat_calories is not None:
-                food_item_data = {
-                    "name": flat_name or "Custom Food",
-                    "calories": float(flat_calories or 0),
-                    "protein": float(request.data.get("protein", 0)),
-                    "carbs": float(request.data.get("carbs", 0)),
-                    "fats": float(request.data.get("fats", request.data.get("fat", 0))),
-                    "is_custom_food": True,
-                }
+                cleaned = sanitize_custom_food_data(request.data, user=user, date_val=today)
+                if cleaned:
+                    custom_food = CustomFood.objects.create(**cleaned)
+                    log_item(custom_food, {"food": custom_food})
 
-        if food_item_data:
-            food_item_data["user"] = user
-            custom_food = CustomFood.objects.create(**food_item_data)
-            log_item(custom_food, {"food": custom_food})
-
-        elif food_id:
-            food_item = get_object_or_404(CustomFood, id=food_id)
-            log_item(food_item, {"food": food_item})
-
-        # ---------- Update LoggedMeal totals ----------
-        logged_meal.total_calories += total_calories
-        logged_meal.total_protein += total_protein
-        logged_meal.total_carbs += total_carbs
-        logged_meal.total_fats += total_fats
+        # 8. Update LoggedMeal totals safely
+        logged_meal.total_calories = (logged_meal.total_calories or 0.0) + total_calories
+        logged_meal.total_protein = (logged_meal.total_protein or 0.0) + total_protein
+        logged_meal.total_carbs = (logged_meal.total_carbs or 0.0) + total_carbs
+        logged_meal.total_fats = (logged_meal.total_fats or 0.0) + total_fats
         logged_meal.save()
 
-        # ---------- Update nutrition goal ----------
+        # 9. Update nutrition goal safely
         goal, _ = UserNutritionGoal.objects.get_or_create(user=user, date=today)
-
-        goal.daily_calories -= total_calories
-        goal.daily_protein -= total_protein
-        goal.daily_carbs -= total_carbs
-        goal.daily_fat -= total_fats
+        goal.daily_calories = (goal.daily_calories or 0.0) - total_calories
+        goal.daily_protein = (goal.daily_protein or 0.0) - total_protein
+        goal.daily_carbs = (goal.daily_carbs or 0.0) - total_carbs
+        goal.daily_fat = (goal.daily_fat or 0.0) - total_fats
         goal.save()
 
-        # Emit Rewards Event
+        # 10. Emit Rewards Event
         try:
             from apps.rewards.events import RewardEvent
             from apps.rewards.services import RewardEngineService
@@ -738,7 +896,7 @@ class LogFoodAPIView(APIView):
                     tenant_id=tenant_id,
                     user_id=user.id,
                     meal_id=logged_meal.id,
-                    meal_type=meal_type or "meal",
+                    meal_type=meal_type,
                     calories=reward_calories
                 ))
         except Exception:
@@ -758,14 +916,13 @@ class LogFoodAPIView(APIView):
                 "carbs": goal.daily_carbs,
                 "fat": goal.daily_fat,
             }
-        }, status=201)
+        }, status=status.HTTP_201_CREATED)
 
     def get(self, request):
         user = request.user
         today_input = request.query_params.get("date")
         today = None
         if today_input:
-            from django.utils.dateparse import parse_date, parse_datetime
             today = parse_date(str(today_input))
             if not today:
                 parsed_dt = parse_datetime(str(today_input))
@@ -782,6 +939,7 @@ class LogFoodAPIView(APIView):
                 "items__user_recipe_item",
                 "items__meal",
                 "items__suggestion",
+                "items__food",
             )
             .order_by("meal_type")
         )
@@ -803,27 +961,27 @@ class LogFoodAPIView(APIView):
         logged_meal = logged_item.logged_meal
 
         # Store values before deletion
-        calories = logged_item.calories
-        protein = logged_item.protein
-        carbs = logged_item.carbs
-        fats = logged_item.fats
+        calories = _safe_float(logged_item.calories)
+        protein = _safe_float(logged_item.protein)
+        carbs = _safe_float(logged_item.carbs)
+        fats = _safe_float(logged_item.fats)
 
         # Delete item
         logged_item.delete()
 
         # Update meal totals
-        logged_meal.total_calories -= calories
-        logged_meal.total_protein -= protein
-        logged_meal.total_carbs -= carbs
-        logged_meal.total_fats -= fats
+        logged_meal.total_calories = max(0.0, (logged_meal.total_calories or 0.0) - calories)
+        logged_meal.total_protein = max(0.0, (logged_meal.total_protein or 0.0) - protein)
+        logged_meal.total_carbs = max(0.0, (logged_meal.total_carbs or 0.0) - carbs)
+        logged_meal.total_fats = max(0.0, (logged_meal.total_fats or 0.0) - fats)
         logged_meal.save()
 
         # Update user goal
         goal, _ = UserNutritionGoal.objects.get_or_create(user=user, date=logged_meal.created_at)
-        goal.daily_calories += calories
-        goal.daily_protein += protein
-        goal.daily_carbs += carbs
-        goal.daily_fat += fats
+        goal.daily_calories = (goal.daily_calories or 0.0) + calories
+        goal.daily_protein = (goal.daily_protein or 0.0) + protein
+        goal.daily_carbs = (goal.daily_carbs or 0.0) + carbs
+        goal.daily_fat = (goal.daily_fat or 0.0) + fats
         goal.save()
 
         # Optional: if no more items, delete empty meal

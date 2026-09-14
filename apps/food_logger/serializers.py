@@ -247,7 +247,7 @@ def build_item_serializer(model_class):
                 "id", "name", "protein", "carbs", "fats", "calories", "cholesterol",
                 "saturated_fat", "serving_weight_grams", "fiber",
                 "serving_qty", "serving_unit", "serving_info",
-                "potassium", "sodium", "sugars"
+                "potassium", "sodium", "sugars", "image"
             ]
     return BaseSerializer
 

@@ -7,7 +7,7 @@ from rest_framework.views import APIView
 
 from django.contrib.auth import get_user_model
 User = get_user_model()
-def upload_image_to_s3(file, obj):
+def upload_local_beverage_image(file, obj):
     import os
     import uuid
     from django.core.files.storage import FileSystemStorage
@@ -27,7 +27,7 @@ def upload_image_to_s3(file, obj):
     obj.save()
     return url
 
-def delete_s3_file_threaded(url):
+def delete_local_file(url):
     import os
     from django.conf import settings
     if not url:
@@ -41,6 +41,10 @@ def delete_s3_file_threaded(url):
                 os.remove(file_path)
     except Exception:
         pass
+
+# Backward compatibility aliases
+upload_image_to_s3 = upload_local_beverage_image
+delete_s3_file_threaded = delete_local_file
 from .models import CustomBeverage, DailyNutritionProgress, MealLogs, FoodEntry, NutritionGoal, DrinkNutrients
 from datetime import datetime, date
 from django.utils.dateparse import parse_date
