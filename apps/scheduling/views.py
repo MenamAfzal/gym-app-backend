@@ -14,13 +14,14 @@ import logging
 from datetime import datetime, timedelta, time, timezone as datetime_timezone
 
 from .models import (
-    Location, Room, StaffLocation, StaffAvailability, ClassTemplate,
+    Location, Room, SpotType, RoomLayout, Spot, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
     StaffClientAssignment
 )
 from .serializers import (
-    LocationSerializer, RoomSerializer, StaffLocationSerializer,
+    LocationSerializer, RoomSerializer, SpotTypeSerializer, RoomLayoutSerializer,
+    RoomLayoutCreateSerializer, BookingChangeSpotSerializer, StaffLocationSerializer,
     StaffAvailabilitySerializer, ClassTemplateSerializer, RecurrenceRuleSerializer,
     ClassSessionSerializer, BookingCreateSerializer, BookingReadSerializer,
     BookingEditSerializer, AppointmentSerializer, WaitlistSerializer,
@@ -28,6 +29,7 @@ from .serializers import (
     PaymentSerializer, CancellationPolicySerializer,
     StaffAssignClientSerializer
 )
+from .services import create_layout, update_layout, change_booking_spot, SpotUnavailableError
 from .permissions import (
     IsAuthenticated, IsOwnerOrManager, IsGymStaffOrOwner, IsFrontDeskOrAdmin,
     IsInstructor, IsClient, IsAssignedClient
@@ -81,22 +83,140 @@ class RoomViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'restore']:
+            return [IsOwnerOrManager()]
+        return [IsAuthenticated()]
+
+    def get_queryset(self):
+        include_deleted = self.request.query_params.get('include_deleted') == '1'
+        if include_deleted:
+            qs = Room.objects.select_related('location').all()
+        else:
+            qs = Room.objects.alive().select_related('location')
+
+        user = self.request.user
+        if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
+            qs = qs.filter(location__location_staff__staff=user).distinct()
+            
+        location_id = self.kwargs.get('location_pk') or self.request.query_params.get('location')
+        if location_id:
+            qs = qs.filter(location_id=location_id)
+        return qs
+
+    def perform_create(self, serializer):
+        tenant = getattr(self.request, 'tenant', None) or self.request.user.tenant
+        location_pk = self.kwargs.get('location_pk')
+        if location_pk and not serializer.validated_data.get('location'):
+            serializer.save(tenant=tenant, location_id=location_pk)
+        else:
+            serializer.save(tenant=tenant)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsOwnerOrManager])
+    def restore(self, request, pk=None):
+        room = Room.all_objects.get(id=pk)
+        room.restore()
+        return Response(RoomSerializer(room).data)
+
+
+class SpotTypeViewSet(viewsets.ModelViewSet):
+    serializer_class = SpotTypeSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsOwnerOrManager()]
         return [IsAuthenticated()]
 
     def get_queryset(self):
-        qs = Room.objects.select_related('location').all()
-        user = self.request.user
-        
-        # Staff location segregation
-        if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
-            qs = qs.filter(location__location_staff__staff=user).distinct()
-            
+        qs = SpotType.objects.select_related('location').all()
         location_id = self.request.query_params.get('location')
         if location_id:
             qs = qs.filter(location_id=location_id)
         return qs
+
+    def perform_create(self, serializer):
+        tenant = getattr(self.request, 'tenant', None) or self.request.user.tenant
+        serializer.save(tenant=tenant)
+
+
+class RoomLayoutViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'restore']:
+            return [IsOwnerOrManager()]
+        return [IsAuthenticated()]
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return RoomLayoutCreateSerializer
+        return RoomLayoutSerializer
+
+    def get_queryset(self):
+        include_deleted = self.request.query_params.get('include_deleted') == '1'
+        if include_deleted:
+            qs = RoomLayout.objects.select_related('room', 'room__location')
+        else:
+            qs = RoomLayout.objects.alive().select_related('room', 'room__location')
+
+        qs = qs.prefetch_related('spots__spot_type')
+        room_id = self.kwargs.get('room_pk') or self.request.query_params.get('room')
+        if room_id:
+            qs = qs.filter(room_id=room_id)
+        return qs
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        tenant = getattr(request, 'tenant', None) or request.user.tenant
+        data = serializer.validated_data.copy()
+
+        if 'room_pk' in self.kwargs and not data.get('room'):
+            data['room'] = Room.objects.get(id=self.kwargs['room_pk'])
+
+        layout = create_layout(
+            tenant=tenant,
+            room=data['room'],
+            name=data['name'],
+            grid_rows=data['grid_rows'],
+            grid_cols=data['grid_cols'],
+            spots_data=data.get('spots', [])
+        )
+        read_serializer = RoomLayoutSerializer(layout)
+        return Response(read_serializer.data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        name = request.data.get('name', instance.name if not partial else None)
+        grid_rows = request.data.get('grid_rows', instance.grid_rows if not partial else None)
+        grid_cols = request.data.get('grid_cols', instance.grid_cols if not partial else None)
+        spots_data = request.data.get('spots', None)
+
+        layout = update_layout(
+            layout=instance,
+            name=name,
+            grid_rows=grid_rows,
+            grid_cols=grid_cols,
+            spots_data=spots_data
+        )
+        read_serializer = RoomLayoutSerializer(layout)
+        return Response(read_serializer.data)
+
+    @action(detail=True, methods=['post'], permission_classes=[IsOwnerOrManager])
+    def restore(self, request, pk=None):
+        layout = RoomLayout.all_objects.get(id=pk)
+        layout.restore()
+        return Response(RoomLayoutSerializer(layout).data)
+
+    @action(detail=True, methods=['get'])
+    def classes(self, request, pk=None):
+        layout = self.get_object()
+        sessions = ClassSession.objects.filter(
+            layout=layout,
+            start_at__gte=timezone.now()
+        ).select_related('template', 'room', 'staff')
+        return Response(ClassSessionSerializer(sessions, many=True, context={'request': request}).data)
 
 
 class StaffLocationViewSet(viewsets.ModelViewSet):
@@ -358,6 +478,129 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
 
         return Response({"detail": "Session cancelled successfully and active booking credits refunded."}, status=status.HTTP_200_OK)
 
+    @action(detail=True, methods=['get'], url_path='spot-map')
+    def spot_map(self, request, pk=None):
+        """
+        Glofox Member API:
+        Returns complete real-time 2D layout matrix and computed spot states.
+        State is server-computed: available | booked | blocked | mine | non_bookable.
+        Optimized with 2 queries total (zero N+1) and O(1) in-memory lookups.
+        """
+        session = self.get_object()
+        if not session.layout:
+            return Response(
+                {"error": "no_layout", "detail": "This class does not have an assigned room layout."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        layout = session.layout
+        # Single query 1: preload spots with their spot types
+        spots = list(
+            layout.spots.select_related('spot_type').order_by('row', 'col', 'number')
+        )
+
+        # Single query 2: preload only spot_id and client_id of active bookings for this session
+        active_bookings = dict(
+            session.bookings.filter(status='booked', spot__isnull=False)
+            .values_list('spot_id', 'client_id')
+        )
+
+        blocked_ids = {str(bid) for bid in (session.blocked_spots or [])}
+        user_id = request.user.id if request.user and request.user.is_authenticated else None
+
+        my_spot_id = None
+        spot_list = []
+        for s in spots:
+            if not s.spot_type.is_bookable:
+                state = 'non_bookable'
+            elif s.is_blocked or str(s.id) in blocked_ids:
+                state = 'blocked'
+            elif s.id in active_bookings:
+                if user_id and active_bookings[s.id] == user_id:
+                    state = 'mine'
+                    my_spot_id = str(s.id)
+                else:
+                    state = 'booked'
+            else:
+                state = 'available'
+
+            spot_list.append({
+                'id': str(s.id),
+                'row': s.row,
+                'col': s.col,
+                'number': s.number,
+                'label': s.label,
+                'spot_type': str(s.spot_type.id),
+                'spot_type_name': s.spot_type.name,
+                'spot_type_prefix': s.spot_type.prefix,
+                'color': s.spot_type.color,
+                'is_bookable': s.spot_type.is_bookable,
+                'state': state
+            })
+
+        return Response({
+            'layout': {
+                'id': str(layout.id),
+                'name': layout.name,
+                'grid_rows': layout.grid_rows,
+                'grid_cols': layout.grid_cols,
+                'capacity': layout.capacity,
+                'version': session.layout_version or layout.version
+            },
+            'spots': spot_list,
+            'my_spot': my_spot_id
+        })
+
+    @action(detail=True, methods=['post'], url_path='spots/block', permission_classes=[IsOwnerOrManager])
+    def block_spot(self, request, pk=None):
+        """
+        Glofox Staff API:
+        Blocks a specific spot for this class occurrence only (stored in session.blocked_spots).
+        """
+        session = self.get_object()
+        spot_id = request.data.get('spot_id')
+        if not spot_id:
+            return Response({"detail": "spot_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not session.layout:
+            return Response({"detail": "Session does not have a room layout."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not session.layout.spots.filter(id=spot_id).exists():
+            return Response({"detail": "Spot does not belong to this session's layout."}, status=status.HTTP_400_BAD_REQUEST)
+
+        current_blocked = list(session.blocked_spots or [])
+        if str(spot_id) not in [str(b) for b in current_blocked]:
+            current_blocked.append(str(spot_id))
+            session.blocked_spots = current_blocked
+            session.save(update_fields=['blocked_spots'])
+
+        return Response({
+            "detail": "Spot blocked successfully for this occurrence.",
+            "blocked_spots": session.blocked_spots
+        })
+
+    @action(detail=True, methods=['post'], url_path='spots/unblock', permission_classes=[IsOwnerOrManager])
+    def unblock_spot(self, request, pk=None):
+        """
+        Glofox Staff API:
+        Unblocks a previously blocked spot for this class occurrence.
+        """
+        session = self.get_object()
+        spot_id = request.data.get('spot_id')
+        if not spot_id:
+            return Response({"detail": "spot_id is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        current_blocked = [str(b) for b in (session.blocked_spots or [])]
+        if str(spot_id) in current_blocked:
+            current_blocked.remove(str(spot_id))
+            session.blocked_spots = current_blocked
+            session.save(update_fields=['blocked_spots'])
+
+        return Response({
+            "detail": "Spot unblocked successfully.",
+            "blocked_spots": session.blocked_spots
+        })
+
 
 class BookingViewSet(viewsets.ModelViewSet):
     queryset = Booking.all_objects.all()
@@ -463,6 +706,21 @@ class BookingViewSet(viewsets.ModelViewSet):
         if current_bookings >= session.capacity:
             return Response({"detail": "Session is full. Join waitlist instead."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Spot Concurrency Check (if spot is selected)
+        spot = serializer.validated_data.get('spot')
+        if spot:
+            # Row lock the specific spot to cleanly catch race conditions
+            spot = Spot.objects.select_for_update().get(id=spot.id)
+            is_spot_taken = session.bookings.filter(
+                spot=spot,
+                status='booked'
+            ).exists()
+            if is_spot_taken:
+                return Response(
+                    {"error": "spot_unavailable", "detail": "That spot was just taken. Please choose another spot."},
+                    status=status.HTTP_409_CONFLICT
+                )
+
         package = Package.objects.select_for_update().filter(
             client=target_client,
             credits_remaining__gt=0,
@@ -490,10 +748,14 @@ class BookingViewSet(viewsets.ModelViewSet):
         package.credits_remaining -= 1
         package.save()
 
+        is_guest = serializer.validated_data.get('is_guest', False)
+
         if existing_booking:
             # Reactivate existing booking row to satisfy unique_together constraint
             existing_booking.status = 'booked'
             existing_booking.credit_source = package
+            existing_booking.spot = spot
+            existing_booking.is_guest = is_guest
             existing_booking.join_mode = serializer.validated_data.get('join_mode', 'physical')
             existing_booking.music_preference = serializer.validated_data.get('music_preference', '')
             existing_booking.save()
@@ -504,6 +766,8 @@ class BookingViewSet(viewsets.ModelViewSet):
                 tenant=request.tenant,
                 client=target_client,
                 session=session,
+                spot=spot,
+                is_guest=is_guest,
                 credit_source=package,
                 status='booked',
                 join_mode=serializer.validated_data.get('join_mode', 'physical'),
@@ -539,6 +803,11 @@ class BookingViewSet(viewsets.ModelViewSet):
             ))
         except Exception:
             pass
+
+        # Trigger auto-assignment for unseated/guest bookings
+        if booking.status == 'booked' and not booking.spot_id:
+            from apps.scheduling.tasks import auto_assign_guest_bookings
+            transaction.on_commit(lambda: auto_assign_guest_bookings.delay(str(session.id)))
 
         return Response(BookingReadSerializer(booking).data, status=status.HTTP_201_CREATED)
 
@@ -649,6 +918,30 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.checked_out_at = timezone.now()
         booking.save()
         return Response({"detail": "Checked out successfully."})
+
+    @action(detail=True, methods=['patch'], url_path='spot', permission_classes=[IsAuthenticated])
+    def change_spot(self, request, pk=None):
+        """
+        Glofox Member API:
+        Change reserved spot before class start.
+        Enforces atomic validation, spot existence, and availability.
+        """
+        booking = self.get_object()
+        if request.user.role == UserRole.CLIENT and booking.client != request.user:
+            return Response({"detail": "You do not have permission to change spot for another client's booking."}, status=status.HTTP_403_FORBIDDEN)
+
+        serializer = BookingChangeSpotSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        new_spot_id = serializer.validated_data['spot_id']
+
+        try:
+            updated_booking = change_booking_spot(booking=booking, new_spot_id=new_spot_id)
+        except SpotUnavailableError as e:
+            return Response({"error": "spot_unavailable", "detail": str(e)}, status=status.HTTP_409_CONFLICT)
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(BookingReadSerializer(updated_booking, context={'request': request}).data)
 
 
 class WaitlistViewSet(viewsets.ModelViewSet):

@@ -1,6 +1,6 @@
 from django.contrib import admin
 from .models import (
-    Location, Room, StaffLocation, StaffAvailability, ClassTemplate,
+    Location, Room, SpotType, RoomLayout, Spot, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
     StaffClientAssignment
@@ -23,9 +23,34 @@ class LocationAdmin(TenantAdminMixin, admin.ModelAdmin):
 
 @admin.register(Room)
 class RoomAdmin(TenantAdminMixin, admin.ModelAdmin):
-    list_display = ('name', 'location', 'capacity', 'tenant')
+    list_display = ('name', 'room_type', 'location', 'capacity', 'default_capacity', 'is_active', 'is_deleted', 'tenant')
     search_fields = ('name', 'location__name')
-    list_filter = ('location', 'tenant')
+    list_filter = ('room_type', 'is_active', 'is_deleted', 'location', 'tenant')
+
+@admin.register(SpotType)
+class SpotTypeAdmin(TenantAdminMixin, admin.ModelAdmin):
+    list_display = ('name', 'prefix', 'location', 'is_bookable', 'color', 'tenant')
+    list_filter = ('location', 'is_bookable', 'tenant')
+    search_fields = ('name', 'prefix')
+
+class SpotInline(admin.TabularInline):
+    model = Spot
+    extra = 0
+    fields = ('row', 'col', 'number', 'label', 'spot_type', 'is_blocked')
+    readonly_fields = ('number', 'label')
+
+@admin.register(RoomLayout)
+class RoomLayoutAdmin(TenantAdminMixin, admin.ModelAdmin):
+    list_display = ('name', 'room', 'grid_rows', 'grid_cols', 'version', 'capacity', 'is_deleted', 'tenant')
+    list_filter = ('room', 'is_deleted', 'tenant')
+    search_fields = ('name', 'room__name')
+    inlines = [SpotInline]
+
+@admin.register(Spot)
+class SpotAdmin(TenantAdminMixin, admin.ModelAdmin):
+    list_display = ('label', 'layout', 'spot_type', 'row', 'col', 'number', 'is_blocked', 'tenant')
+    list_filter = ('layout', 'spot_type', 'is_blocked', 'tenant')
+    search_fields = ('label',)
 
 @admin.register(StaffLocation)
 class StaffLocationAdmin(TenantAdminMixin, admin.ModelAdmin):

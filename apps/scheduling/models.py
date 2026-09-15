@@ -23,17 +23,132 @@ class Location(UUIDMixin, TimestampMixin, TenantMixin):
         return f"{self.name} ({self.tenant.name if self.tenant else 'No Tenant'})"
 
 
-class Room(UUIDMixin, TimestampMixin, TenantMixin):
+from core_models.mixins.soft_delete import SoftDeleteModel, TenantSoftDeleteManager
+
+
+class Room(UUIDMixin, TimestampMixin, TenantMixin, SoftDeleteModel):
     """
-    Rooms within a specific Location. Used for conflict checking.
+    Rooms within a specific Location. Used for layout definitions and conflict checking.
     """
+    ROOM_TYPES = [
+        ('class', 'Class'),
+        ('appointment', 'Appointment'),
+        ('facility', 'Facility'),
+    ]
+
     location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='rooms')
-    name = models.CharField(max_length=100)
-    capacity = models.PositiveIntegerField()
+    name = models.CharField(max_length=120)
+    room_type = models.CharField(max_length=20, choices=ROOM_TYPES, default='class')
+    capacity = models.PositiveIntegerField(default=0, help_text="Configured or default room capacity")
+    default_capacity = models.PositiveIntegerField(default=0, help_text="Default class capacity fallback")
+    description = models.TextField(blank=True)
+    image = models.ImageField(upload_to='rooms/', blank=True, null=True)
+    is_active = models.BooleanField(default=True)
     equipment_tags = models.JSONField(default=list, blank=True, help_text="List of equipment tags")
+
+    objects = TenantSoftDeleteManager()
+    all_objects = models.Manager()
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['location', 'is_deleted']),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self.default_capacity and self.capacity:
+            self.default_capacity = self.capacity
+        elif not self.capacity and self.default_capacity:
+            self.capacity = self.default_capacity
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.name} - {self.location.name}"
+
+
+class SpotType(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Categories of spots/equipment per Location (e.g. Bike, Mat, Reformer, Instructor Stage).
+    Maximum of 20 spot types allowed per location.
+    """
+    MAX_PER_LOCATION = 20
+
+    location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='spot_types')
+    name = models.CharField(max_length=60)
+    prefix = models.CharField(max_length=6, help_text="Prefix for spot labels, e.g. 'B' -> B1, B2")
+    is_bookable = models.BooleanField(default=True)
+    color = models.CharField(max_length=7, default='#6366F1')
+
+    class Meta:
+        unique_together = ['location', 'name']
+
+    def clean(self):
+        super().clean()
+        if not self.pk:
+            count = SpotType.objects.filter(location=self.location).count()
+            if count >= self.MAX_PER_LOCATION:
+                raise ValidationError(f"Maximum of {self.MAX_PER_LOCATION} spot types allowed per location.")
+
+    def __str__(self):
+        return f"{self.name} ({self.prefix}) - {self.location.name}"
+
+
+class RoomLayout(UUIDMixin, TimestampMixin, TenantMixin, SoftDeleteModel):
+    """
+    2D floor plan layout configuration for a Room.
+    """
+    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name='layouts')
+    name = models.CharField(max_length=120)
+    grid_rows = models.PositiveSmallIntegerField()
+    grid_cols = models.PositiveSmallIntegerField()
+    version = models.PositiveIntegerField(default=1)
+
+    objects = TenantSoftDeleteManager()
+    all_objects = models.Manager()
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['room', 'is_deleted']),
+        ]
+
+    @property
+    def capacity(self):
+        """
+        Computed capacity derived strictly from active, bookable spots.
+        """
+        return self.spots.filter(spot_type__is_bookable=True).count()
+
+    def __str__(self):
+        return f"{self.name} (v{self.version}) - {self.room.name}"
+
+
+class Spot(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Individually addressable spot on a RoomLayout 2D grid.
+    """
+    layout = models.ForeignKey(RoomLayout, on_delete=models.CASCADE, related_name='spots')
+    spot_type = models.ForeignKey(SpotType, on_delete=models.PROTECT, related_name='spots')
+    row = models.PositiveSmallIntegerField()
+    col = models.PositiveSmallIntegerField()
+    number = models.PositiveIntegerField(help_text="Stable sequential number per spot type within layout")
+    label = models.CharField(max_length=16, editable=False)
+    is_blocked = models.BooleanField(default=False, help_text="Layout-level block")
+
+    class Meta:
+        unique_together = [
+            ('layout', 'row', 'col'),
+            ('layout', 'spot_type', 'number')
+        ]
+        indexes = [
+            models.Index(fields=['layout', 'row', 'col']),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.spot_type:
+            self.label = f"{self.spot_type.prefix}{self.number}"
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.label} ({self.row}, {self.col}) - {self.layout.name}"
 
 
 class StaffLocation(UUIDMixin, TimestampMixin, TenantMixin):
@@ -106,6 +221,9 @@ class ClassSession(UUIDMixin, TimestampMixin, TenantMixin):
     template = models.ForeignKey(ClassTemplate, on_delete=models.CASCADE, related_name='sessions')
     recurrence_rule = models.ForeignKey(RecurrenceRule, on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions')
     room = models.ForeignKey(Room, on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions')
+    layout = models.ForeignKey('RoomLayout', on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions')
+    layout_version = models.PositiveIntegerField(null=True, blank=True, help_text="Pinned layout version snapshot")
+    blocked_spots = models.JSONField(default=list, blank=True, help_text="List of spot IDs blocked for this occurrence")
     staff = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='sessions', limit_choices_to={'role__in': ['trainer', 'gym_owner', 'gym_manager']})
     start_at = models.DateTimeField(db_index=True)
     end_at = models.DateTimeField()
@@ -295,9 +413,13 @@ class Booking(UUIDMixin, TimestampMixin, TenantMixin):
         ('attended', 'Attended'),
         ('cancelled', 'Cancelled'),
         ('no_show', 'No Show'),
+        ('unassigned', 'Unassigned'),
+        ('waitlisted', 'Waitlisted'),
     ]
     client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='bookings')
     session = models.ForeignKey(ClassSession, on_delete=models.CASCADE, related_name='bookings')
+    spot = models.ForeignKey('Spot', on_delete=models.SET_NULL, null=True, blank=True, related_name='bookings')
+    is_guest = models.BooleanField(default=False)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='booked')
     credit_source = models.ForeignKey(Package, on_delete=models.PROTECT, related_name='bookings', null=True, blank=True)
     checked_in_at = models.DateTimeField(null=True, blank=True)
@@ -308,9 +430,17 @@ class Booking(UUIDMixin, TimestampMixin, TenantMixin):
 
     class Meta:
         unique_together = ['client', 'session']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['session', 'spot'],
+                condition=models.Q(status='booked', spot__isnull=False),
+                name='unique_active_spot_booking'
+            )
+        ]
 
     def __str__(self):
-        return f"{self.client.email} booked {self.session.template.name} ({self.status})"
+        spot_str = f" [Spot: {self.spot.label}]" if self.spot else ""
+        return f"{self.client.email} booked {self.session.template.name}{spot_str} ({self.status})"
 
 
 class Appointment(UUIDMixin, TimestampMixin, TenantMixin):

@@ -252,3 +252,135 @@ def process_substitute_broadcast_job(substitute_request_id):
             logger.info(f"Substitute notification sent to {staff.email} for request {sub_req.id}")
     finally:
         reset_current_tenant(token)
+
+
+@shared_task
+def auto_assign_unassigned(layout_id):
+    """
+    Glofox Background Worker:
+    When an operator edits a layout mid-season, spots may be removed.
+    Bookings on removed spots were marked status='unassigned'.
+    This task reassigns them to the next free bookable spots in future sessions.
+    Optimized with set operations to prevent N+1 queries.
+    """
+    from .models import RoomLayout, Spot
+    logger.info(f"Running auto_assign_unassigned for RoomLayout {layout_id}...")
+    try:
+        layout = RoomLayout.all_objects.select_related('tenant', 'room').get(id=layout_id)
+    except RoomLayout.DoesNotExist:
+        logger.error(f"RoomLayout {layout_id} not found.")
+        return
+
+    from apps.core.tenants.context import set_current_tenant, reset_current_tenant
+    token = set_current_tenant(layout.tenant)
+    try:
+        now = timezone.now()
+        future_sessions = ClassSession.objects.filter(
+            layout=layout,
+            status='scheduled',
+            start_at__gte=now
+        ).order_by('start_at')
+
+        # Preload all active bookable spots in this layout once (single query)
+        layout_bookable_spots = list(
+            layout.spots.filter(spot_type__is_bookable=True, is_blocked=False)
+            .select_related('spot_type')
+            .order_by('spot_type__name', 'number')
+        )
+
+        for session_summary in future_sessions:
+            with transaction.atomic():
+                session = ClassSession.objects.select_for_update().get(id=session_summary.id)
+                unassigned_bookings = list(
+                    session.bookings.filter(status='unassigned').select_related('client')
+                )
+                if not unassigned_bookings:
+                    continue
+
+                # Single query to get all occupied spot IDs for this session
+                taken_spot_ids = set(
+                    session.bookings.filter(status='booked', spot__isnull=False)
+                    .values_list('spot_id', flat=True)
+                )
+                blocked_ids = {str(bid) for bid in (session.blocked_spots or [])}
+
+                available_spots = [
+                    s for s in layout_bookable_spots
+                    if s.id not in taken_spot_ids and str(s.id) not in blocked_ids
+                ]
+
+                for b in unassigned_bookings:
+                    if not available_spots:
+                        logger.warning(
+                            f"No available spots left to reassign booking {b.id} for session {session.id}"
+                        )
+                        break
+
+                    reassigned_spot = available_spots.pop(0)
+                    b.spot = reassigned_spot
+                    b.status = 'booked'
+                    b.save(update_fields=['spot', 'status'])
+                    logger.info(
+                        f"Reassigned booking {b.id} for client {b.client.email} to spot {reassigned_spot.label}"
+                    )
+    finally:
+        reset_current_tenant(token)
+
+
+@shared_task
+def auto_assign_guest_bookings(session_id):
+    """
+    Glofox Background Worker:
+    Auto-allocates remaining free spots to guest bookings or web bookings
+    without pre-selected spots before class starts.
+    """
+    logger.info(f"Running auto_assign_guest_bookings for session {session_id}...")
+    try:
+        session_obj = ClassSession.all_objects.select_related('tenant', 'layout').get(id=session_id)
+    except ClassSession.DoesNotExist:
+        return
+
+    if not session_obj.layout or session_obj.status != 'scheduled':
+        return
+
+    from apps.core.tenants.context import set_current_tenant, reset_current_tenant
+    token = set_current_tenant(session_obj.tenant)
+    try:
+        with transaction.atomic():
+            session = ClassSession.objects.select_for_update().get(id=session_id)
+            unseated_bookings = list(
+                session.bookings.filter(
+                    status='booked',
+                    spot__isnull=True
+                ).order_by('created_at')
+            )
+            if not unseated_bookings:
+                return
+
+            layout_bookable_spots = list(
+                session.layout.spots.filter(spot_type__is_bookable=True, is_blocked=False)
+                .select_related('spot_type')
+                .order_by('spot_type__name', 'number')
+            )
+
+            taken_spot_ids = set(
+                session.bookings.filter(status='booked', spot__isnull=False)
+                .values_list('spot_id', flat=True)
+            )
+            blocked_ids = {str(bid) for bid in (session.blocked_spots or [])}
+
+            available_spots = [
+                s for s in layout_bookable_spots
+                if s.id not in taken_spot_ids and str(s.id) not in blocked_ids
+            ]
+
+            for b in unseated_bookings:
+                if not available_spots:
+                    break
+                assigned_spot = available_spots.pop(0)
+                b.spot = assigned_spot
+                b.save(update_fields=['spot'])
+                logger.info(f"Auto-assigned guest booking {b.id} to spot {assigned_spot.label}")
+    finally:
+        reset_current_tenant(token)
+

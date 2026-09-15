@@ -4,7 +4,7 @@ from rest_framework import serializers
 from django.db import transaction
 from django.db.models import Q
 from .models import (
-    Location, Room, StaffLocation, StaffAvailability, ClassTemplate,
+    Location, Room, SpotType, RoomLayout, Spot, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, PackageGrantSource, Payment, CancellationPolicy,
     StaffClientAssignment, FacilityAccessLog
@@ -23,8 +23,85 @@ class RoomSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Room
-        fields = ['id', 'location', 'location_name', 'name', 'capacity', 'equipment_tags', 'created_at']
+        fields = [
+            'id', 'location', 'location_name', 'name', 'room_type',
+            'capacity', 'default_capacity', 'description', 'image',
+            'is_active', 'is_deleted', 'equipment_tags', 'created_at'
+        ]
+        read_only_fields = ['id', 'location_name', 'created_at', 'is_deleted']
+
+
+class SpotTypeSerializer(serializers.ModelSerializer):
+    location_name = serializers.CharField(source='location.name', read_only=True)
+
+    class Meta:
+        model = SpotType
+        fields = ['id', 'location', 'location_name', 'name', 'prefix', 'is_bookable', 'color', 'created_at']
         read_only_fields = ['id', 'location_name', 'created_at']
+
+    def validate(self, attrs):
+        location = attrs.get('location') or (self.instance.location if self.instance else None)
+        if not self.instance and location:
+            if SpotType.objects.filter(location=location).count() >= SpotType.MAX_PER_LOCATION:
+                raise serializers.ValidationError(
+                    {"detail": f"Maximum of {SpotType.MAX_PER_LOCATION} spot types allowed per location."}
+                )
+        return attrs
+
+
+class SpotInputSerializer(serializers.Serializer):
+    row = serializers.IntegerField(min_value=0)
+    col = serializers.IntegerField(min_value=0)
+    spot_type = serializers.UUIDField(required=True)
+    is_blocked = serializers.BooleanField(default=False, required=False)
+
+
+class SpotSerializer(serializers.ModelSerializer):
+    spot_type_name = serializers.CharField(source='spot_type.name', read_only=True)
+    spot_type_prefix = serializers.CharField(source='spot_type.prefix', read_only=True)
+    spot_type_color = serializers.CharField(source='spot_type.color', read_only=True)
+    is_bookable = serializers.BooleanField(source='spot_type.is_bookable', read_only=True)
+
+    class Meta:
+        model = Spot
+        fields = [
+            'id', 'row', 'col', 'number', 'label', 'spot_type',
+            'spot_type_name', 'spot_type_prefix', 'spot_type_color',
+            'is_bookable', 'is_blocked'
+        ]
+        read_only_fields = ['id', 'number', 'label']
+
+
+class RoomLayoutSerializer(serializers.ModelSerializer):
+    spots = SpotSerializer(many=True, read_only=True)
+    capacity = serializers.IntegerField(read_only=True)
+    room_name = serializers.CharField(source='room.name', read_only=True)
+
+    class Meta:
+        model = RoomLayout
+        fields = [
+            'id', 'room', 'room_name', 'name', 'grid_rows', 'grid_cols',
+            'capacity', 'version', 'is_deleted', 'spots', 'created_at'
+        ]
+        read_only_fields = ['id', 'room_name', 'capacity', 'version', 'is_deleted', 'created_at']
+
+
+class RoomLayoutCreateSerializer(serializers.ModelSerializer):
+    spots = SpotInputSerializer(many=True, required=False, default=list)
+
+    class Meta:
+        model = RoomLayout
+        fields = ['id', 'room', 'name', 'grid_rows', 'grid_cols', 'spots']
+        read_only_fields = ['id']
+
+    def validate_spots(self, spots):
+        seen = set()
+        for s in spots:
+            coord = (s['row'], s['col'])
+            if coord in seen:
+                raise serializers.ValidationError(f"Duplicate spot position at row {s['row']}, col {s['col']}.")
+            seen.add(coord)
+        return spots
 
 
 class StaffLocationSerializer(serializers.ModelSerializer):
@@ -96,8 +173,8 @@ class ClassSessionSerializer(serializers.ModelSerializer):
     intensity = serializers.CharField(source='template.intensity', read_only=True, default='')
     location_id = serializers.UUIDField(source='template.location_id', read_only=True, default=None)
     location_name = serializers.CharField(source='template.location.name', read_only=True, default='')
-    
     room_name = serializers.CharField(source='room.name', read_only=True, default='')
+    layout_name = serializers.CharField(source='layout.name', read_only=True, default='')
     
     staff_name = serializers.SerializerMethodField()
     staff_email = serializers.CharField(source='staff.email', read_only=True, default='')
@@ -113,6 +190,7 @@ class ClassSessionSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'template', 'template_name', 'description', 'duration_min', 'category', 'intensity',
             'location_id', 'location_name', 'recurrence_rule', 'room', 'room_name',
+            'layout', 'layout_name', 'layout_version', 'blocked_spots',
             'staff', 'staff_name', 'staff_email', 'staff_image',
             'start_at', 'end_at', 'capacity', 'status', 'is_full',
             'booked_count', 'waitlist_count', 'bookings', 'user_booking_status',
@@ -120,10 +198,18 @@ class ClassSessionSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id', 'template_name', 'description', 'duration_min', 'category', 'intensity',
-            'location_id', 'location_name', 'room_name', 'staff_name', 'staff_email', 'staff_image',
+            'location_id', 'location_name', 'room_name', 'layout_name', 'staff_name', 'staff_email', 'staff_image',
             'is_full', 'booked_count', 'waitlist_count', 'bookings', 'user_booking_status',
             'created_at'
         ]
+
+    def validate(self, attrs):
+        capacity = attrs.get('capacity')
+        layout = attrs.get('layout') or (self.instance.layout if self.instance else None)
+        if capacity and layout:
+            from .services import validate_event_capacity
+            validate_event_capacity(capacity=capacity, layout=layout)
+        return attrs
 
     def to_representation(self, instance):
         now = timezone.now()
@@ -478,26 +564,57 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True
     )
+    spot = serializers.PrimaryKeyRelatedField(
+        queryset=Spot.all_objects.all(),
+        required=False,
+        allow_null=True
+    )
+    is_guest = serializers.BooleanField(required=False, default=False)
 
     class Meta:
         model = Booking
-        fields = ['id', 'session', 'join_mode', 'music_preference', 'client']
+        fields = ['id', 'session', 'join_mode', 'music_preference', 'client', 'spot', 'is_guest']
         validators = []  # Clear default UniqueTogetherValidator to prevent DRF from requiring client field
 
     def validate(self, data):
         session = data['session']
         if session.status != 'scheduled':
             raise serializers.ValidationError("Cannot book a session that is not in scheduled status.")
+
+        spot = data.get('spot')
+        if spot:
+            if not session.layout:
+                raise serializers.ValidationError({"spot": "This class does not have an assigned room layout."})
+            if spot.layout_id != session.layout_id:
+                raise serializers.ValidationError({"spot": "Selected spot does not belong to this class's room layout."})
+            if not spot.spot_type.is_bookable:
+                raise serializers.ValidationError({"spot": "Selected spot is non-bookable."})
+            if spot.is_blocked:
+                raise serializers.ValidationError({"spot": "Selected spot is blocked."})
+            blocked_list = [str(b) for b in (session.blocked_spots or [])]
+            if str(spot.id) in blocked_list:
+                raise serializers.ValidationError({"spot": "Selected spot is blocked for this class occurrence."})
+
         return data
 
 
 class BookingReadSerializer(serializers.ModelSerializer):
     session = ClassSessionSerializer(read_only=True)
     client_email = serializers.CharField(source='client.email', read_only=True)
+    spot_label = serializers.CharField(source='spot.label', read_only=True, default=None)
+    spot_number = serializers.IntegerField(source='spot.number', read_only=True, default=None)
 
     class Meta:
         model = Booking
-        fields = ['id', 'client', 'client_email', 'session', 'status', 'credit_source', 'checked_in_at', 'join_mode', 'music_preference', 'created_at']
+        fields = [
+            'id', 'client', 'client_email', 'session', 'spot', 'spot_label',
+            'spot_number', 'is_guest', 'status', 'credit_source', 'checked_in_at',
+            'join_mode', 'music_preference', 'created_at'
+        ]
+
+
+class BookingChangeSpotSerializer(serializers.Serializer):
+    spot_id = serializers.UUIDField(required=True)
 
 
 class BookingEditSerializer(serializers.ModelSerializer):
