@@ -2,9 +2,10 @@ from django.shortcuts import get_object_or_404
 from django.db import transaction, models
 from django.db.models import Q, Count, F
 from django.utils import timezone
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.exceptions import ValidationError
 from django.utils.dateparse import parse_date, parse_datetime
-from rest_framework import viewsets, status, permissions
+from rest_framework import viewsets, status, permissions, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -108,8 +109,10 @@ class RoomViewSet(viewsets.ModelViewSet):
         location_pk = self.kwargs.get('location_pk')
         if location_pk and not serializer.validated_data.get('location'):
             serializer.save(tenant=tenant, location_id=location_pk)
-        else:
+        elif serializer.validated_data.get('location'):
             serializer.save(tenant=tenant)
+        else:
+            raise serializers.ValidationError({"location": "Location is required."})
 
     @action(detail=True, methods=['post'], permission_classes=[IsOwnerOrManager])
     def restore(self, request, pk=None):
@@ -173,15 +176,23 @@ class RoomLayoutViewSet(viewsets.ModelViewSet):
 
         if 'room_pk' in self.kwargs and not data.get('room'):
             data['room'] = Room.objects.get(id=self.kwargs['room_pk'])
+        elif not data.get('room'):
+            raise serializers.ValidationError({"room": "Room is required."})
 
-        layout = create_layout(
-            tenant=tenant,
-            room=data['room'],
-            name=data['name'],
-            grid_rows=data['grid_rows'],
-            grid_cols=data['grid_cols'],
-            spots_data=data.get('spots', [])
-        )
+        try:
+            layout = create_layout(
+                tenant=tenant,
+                room=data['room'],
+                name=data['name'],
+                grid_rows=data['grid_rows'],
+                grid_cols=data['grid_cols'],
+                spots_data=data.get('spots', [])
+            )
+        except DjangoValidationError as e:
+            detail = e.message_dict if hasattr(e, 'message_dict') else (e.messages if hasattr(e, 'messages') else str(e))
+            raise ValidationError(detail)
+
+        layout = self.get_queryset().get(id=layout.id)
         read_serializer = RoomLayoutSerializer(layout)
         return Response(read_serializer.data, status=status.HTTP_201_CREATED)
 
@@ -193,13 +204,19 @@ class RoomLayoutViewSet(viewsets.ModelViewSet):
         grid_cols = request.data.get('grid_cols', instance.grid_cols if not partial else None)
         spots_data = request.data.get('spots', None)
 
-        layout = update_layout(
-            layout=instance,
-            name=name,
-            grid_rows=grid_rows,
-            grid_cols=grid_cols,
-            spots_data=spots_data
-        )
+        try:
+            update_layout(
+                layout=instance,
+                name=name,
+                grid_rows=grid_rows,
+                grid_cols=grid_cols,
+                spots_data=spots_data
+            )
+        except DjangoValidationError as e:
+            detail = e.message_dict if hasattr(e, 'message_dict') else (e.messages if hasattr(e, 'messages') else str(e))
+            raise ValidationError(detail)
+
+        layout = self.get_queryset().get(id=instance.id)
         read_serializer = RoomLayoutSerializer(layout)
         return Response(read_serializer.data)
 
@@ -500,25 +517,27 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         )
 
         # Single query 2: preload only spot_id and client_id of active bookings for this session
-        active_bookings = dict(
-            session.bookings.filter(status='booked', spot__isnull=False)
+        active_bookings = {
+            str(spot_id): str(client_id)
+            for spot_id, client_id in session.bookings.filter(status='booked', spot__isnull=False)
             .values_list('spot_id', 'client_id')
-        )
+        }
 
         blocked_ids = {str(bid) for bid in (session.blocked_spots or [])}
-        user_id = request.user.id if request.user and request.user.is_authenticated else None
+        user_id_str = str(request.user.id) if request.user and request.user.is_authenticated else None
 
         my_spot_id = None
         spot_list = []
         for s in spots:
+            spot_id_str = str(s.id)
             if not s.spot_type.is_bookable:
                 state = 'non_bookable'
-            elif s.is_blocked or str(s.id) in blocked_ids:
+            elif s.is_blocked or spot_id_str in blocked_ids:
                 state = 'blocked'
-            elif s.id in active_bookings:
-                if user_id and active_bookings[s.id] == user_id:
+            elif spot_id_str in active_bookings:
+                if user_id_str and active_bookings[spot_id_str] == user_id_str:
                     state = 'mine'
-                    my_spot_id = str(s.id)
+                    my_spot_id = spot_id_str
                 else:
                     state = 'booked'
             else:
@@ -869,7 +888,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             "detail": "Booking cancelled."
         }, status=status.HTTP_200_OK)
 
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    @action(detail=True, methods=['post'], url_path='check-in', permission_classes=[IsAuthenticated])
     def check_in(self, request, pk=None):
         booking = self.get_object()
         user = request.user
@@ -905,7 +924,11 @@ class BookingViewSet(viewsets.ModelViewSet):
 
         return Response({"detail": "Checked in successfully."})
 
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    @action(detail=True, methods=['post'], url_path='check_in', permission_classes=[IsAuthenticated])
+    def check_in_underscore(self, request, pk=None):
+        return self.check_in(request, pk)
+
+    @action(detail=True, methods=['post'], url_path='check-out', permission_classes=[IsAuthenticated])
     def check_out(self, request, pk=None):
         booking = self.get_object()
         user = request.user
@@ -918,6 +941,10 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.checked_out_at = timezone.now()
         booking.save()
         return Response({"detail": "Checked out successfully."})
+
+    @action(detail=True, methods=['post'], url_path='check_out', permission_classes=[IsAuthenticated])
+    def check_out_underscore(self, request, pk=None):
+        return self.check_out(request, pk)
 
     @action(detail=True, methods=['patch'], url_path='spot', permission_classes=[IsAuthenticated])
     def change_spot(self, request, pk=None):
@@ -938,8 +965,9 @@ class BookingViewSet(viewsets.ModelViewSet):
             updated_booking = change_booking_spot(booking=booking, new_spot_id=new_spot_id)
         except SpotUnavailableError as e:
             return Response({"error": "spot_unavailable", "detail": str(e)}, status=status.HTTP_409_CONFLICT)
-        except ValidationError as e:
-            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except (ValidationError, DjangoValidationError) as e:
+            detail = e.message_dict if hasattr(e, 'message_dict') else (e.messages if hasattr(e, 'messages') else str(e))
+            return Response({"detail": detail}, status=status.HTTP_400_BAD_REQUEST)
 
         return Response(BookingReadSerializer(updated_booking, context={'request': request}).data)
 

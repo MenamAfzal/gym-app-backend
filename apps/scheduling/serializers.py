@@ -29,6 +29,9 @@ class RoomSerializer(serializers.ModelSerializer):
             'is_active', 'is_deleted', 'equipment_tags', 'created_at'
         ]
         read_only_fields = ['id', 'location_name', 'created_at', 'is_deleted']
+        extra_kwargs = {
+            'location': {'required': False}
+        }
 
 
 class SpotTypeSerializer(serializers.ModelSerializer):
@@ -93,6 +96,9 @@ class RoomLayoutCreateSerializer(serializers.ModelSerializer):
         model = RoomLayout
         fields = ['id', 'room', 'name', 'grid_rows', 'grid_cols', 'spots']
         read_only_fields = ['id']
+        extra_kwargs = {
+            'room': {'required': False}
+        }
 
     def validate_spots(self, spots):
         seen = set()
@@ -203,14 +209,6 @@ class ClassSessionSerializer(serializers.ModelSerializer):
             'created_at'
         ]
 
-    def validate(self, attrs):
-        capacity = attrs.get('capacity')
-        layout = attrs.get('layout') or (self.instance.layout if self.instance else None)
-        if capacity and layout:
-            from .services import validate_event_capacity
-            validate_event_capacity(capacity=capacity, layout=layout)
-        return attrs
-
     def to_representation(self, instance):
         now = timezone.now()
         is_past = (instance.end_at and instance.end_at <= now) or (not instance.end_at and instance.start_at and instance.start_at <= now)
@@ -232,6 +230,9 @@ class ClassSessionSerializer(serializers.ModelSerializer):
 
         if not validated_data.get('capacity') and template:
             validated_data['capacity'] = template.default_capacity
+
+        if validated_data.get('layout') and not validated_data.get('layout_version'):
+            validated_data['layout_version'] = validated_data['layout'].version
 
         now = timezone.now()
         is_past = (end_at and end_at <= now) or (not end_at and start_at and start_at <= now)
@@ -318,6 +319,19 @@ class ClassSessionSerializer(serializers.ModelSerializer):
         end = data.get('end_at', self.instance.end_at if self.instance else None)
         if start and end and start >= end:
             raise serializers.ValidationError("End time must be after start time.")
+
+        # Capacity validation against layout bookable spots
+        capacity = data.get('capacity', self.instance.capacity if self.instance else None)
+        if not capacity and data.get('template'):
+            capacity = data['template'].default_capacity
+        layout = data.get('layout') or (self.instance.layout if self.instance else None)
+        if capacity and layout:
+            from .services import validate_event_capacity
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            try:
+                validate_event_capacity(capacity=capacity, layout=layout)
+            except DjangoValidationError as e:
+                raise serializers.ValidationError({"capacity": e.messages if hasattr(e, 'messages') else str(e)})
 
         if 'staff' in data:
             staff = data['staff']

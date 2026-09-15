@@ -31,11 +31,10 @@ def create_layout(*, tenant, room, name, grid_rows, grid_cols, spots_data) -> Ro
     )
 
     seen_coords = set()
-    spot_type_ids = {s['spot_type'].id if hasattr(s['spot_type'], 'id') else s['spot_type'] for s in spots_data}
-    
-    # Preload spot types in single query (prevents N+1)
+    spot_type_ids = {str(s['spot_type'].id if hasattr(s['spot_type'], 'id') else s['spot_type']) for s in spots_data}
+     
     spot_types_map = {
-        st.id: st for st in SpotType.objects.filter(id__in=spot_type_ids, location=room.location)
+        str(st.id): st for st in SpotType.objects.filter(id__in=spot_type_ids, location=room.location)
     }
 
     spots_to_create = []
@@ -53,13 +52,13 @@ def create_layout(*, tenant, room, name, grid_rows, grid_cols, spots_data) -> Ro
         seen_coords.add(coord)
 
         raw_st = s['spot_type']
-        st_id = raw_st.id if hasattr(raw_st, 'id') else raw_st
+        st_id = str(raw_st.id if hasattr(raw_st, 'id') else raw_st)
         st = spot_types_map.get(st_id)
         if not st:
             raise ValidationError(f"Invalid spot type {st_id} for this room's location.")
 
-        counters[st.id] = counters.get(st.id, 0) + 1
-        num = counters[st.id]
+        counters[st_id] = counters.get(st_id, 0) + 1
+        num = counters[st_id]
         label = f"{st.prefix}{num}"
 
         spots_to_create.append(
@@ -105,9 +104,9 @@ def update_layout(*, layout, name=None, grid_rows=None, grid_cols=None, spots_da
         grid_r = layout.grid_rows
         grid_c = layout.grid_cols
         seen_coords = set()
-        spot_type_ids = {s['spot_type'].id if hasattr(s['spot_type'], 'id') else s['spot_type'] for s in spots_data}
+        spot_type_ids = {str(s['spot_type'].id if hasattr(s['spot_type'], 'id') else s['spot_type']) for s in spots_data}
         spot_types_map = {
-            st.id: st for st in SpotType.objects.filter(id__in=spot_type_ids, location=layout.room.location)
+            str(st.id): st for st in SpotType.objects.filter(id__in=spot_type_ids, location=layout.room.location)
         }
 
         # Validate spot coordinates and spot types
@@ -122,19 +121,19 @@ def update_layout(*, layout, name=None, grid_rows=None, grid_cols=None, spots_da
             seen_coords.add(coord)
 
             raw_st = s['spot_type']
-            st_id = raw_st.id if hasattr(raw_st, 'id') else raw_st
+            st_id = str(raw_st.id if hasattr(raw_st, 'id') else raw_st)
             if st_id not in spot_types_map:
                 raise ValidationError(f"Invalid spot type {st_id} for this room's location.")
 
         # Identify removed spots
         old_spots = list(layout.spots.all())
         old_spots_map = {
-            (s.row, s.col, s.spot_type_id): s
+            (s.row, s.col, str(s.spot_type_id)): s
             for s in old_spots
         }
         
         new_coords_map = {
-            (s['row'], s['col'], s['spot_type'].id if hasattr(s['spot_type'], 'id') else s['spot_type']): s
+            (s['row'], s['col'], str(s['spot_type'].id if hasattr(s['spot_type'], 'id') else s['spot_type'])): s
             for s in spots_data
         }
         
@@ -164,7 +163,7 @@ def update_layout(*, layout, name=None, grid_rows=None, grid_cols=None, spots_da
         # Find max number per spot type to continue sequential numbering for new spots
         counters = {}
         for s in old_spots:
-            st_id = s.spot_type_id
+            st_id = str(s.spot_type_id)
             counters[st_id] = max(counters.get(st_id, 0), s.number)
 
         # Build and bulk create new spots, update existing spots if needed
@@ -173,11 +172,11 @@ def update_layout(*, layout, name=None, grid_rows=None, grid_cols=None, spots_da
             if coord not in old_spots_map:
                 # This is a new spot, assign next sequential number
                 raw_st = s['spot_type']
-                st_id = raw_st.id if hasattr(raw_st, 'id') else raw_st
+                st_id = str(raw_st.id if hasattr(raw_st, 'id') else raw_st)
                 st = spot_types_map[st_id]
                 
-                counters[st.id] = counters.get(st.id, 0) + 1
-                num = counters[st.id]
+                counters[st_id] = counters.get(st_id, 0) + 1
+                num = counters[st_id]
                 label = f"{st.prefix}{num}"
 
                 spots_to_create.append(

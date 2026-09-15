@@ -237,6 +237,8 @@ class ClassSession(UUIDMixin, TimestampMixin, TenantMixin):
         return f"{self.template.name} on {self.start_at} ({self.status})"
 
     def save(self, *args, **kwargs):
+        if self.layout and not self.layout_version:
+            self.layout_version = self.layout.version
         if self.status == 'scheduled':
             now = timezone.now()
             if (self.end_at and self.end_at <= now) or (not self.end_at and self.start_at and self.start_at <= now):
