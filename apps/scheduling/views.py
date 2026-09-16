@@ -284,14 +284,6 @@ class RecurrenceRuleViewSet(viewsets.ModelViewSet):
         end_date = rule.end_date
         days_of_week = [d.lower() for d in rule.days_of_week]
         
-        # Determine location timezone
-        tz_name = getattr(rule.template.location, 'timezone', 'UTC') if rule.template and rule.template.location else 'UTC'
-        import zoneinfo
-        try:
-            loc_tz = zoneinfo.ZoneInfo(tz_name)
-        except Exception:
-            loc_tz = datetime_timezone.utc
-
         now = timezone.now()
         current_date = start_date
         sessions_to_create = []
@@ -300,15 +292,7 @@ class RecurrenceRuleViewSet(viewsets.ModelViewSet):
             weekday_name = current_date.strftime('%A').lower()
             if weekday_name in days_of_week:
                 naive_start = datetime.combine(current_date, rule.start_time)
-                try:
-                    if loc_tz != datetime_timezone.utc:
-                        local_start = naive_start.replace(tzinfo=loc_tz)
-                        start_at = local_start.astimezone(datetime_timezone.utc)
-                    else:
-                        start_at = timezone.make_aware(naive_start, datetime_timezone.utc)
-                except Exception:
-                    start_at = timezone.make_aware(naive_start, datetime_timezone.utc)
-
+                start_at = timezone.make_aware(naive_start, datetime_timezone.utc)
                 end_at = start_at + timedelta(minutes=rule.template.duration_min)
                 initial_status = 'completed' if end_at <= now else 'scheduled'
 
