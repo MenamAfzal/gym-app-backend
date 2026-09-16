@@ -1084,6 +1084,48 @@ class GymSchedulingSystemTestCase(TestCase):
         self.assertEqual(session.status, 'completed')
         self.assertEqual(booking.status, 'no_show')
 
+    def test_recurrence_rule_viewset_creates_sessions_at_exact_time(self):
+        """Verify RecurrenceRuleViewSet creates sessions at the exact entered time without timezone shift."""
+        from rest_framework.test import APIRequestFactory, force_authenticate
+        from apps.scheduling.views import RecurrenceRuleViewSet
+
+        # Set location timezone to US Eastern
+        self.location.timezone = "America/New_York"
+        self.location.save()
+
+        factory = APIRequestFactory()
+        view = RecurrenceRuleViewSet.as_view({'post': 'create'})
+
+        target_date = timezone.now().date() + timedelta(days=1)
+        weekday_name = target_date.strftime('%A').lower()
+
+        data = {
+            'template': str(self.template.id),
+            'days_of_week': [weekday_name],
+            'start_date': str(target_date),
+            'end_date': str(target_date + timedelta(days=6)),
+            'start_time': '13:00:00',
+            'room': str(self.room.id),
+            'staff': str(self.trainer.id)
+        }
+
+        request = factory.post('/api/v1/scheduling/recurrence-rules/', data=data, format='json')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.owner)
+
+        response = view(request)
+        self.assertEqual(response.status_code, 201)
+
+        rule_id = response.data['id']
+        sessions = ClassSession.objects.filter(recurrence_rule_id=rule_id)
+        self.assertEqual(sessions.count(), 1)
+        session = sessions.first()
+
+        # Verify the session start_at matches the exact entered time (13:00:00)
+        self.assertEqual(session.start_at.hour, 13)
+        self.assertEqual(session.start_at.minute, 0)
+        self.assertEqual(session.start_at.date(), target_date)
+
 
 
 
