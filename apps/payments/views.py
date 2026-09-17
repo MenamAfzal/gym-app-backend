@@ -539,6 +539,8 @@ class TenantBillingSubscriptionView(APIView):
 
         # Build list of active subscriptions with customized feature current_period_end dates
         from .billing_serializers import TenantBillingSubscriptionSerializer, BillingFeatureSerializer
+        from .models import GymFeatureEntitlement
+        now = timezone.now()
         serializer_data = []
         for sub in active_subs:
             sub_data = TenantBillingSubscriptionSerializer(sub).data
@@ -547,6 +549,25 @@ class TenantBillingSubscriptionView(APIView):
             for feat in sub.active_features.all():
                 feat_data = BillingFeatureSerializer(feat).data
                 feat_data['current_period_end'] = sub.current_period_end.isoformat() if sub.current_period_end else None
+
+                # Decouple platform-level feature status from gym-level entitlement
+                # Gym retains access during active subscription period even if global feature is_active=False
+                entitlement = GymFeatureEntitlement.all_objects.filter(
+                    tenant=sub.tenant,
+                    feature=feat
+                ).first()
+                if entitlement:
+                    is_entitled = entitlement.is_entitled()
+                else:
+                    is_entitled = True
+                    if sub.status != TenantBillingSubscription.StatusChoices.ACTIVE:
+                        is_entitled = False
+                    elif sub.current_period_end and sub.current_period_end < now:
+                        is_entitled = False
+
+                feat_data['platform_is_active'] = feat.is_active
+                feat_data['is_active'] = is_entitled
+                feat_data['is_entitled'] = is_entitled
                 features_with_dates.append(feat_data)
             sub_data['active_features'] = features_with_dates
             serializer_data.append(sub_data)

@@ -5,7 +5,8 @@ from django.contrib import admin
 from apps.rewards.models import (
     RewardProgram, RewardRule, RewardRuleVersion, Badge, RewardTier,
     RewardWallet, RewardPointLedger, UserBadge, UserStreak,
-    ProcessedRewardEvent, RewardTransaction, RewardCatalogItem, RewardRedemption
+    ProcessedRewardEvent, RewardTransaction, RewardCatalogItem, RewardRedemption,
+    ClientReferral
 )
 
 
@@ -109,3 +110,11 @@ class RewardRedemptionAdmin(admin.ModelAdmin):
     list_filter = ('tenant', 'status')
     search_fields = ('redemption_code', 'user__email', 'catalog_item__name')
     list_select_related = ('tenant', 'user', 'catalog_item', 'fulfilled_by')
+
+
+@admin.register(ClientReferral)
+class ClientReferralAdmin(admin.ModelAdmin):
+    list_display = ('tenant', 'referrer', 'referee', 'referral_code', 'method', 'status', 'completed_at')
+    list_filter = ('tenant', 'status', 'method')
+    search_fields = ('referral_code', 'referrer__email', 'referee__email')
+    list_select_related = ('tenant', 'referrer', 'referee')

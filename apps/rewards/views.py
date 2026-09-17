@@ -7,13 +7,14 @@ Highly optimized with query annotations and eager joins to eliminate N+1 queries
 Provides uniform pagination, filtering, search, and sorting across all tabs.
 """
 from collections import OrderedDict
-from rest_framework import viewsets, status, mixins, parsers, filters
+from rest_framework import viewsets, status, mixins, parsers, filters, permissions
 from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Sum, Count, Q
+from django.conf import settings
 
 from apps.rewards.models import (
     RewardProgram, RewardRule, Badge, RewardTier,
@@ -32,7 +33,7 @@ from apps.rewards.permissions import (
     IsRewardAdminOrManager, IsRewardStaffOrAdmin, IsRewardClient
 )
 from apps.rewards.services import (
-    RewardWalletService, RewardRedemptionService
+    RewardWalletService, RewardRedemptionService, ClientReferralService
 )
 from apps.users.models import User, UserRole
 from apps.core.tenants.context import get_current_tenant
@@ -272,6 +273,26 @@ class AdminBadgeViewSet(viewsets.ModelViewSet):
         return Response(BadgeSerializer(badge, context={'request': request}).data)
 
 
+class RewardTierOrderingFilter(filters.OrderingFilter):
+    """
+    Ordering filter for Reward Tiers that safely maps legacy 'level' references
+    to 'threshold_points' and ignores invalid fields to prevent FieldErrors.
+    """
+    def get_ordering(self, request, queryset, view):
+        params = request.query_params.get(self.ordering_param)
+        if params:
+            fields = [param.strip() for param in params.split(',')]
+            mapped_fields = [
+                'threshold_points' if f == 'level' else
+                ('-threshold_points' if f == '-level' else f)
+                for f in fields
+            ]
+            ordering = self.remove_invalid_fields(queryset, mapped_fields, view, request)
+            if ordering:
+                return ordering
+        return self.get_default_ordering(view)
+
+
 class AdminRewardTierViewSet(viewsets.ModelViewSet):
     """
     CRUD management for VIP / Loyalty tiers.
@@ -280,7 +301,7 @@ class AdminRewardTierViewSet(viewsets.ModelViewSet):
     serializer_class = RewardTierSerializer
     permission_classes = [IsAuthenticated, IsRewardAdminOrManager]
     pagination_class = RewardPagination
-    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    filter_backends = [filters.SearchFilter, RewardTierOrderingFilter]
     search_fields = ['name', 'perks_description', 'program__name']
     ordering_fields = ['name', 'threshold_points', 'multiplier', 'created_at']
     ordering = ['threshold_points', 'name']
@@ -291,9 +312,22 @@ class AdminRewardTierViewSet(viewsets.ModelViewSet):
         program_id = self.request.query_params.get('program_id')
         if program_id:
             qs = qs.filter(program_id=program_id)
+        badge_id = self.request.query_params.get('badge_id') or self.request.query_params.get('badge')
+        if badge_id:
+            qs = qs.filter(badge_id=badge_id)
+        level = self.request.query_params.get('level') or self.request.query_params.get('threshold_points')
+        if level is not None and level != '':
+            if str(level).isdigit():
+                qs = qs.filter(threshold_points=int(level))
+            else:
+                qs = qs.filter(name__icontains=str(level))
         return qs
 
     def perform_create(self, serializer):
+        tenant = get_request_tenant(self.request)
+        serializer.save(tenant=tenant)
+
+    def perform_update(self, serializer):
         tenant = get_request_tenant(self.request)
         serializer.save(tenant=tenant)
 
@@ -872,99 +906,282 @@ class ClientRedemptionViewSet(viewsets.ModelViewSet):
 
 class ClientReferralView(APIView):
     """
-    Client Referral Management & Testing API.
-    Provides members with their referral code/link, and processes referral completions
-    by emitting the canonical referral.completed event to the Rewards Engine.
+    Client Referral Management & Submission API.
+    Provides members with their referral code/link, and processes referral submissions.
+    Supports Option 1 (In-App Referral Code Flow) and friend invitations.
+    Strictly prevents self-referrals and never creates unverified user accounts.
     """
     permission_classes = [IsAuthenticated, IsRewardClient]
 
     def get(self, request):
         tenant = get_request_tenant(request)
         user = request.user
-        code = f"REF-{user.id.hex[:8].upper()}"
+        profile = getattr(user, 'profile', None)
+        code = profile.get_or_create_referral_code() if profile else f"REF-{user.id.hex[:8].upper()}"
         base_url = request.build_absolute_uri('/')[:-1]
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000').rstrip('/')
 
-        referral_count = ProcessedRewardEvent.all_objects.filter(
+        from apps.rewards.models import ClientReferral
+        referral_count = ClientReferral.objects.filter(
             tenant=tenant,
-            event_type='referral.completed',
-            payload__referrer_id=str(user.id)
+            referrer=user,
+            status=ClientReferral.ReferralStatus.COMPLETED
         ).count()
+        if referral_count == 0:
+            referral_count = ProcessedRewardEvent.all_objects.filter(
+                tenant=tenant,
+                event_type='referral.completed',
+                payload__referrer_id=str(user.id)
+            ).count()
+
+        universal_link = f"{base_url}/api/v1/rewards/referrals/join/?ref={code}"
+        web_link = f"{frontend_url}/join?ref={code}"
+        deep_link = f"fitverx://join?ref={code}"
 
         return Response({
             'referrer_id': str(user.id),
+            'referrer_name': user.full_name,
             'referrer_email': user.email,
             'referral_code': code,
-            'referral_link': f"{base_url}/join?ref={code}",
+            'referral_link': universal_link,
+            'web_referral_link': web_link,
+            'deep_link': deep_link,
             'total_referrals_completed': referral_count,
             'description': "Share your referral code with friends. When they join, you earn reward points and package credits."
         })
 
     def post(self, request):
         tenant = get_request_tenant(request)
-        referrer = request.user
+        user = request.user
 
-        referee_id = request.data.get('referee_id')
-        referee_email = request.data.get('referee_email')
         referral_code = request.data.get('referral_code')
+        referee_email = request.data.get('referee_email')
+        referee_id = request.data.get('referee_id')
 
-        if not referee_id and not referee_email and not referral_code:
+        if not referral_code and not referee_email and not referee_id:
             return Response(
-                {'error': 'Either referee_email or referee_id or referral_code is required.'},
+                {'error': 'Either referral_code or referee_email is required.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        referee = None
+        # FLOW 1: Current user is entering someone else's referral code (Option 1)
+        if referral_code:
+            try:
+                result = ClientReferralService.process_referral(
+                    tenant=tenant,
+                    referee=user,
+                    referral_code=str(referral_code).strip(),
+                    method='CODE'
+                )
+                return Response({
+                    'status': 'success',
+                    'message': 'Referral completed successfully.',
+                    **result
+                }, status=status.HTTP_201_CREATED)
+            except Exception as ex:
+                err_msg = ex.message if hasattr(ex, 'message') else str(ex)
+                return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
+
+        # FLOW 2: Current user is inviting a friend by email (Registration-First, Consent-Based)
+        if referee_email:
+            clean_email = str(referee_email).strip().lower()
+            if clean_email == user.email.lower():
+                return Response({'error': 'Self-referrals are not permitted.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            existing_user = User.objects.filter(email=clean_email, tenant=tenant).first()
+            if existing_user:
+                return Response({
+                    'error': 'A member with this email already belongs to this gym. Ask them to enter your referral code in their app.'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Registration-First: DO NOT CREATE A USER RECORD.
+            # Provide an invitation link for the referee to register with their own consent.
+            profile = getattr(user, 'profile', None)
+            code = profile.get_or_create_referral_code() if profile else f"REF-{user.id.hex[:8].upper()}"
+            base_url = request.build_absolute_uri('/')[:-1]
+            universal_link = f"{base_url}/api/v1/rewards/referrals/join/?ref={code}"
+
+            try:
+                from django.core.mail import EmailMultiAlternatives
+                subject = f"{user.full_name} invited you to join {tenant.name}!"
+                body = (
+                    f"Hi,\n\n{user.full_name} has invited you to join {tenant.name} on FitVerx!\n\n"
+                    f"Sign up using this link to receive bonus rewards: {universal_link}\n"
+                    f"Or use referral code: {code}\n\nSee you there!"
+                )
+                msg = EmailMultiAlternatives(subject, body, settings.DEFAULT_FROM_EMAIL, [clean_email])
+                msg.send(fail_silently=True)
+            except Exception:
+                pass
+
+            return Response({
+                'status': 'invitation_sent',
+                'message': f"Invitation sent to {clean_email}. They can register using your referral link.",
+                'referral_code': code,
+                'referral_link': universal_link
+            }, status=status.HTTP_200_OK)
+
+        # FLOW 3: Legacy referee_id parameter (testing & backward compatibility)
         if referee_id:
+            if str(referee_id) == str(user.id):
+                return Response({'error': 'Self-referrals are not permitted.'}, status=status.HTTP_400_BAD_REQUEST)
+
             try:
                 import uuid
-                referee = User.objects.filter(id=uuid.UUID(str(referee_id))).first()
+                referee = User.objects.filter(id=uuid.UUID(str(referee_id)), tenant=tenant).first()
             except (ValueError, TypeError):
                 return Response({'error': 'Invalid referee_id format.'}, status=status.HTTP_400_BAD_REQUEST)
-        elif referee_email:
-            referee_email = str(referee_email).strip().lower()
-            referee = User.objects.filter(email=referee_email).first()
+
             if not referee:
-                import secrets
-                referee = User.objects.create_user(
-                    email=referee_email,
-                    password=secrets.token_urlsafe(12),
+                return Response({'error': 'Referee user could not be resolved.'}, status=status.HTTP_404_NOT_FOUND)
+
+            profile = getattr(user, 'profile', None)
+            code = profile.get_or_create_referral_code() if profile else f"REF-{user.id.hex[:8].upper()}"
+            try:
+                result = ClientReferralService.process_referral(
                     tenant=tenant,
-                    role=UserRole.CLIENT
+                    referee=referee,
+                    referral_code=code,
+                    method='CODE'
                 )
-        elif referral_code:
-            referee = User.objects.filter(id=referrer.id).first()
+                return Response({
+                    'status': 'success',
+                    'message': 'Referral completed successfully.',
+                    **result
+                }, status=status.HTTP_201_CREATED)
+            except Exception as ex:
+                err_msg = ex.message if hasattr(ex, 'message') else str(ex)
+                return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
 
-        if not referee:
-            return Response({'error': 'Referee user could not be resolved.'}, status=status.HTTP_404_NOT_FOUND)
 
-        if referee.id == referrer.id:
-            return Response({'error': 'Self-referrals are not permitted.'}, status=status.HTTP_400_BAD_REQUEST)
+class ClientReferralApplyView(APIView):
+    """
+    Explicit endpoint for Option 1: A logged-in client applies a friend's referral code.
+    POST /api/v1/rewards/client/referrals/apply/
+    Payload: {"referral_code": "REF-..."}
+    """
+    permission_classes = [IsAuthenticated, IsRewardClient]
+
+    def post(self, request):
+        tenant = get_request_tenant(request)
+        user = request.user
+        referral_code = request.data.get('referral_code')
+
+        if not referral_code:
+            return Response({'error': 'referral_code is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            from apps.rewards.events import RewardEvent
-            from apps.rewards.services import RewardEngineService
-
-            event = RewardEvent.create_referral_completed(
-                tenant_id=tenant.id,
-                referrer_id=referrer.id,
-                referee_id=referee.id
-            )
-            transactions = RewardEngineService.handle_event(event)
-            points_awarded = sum(
-                tx.action_payload.get('amount', 0)
-                for tx in transactions
-                if tx.action_type == 'POINTS' and tx.result_status == 'SUCCESS'
+            result = ClientReferralService.process_referral(
+                tenant=tenant,
+                referee=user,
+                referral_code=str(referral_code).strip(),
+                method='CODE'
             )
             return Response({
                 'status': 'success',
-                'message': 'Referral completed successfully.',
-                'referrer_id': str(referrer.id),
-                'referrer_email': referrer.email,
-                'referee_id': str(referee.id),
-                'referee_email': referee.email,
-                'event_type': 'referral.completed',
-                'transactions_created': len(transactions),
-                'points_awarded': points_awarded
+                'message': 'Referral code applied successfully. Rewards have been awarded!',
+                **result
             }, status=status.HTTP_201_CREATED)
         except Exception as ex:
-            return Response({'error': f"Failed processing referral: {str(ex)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            err_msg = ex.message if hasattr(ex, 'message') else str(ex)
+            return Response({'error': err_msg}, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ReferralLookupView(APIView):
+    """
+    Public lookup endpoint for validating referral codes in frontend / mobile apps before signup.
+    GET /api/v1/rewards/referrals/lookup/?ref=REF-XXXX
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        code = request.GET.get('ref') or request.GET.get('referral_code')
+        if not code:
+            return Response({'valid': False, 'error': 'Referral code parameter "ref" is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from apps.users.models import UserProfile
+        from apps.core.tenants.context import bypass_tenant_isolation
+        import re
+        
+        with bypass_tenant_isolation():
+            raw_code = str(code).strip()
+            # Clean up markdown/URL artifacts (e.g., extracting REF-F64C7900 from "REF-F64C7900](http...")
+            clean_code = re.split(r'[^a-zA-Z0-9\-]', raw_code)[0].upper()
+            
+            profile = UserProfile.objects.filter(referral_code__iexact=clean_code, user__is_active=True).select_related('user', 'user__tenant').first()
+            user = profile.user if profile else None
+
+            if not user and clean_code.startswith("REF-"):
+                prefix = clean_code[4:12].lower()
+                for u in User.objects.filter(is_active=True).select_related('tenant'):
+                    if u.id.hex[:8].lower() == prefix:
+                        user = u
+                        break
+
+            if not user or not user.tenant:
+                return Response({'valid': False, 'error': 'Invalid or expired referral code.'}, status=status.HTTP_404_NOT_FOUND)
+
+            frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000').rstrip('/')
+            return Response({
+                'valid': True,
+                'referral_code': clean_code,
+                'referrer_id': str(user.id),
+                'referrer_name': user.full_name,
+                'gym_id': str(user.tenant.id),
+                'gym_name': user.tenant.name,
+                'gym_subdomain': user.tenant.subdomain,
+                'web_registration_url': f"{frontend_url}/register?ref={clean_code}&tenant_id={user.tenant.id}",
+                'app_deep_link': f"fitverx://join?ref={clean_code}&tenant_id={user.tenant.id}"
+            }, status=status.HTTP_200_OK)
+
+
+from django.views import View
+
+
+class ReferralJoinRedirectView(View):
+    """
+    Universal Link & Smart Redirect View for Referral Links.
+    GET /api/v1/rewards/referrals/join/?ref=REF-XXXX
+    Redirects mobile users to app scheme / app stores, or web users to web registration.
+    """
+    def get(self, request):
+        code = request.GET.get('ref') or request.GET.get('referral_code', '')
+        
+        import re
+        raw_code = str(code).strip() if code else ''
+        clean_code = re.split(r'[^a-zA-Z0-9\-]', raw_code)[0].upper() if raw_code else ''
+
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000').rstrip('/')
+        target_web_url = f"{frontend_url}/register?ref={clean_code}" if clean_code else f"{frontend_url}/register"
+        app_deep_link = f"fitverx://join?ref={clean_code}" if clean_code else "fitverx://join"
+
+        user_agent = request.META.get('HTTP_USER_AGENT', '').lower()
+        is_mobile = any(keyword in user_agent for keyword in ['iphone', 'ipad', 'android', 'mobile'])
+
+        if not is_mobile:
+            from django.shortcuts import redirect
+            return redirect(target_web_url)
+
+        from django.http import HttpResponse
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Join Gym - FitVerx Referral</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta property="og:title" content="Join on FitVerx">
+    <meta property="og:description" content="You have been invited to join with bonus rewards!">
+    <script>
+        window.location.href = "{app_deep_link}";
+        setTimeout(function() {{
+            window.location.href = "{target_web_url}";
+        }}, 2000);
+    </script>
+</head>
+<body style="font-family: sans-serif; text-align: center; padding: 40px;">
+    <h2>Opening FitVerx App...</h2>
+    <p>If the app does not open automatically, <a href="{target_web_url}">click here to continue on the web</a>.</p>
+</body>
+</html>"""
+        return HttpResponse(html, content_type='text/html')
+

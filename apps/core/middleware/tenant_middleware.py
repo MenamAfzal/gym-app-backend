@@ -46,7 +46,18 @@ class TenantMiddleware(MiddlewareMixin):
                 print("TenantMiddleware: General exception:", e)
 
         # ------------------------------------------------------------------
-        # STRATEGY 2: Subdomain Resolution (Fallback for Web/Public/Public APIs)
+        # STRATEGY 2: Header Resolution (Fallback for Web/Public/Public APIs via X-Tenant-ID)
+        # ------------------------------------------------------------------
+        if not tenant:
+            tenant_header = request.headers.get('X-Tenant-ID')
+            if tenant_header:
+                try:
+                    tenant = Tenant.objects.get(id=tenant_header)
+                except Tenant.DoesNotExist:
+                    pass
+
+        # ------------------------------------------------------------------
+        # STRATEGY 3: Subdomain Resolution (Fallback for Web/Public)
         # ------------------------------------------------------------------
         if not tenant:
             host = request.get_host().split(':')[0]

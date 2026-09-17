@@ -236,10 +236,9 @@ def process_substitute_broadcast_job(substitute_request_id):
 
         for staff in eligible_staff:
             from apps.notifications.services import NotificationService
-            from apps.notifications.events import NotificationEvent
-            NotificationService.handle_event(NotificationEvent(
+            from apps.notifications.events import SubstituteRequestBroadcastEvent
+            NotificationService.handle_event(SubstituteRequestBroadcastEvent(
                 tenant_id=sub_req.tenant_id,
-                event_type='substitute_request_broadcast',
                 recipient_id=staff.id,
                 entity_id=sub_req.id,
                 context_data={

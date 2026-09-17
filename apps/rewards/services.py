@@ -8,9 +8,10 @@ import logging
 import secrets
 from typing import List, Optional, Dict, Any
 from django.db import transaction, IntegrityError
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from apps.core.tenants.context import bypass_tenant_isolation
-from apps.users.models import User
+from apps.users.models import User, UserRole
 from apps.rewards.events import RewardEvent
 from apps.rewards.models import (
     RewardRule, RewardRuleVersion, ProcessedRewardEvent, RewardTransaction,
@@ -588,3 +589,176 @@ class RewardRedemptionService:
                     redemption.granted_package.save(update_fields=['status'])
 
                 return redemption
+
+
+class ClientReferralService:
+    """
+    Service for managing client-to-client referrals, validation, and reward fulfillment.
+    Supports Option 1 (In-App Referral Code) and Option 2 (Universal Link / Deep-Link).
+    """
+
+    @classmethod
+    def resolve_referrer_by_code(cls, tenant, code: str) -> Optional[User]:
+        """
+        Resolves a referrer User from a referral code within the specified tenant.
+        """
+        if not code or not str(code).strip():
+            return None
+
+        clean_code = str(code).strip().upper()
+
+        with bypass_tenant_isolation():
+            # 1. Check UserProfile.referral_code
+            from apps.users.models import UserProfile
+            profile = UserProfile.objects.filter(
+                referral_code__iexact=clean_code,
+                user__tenant=tenant,
+                user__is_active=True
+            ).select_related('user').first()
+
+            if profile and profile.user:
+                return profile.user
+
+            # 2. Fallback check: deterministic code from user UUID (REF-<hex[:8]>)
+            if clean_code.startswith("REF-"):
+                candidate_prefix = clean_code[4:12].lower()
+                for u in User.objects.filter(tenant=tenant, is_active=True):
+                    if u.id.hex[:8].lower() == candidate_prefix:
+                        try:
+                            if hasattr(u, 'profile') and u.profile:
+                                u.profile.referral_code = clean_code
+                                u.profile.save(update_fields=['referral_code'])
+                        except Exception:
+                            pass
+                        return u
+
+        return None
+
+    @classmethod
+    def validate_referral(cls, tenant, referrer: User, referee: User) -> None:
+        """
+        Strictly validates the referral:
+        - Referrer and referee cannot be the same user (anti-self-referral)
+        - Both must belong to the tenant
+        - Both must be active clients
+        - Single-use enforcement: referee cannot have already been referred
+        - Circular referral prevention
+        """
+        if referrer.id == referee.id:
+            raise ValidationError("Self-referrals are not permitted.")
+
+        if referrer.tenant_id != tenant.id:
+            raise ValidationError("Referrer does not belong to this gym.")
+
+        if referee.tenant_id != tenant.id:
+            raise ValidationError("Referee does not belong to this gym.")
+
+        if referrer.role != UserRole.CLIENT:
+            raise ValidationError("Referrer must be an active gym client.")
+
+        if referee.role != UserRole.CLIENT:
+            raise ValidationError("Referee must be a gym client.")
+
+        # Single-use check: has referee already been referred?
+        from apps.rewards.models import ClientReferral, ProcessedRewardEvent
+        with bypass_tenant_isolation():
+            already_referred = ClientReferral.objects.filter(
+                tenant=tenant,
+                referee=referee,
+                status=ClientReferral.ReferralStatus.COMPLETED
+            ).exists()
+            if already_referred:
+                raise ValidationError("You have already claimed or received a referral bonus.")
+
+            already_processed = ProcessedRewardEvent.all_objects.filter(
+                tenant=tenant,
+                event_type='referral.completed',
+                payload__referee_id=str(referee.id)
+            ).exists()
+            if already_processed:
+                raise ValidationError("A referral for this account has already been processed.")
+
+            # Anti-circular check: did referee previously refer referrer?
+            circular = ClientReferral.objects.filter(
+                tenant=tenant,
+                referrer=referee,
+                referee=referrer,
+                status=ClientReferral.ReferralStatus.COMPLETED
+            ).exists()
+            if circular:
+                raise ValidationError("Circular referrals between the same accounts are not permitted.")
+
+    @classmethod
+    def process_referral(
+        cls,
+        tenant,
+        referee: User,
+        referral_code: str,
+        method: str = 'CODE'
+    ) -> Dict[str, Any]:
+        """
+        Executes referral completion and awards applicable rewards to both users.
+        """
+        referrer = cls.resolve_referrer_by_code(tenant, referral_code)
+        if not referrer:
+            raise ValidationError("Invalid or unresolvable referral code.")
+
+        cls.validate_referral(tenant, referrer, referee)
+
+        from apps.rewards.models import ClientReferral
+        from apps.rewards.events import RewardEvent
+
+        with transaction.atomic():
+            # 1. Award Referrer (Client A)
+            referrer_event = RewardEvent.create_referral_completed(
+                tenant_id=tenant.id,
+                referrer_id=referrer.id,
+                referee_id=referee.id
+            )
+            referrer_txs = RewardEngineService.handle_event(referrer_event)
+            points_awarded_referrer = sum(
+                tx.action_payload.get('amount', 0)
+                for tx in referrer_txs
+                if tx.action_type == 'POINTS' and tx.result_status == ExecutionStatus.SUCCESS
+            )
+
+            # 2. Award Referee (Client B)
+            referee_event = RewardEvent.create_referral_referee_reward(
+                tenant_id=tenant.id,
+                referee_id=referee.id,
+                referrer_id=referrer.id
+            )
+            referee_txs = RewardEngineService.handle_event(referee_event)
+            points_awarded_referee = sum(
+                tx.action_payload.get('amount', 0)
+                for tx in referee_txs
+                if tx.action_type == 'POINTS' and tx.result_status == ExecutionStatus.SUCCESS
+            )
+
+            # 3. Record completed ClientReferral
+            with bypass_tenant_isolation():
+                referral_record = ClientReferral.objects.create(
+                    tenant=tenant,
+                    referrer=referrer,
+                    referee=referee,
+                    referral_code=referral_code.strip().upper(),
+                    method=method,
+                    status=ClientReferral.ReferralStatus.COMPLETED,
+                    points_awarded_referrer=points_awarded_referrer,
+                    points_awarded_referee=points_awarded_referee
+                )
+
+        return {
+            'referral_id': str(referral_record.id),
+            'referrer_id': str(referrer.id),
+            'referrer_email': referrer.email,
+            'referee_id': str(referee.id),
+            'referee_email': referee.email,
+            'referral_code': referral_record.referral_code,
+            'method': method,
+            'points_awarded_referrer': points_awarded_referrer,
+            'points_awarded_referee': points_awarded_referee,
+            'transactions_created': len(referrer_txs) + len(referee_txs),
+            'completed_at': referral_record.completed_at.isoformat() if referral_record.completed_at else None,
+        }
+

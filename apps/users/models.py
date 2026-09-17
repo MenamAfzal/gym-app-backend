@@ -17,6 +17,7 @@ class UserRole(models.TextChoices):
     PLATFORM_ADMIN = 'platform_admin', _('Platform Admin')
     GYM_OWNER = 'gym_owner', _('Gym Owner')
     GYM_MANAGER = 'gym_manager', _('Gym Manager')
+    GYM_ADMIN = 'gym_admin', _('Gym Admin')
     FRONT_DESK = 'front_desk', _('Front Desk')
     TRAINER = 'trainer', _('Trainer')
     CLIENT = 'client', _('Client')
@@ -188,6 +189,34 @@ class UserProfile(UUIDMixin, TimestampMixin):
         help_text="Emergency contact phone number"
     )
 
+    # Referral
+    referral_code = models.CharField(
+        max_length=50,
+        unique=True,
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Unique client referral code"
+    )
+
+    def get_or_create_referral_code(self) -> str:
+        """
+        Returns the existing referral code, or generates a deterministic unique code.
+        """
+        if self.referral_code:
+            return self.referral_code
+
+        base_code = f"REF-{self.user.id.hex[:8].upper()}"
+        code = base_code
+        counter = 1
+        while UserProfile.objects.filter(referral_code=code).exclude(pk=self.pk).exists():
+            code = f"{base_code}-{counter}"
+            counter += 1
+
+        self.referral_code = code
+        self.save(update_fields=['referral_code'])
+        return self.referral_code
+
     def __str__(self):
         return f"Profile for {self.user.email}"
 
@@ -238,6 +267,14 @@ class PendingRegistration(models.Model):
     
     # Tenant Context (Critical for your SaaS)
     tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name='pending_registrations')
+
+    # Referral tracking
+    referral_code = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text="Referral code used during registration"
+    )
 
     # Basic Profile Fields
     nickname = models.CharField(max_length=50, blank=True)

@@ -170,6 +170,8 @@ class AuthService:
             "password_hash": password_hash,
             "role": validated_data["role"],
             "tenant": tenant,
+            # Referral
+            "referral_code": validated_data.get("referral_code", ""),
             # Basic Profile
             "nickname": validated_data.get("nickname", ""),
             "bio": validated_data.get("bio", ""),
@@ -333,8 +335,23 @@ class AuthService:
         
         profile.save()
 
-        # 3. Cleanup
+        # 3. Cleanup & Referral attribution
+        referral_code = getattr(pending, 'referral_code', None)
         pending.delete()
+
+        if referral_code and user.role == UserRole.CLIENT:
+            try:
+                from apps.rewards.services import ClientReferralService
+                ClientReferralService.process_referral(
+                    tenant=user.tenant,
+                    referee=user,
+                    referral_code=referral_code,
+                    method='LINK'
+                )
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning("Failed to auto-process referral on registration for %s: %s", user.email, e)
 
         return user
     

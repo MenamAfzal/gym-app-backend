@@ -1325,11 +1325,31 @@ class PlatformAppsWiringIntegrationTests(RewardsBaseTestCase):
         get_res = self.client.get("/api/v1/rewards/client/referrals/")
         self.assertEqual(get_res.status_code, 200)
         self.assertIn("referral_code", get_res.data)
+        ref_code = get_res.data["referral_code"]
 
-        # POST complete referral
-        post_res = self.client.post(
+        # Invite via email: returns 200 invited and DOES NOT create any stub user
+        invite_res = self.client.post(
             "/api/v1/rewards/client/referrals/",
             data={"referee_email": "friend_alex@alphafit.com"},
+            format="json"
+        )
+        self.assertEqual(invite_res.status_code, 200)
+        self.assertEqual(invite_res.data["status"], "invitation_sent")
+        self.assertFalse(User.objects.filter(email="friend_alex@alphafit.com").exists())
+
+        # Registration-First: Friend alex registers
+        alex = User.objects.create_user(
+            email="friend_alex@alphafit.com",
+            password="Password123!",
+            role=UserRole.CLIENT,
+            tenant=self.tenant1
+        )
+
+        # Friend alex applies member1's referral code
+        self.client.force_authenticate(user=alex)
+        post_res = self.client.post(
+            "/api/v1/rewards/client/referrals/apply/",
+            data={"referral_code": ref_code},
             format="json"
         )
         self.assertEqual(post_res.status_code, 201)
@@ -2230,6 +2250,66 @@ class RewardPaginationTests(RewardsBaseTestCase):
         points = [t["threshold_points"] for t in res.data["results"]]
         self.assertEqual(points, sorted(points))
 
+        # Test ordering by legacy 'level' parameter does not raise FieldError
+        res_level_asc = self.client.get("/api/v1/rewards/admin/tiers/?ordering=level")
+        self.assertEqual(res_level_asc.status_code, 200)
+        points_asc = [t["threshold_points"] for t in res_level_asc.data["results"]]
+        self.assertEqual(points_asc, sorted(points_asc))
+
+        res_level_desc = self.client.get("/api/v1/rewards/admin/tiers/?ordering=-level")
+        self.assertEqual(res_level_desc.status_code, 200)
+        points_desc = [t["threshold_points"] for t in res_level_desc.data["results"]]
+        self.assertEqual(points_desc, sorted(points_asc, reverse=True))
+
+        # Test filtering by level query param
+        res_filter = self.client.get("/api/v1/rewards/admin/tiers/?level=500")
+        self.assertEqual(res_filter.status_code, 200)
+        self.assertEqual(res_filter.data["count"], 1)
+        self.assertEqual(res_filter.data["results"][0]["threshold_points"], 500)
+
+    def test_admin_tier_crud_with_badge_and_level_alias(self):
+        """Verify tier creation and update with badge_id and level alias correctly associates badge."""
+        self.client.force_authenticate(user=self.owner1)
+        badge = Badge.objects.create(
+            tenant=self.tenant1,
+            name="VIP Badge",
+            slug="vip-badge",
+            category="MILESTONE"
+        )
+
+        # 1. Create with badge_id and level
+        create_payload = {
+            "program": str(self.program.id),
+            "name": "Master Tier",
+            "level": 7500,
+            "multiplier": 2.5,
+            "badge_id": str(badge.id),
+            "perks_description": "Exclusive access to sauna and VIP lounge."
+        }
+        res = self.client.post("/api/v1/rewards/admin/tiers/", create_payload, format="json")
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.data["threshold_points"], 7500)
+        self.assertEqual(res.data["level"], 7500)
+        self.assertEqual(res.data["badge"], badge.id)
+        self.assertIsNotNone(res.data["badge_details"])
+        self.assertEqual(res.data["badge_details"]["name"], "VIP Badge")
+
+        tier_id = res.data["id"]
+        tier = RewardTier.objects.get(id=tier_id)
+        self.assertEqual(tier.badge, badge)
+        self.assertEqual(tier.threshold_points, 7500)
+        self.assertEqual(tier.level, 7500)
+
+        # 2. Update with badge_id=null to remove badge
+        update_payload = {
+            "badge_id": None
+        }
+        patch_res = self.client.patch(f"/api/v1/rewards/admin/tiers/{tier_id}/", update_payload, format="json")
+        self.assertEqual(patch_res.status_code, 200)
+        self.assertIsNone(patch_res.data["badge"])
+        tier.refresh_from_db()
+        self.assertIsNone(tier.badge)
+
     def test_admin_catalog_and_client_store_pagination(self):
         """Verify Admin & Client Catalog items pagination and affordability indicators."""
         # Create 25 catalog items
@@ -2414,10 +2494,19 @@ class RewardPaginationTests(RewardsBaseTestCase):
             ]
         )
 
+        referee_bob = User.objects.create_user(
+            email="friend_bob@alphafit.com",
+            password="Password123!",
+            role=UserRole.CLIENT,
+            tenant=self.tenant1
+        )
         self.client.force_authenticate(user=self.member1)
+        ref_code = self.client.get("/api/v1/rewards/client/referrals/").data["referral_code"]
+
+        self.client.force_authenticate(user=referee_bob)
         ref_resp = self.client.post(
-            "/api/v1/rewards/client/referrals/",
-            data={"referee_email": "friend_bob@alphafit.com"},
+            "/api/v1/rewards/client/referrals/apply/",
+            data={"referral_code": ref_code},
             format="json"
         )
         self.assertEqual(ref_resp.status_code, 201)
@@ -2428,6 +2517,7 @@ class RewardPaginationTests(RewardsBaseTestCase):
         self.assertEqual(rule_pkg.grant_source, PackageGrantSource.REWARD_RULE)
 
         # 2. Member redeems 2 packages from the Reward Store
+        self.client.force_authenticate(user=self.member1)
         catalog_pkg_item = RewardCatalogItem.objects.create(
             tenant=self.tenant1,
             name="Free Class Voucher",

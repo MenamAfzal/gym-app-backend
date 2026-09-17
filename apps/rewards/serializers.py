@@ -145,14 +145,45 @@ class RewardTierSerializer(serializers.ModelSerializer):
     program = serializers.PrimaryKeyRelatedField(queryset=RewardProgram.all_objects.all())
     badge = serializers.PrimaryKeyRelatedField(queryset=Badge.all_objects.all(), required=False, allow_null=True)
     badge_details = BadgeSerializer(source='badge', read_only=True)
+    badge_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+    level = serializers.IntegerField(source='threshold_points', required=False)
 
     class Meta:
         model = RewardTier
         fields = [
-            'id', 'program', 'name', 'threshold_points', 'multiplier',
-            'perks_description', 'badge', 'badge_details', 'created_at'
+            'id', 'program', 'name', 'threshold_points', 'level', 'multiplier',
+            'perks_description', 'badge', 'badge_id', 'badge_details', 'created_at'
         ]
         read_only_fields = ['id', 'created_at']
+
+    def to_internal_value(self, data):
+        if hasattr(data, 'copy'):
+            data = data.copy()
+        else:
+            data = dict(data)
+
+        # Map badge_id to badge if badge was not explicitly provided
+        if 'badge_id' in data and 'badge' not in data:
+            data['badge'] = data.pop('badge_id')
+
+        # Map level to threshold_points if threshold_points was not explicitly provided
+        if 'level' in data and 'threshold_points' not in data:
+            data['threshold_points'] = data.pop('level')
+
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        # Resolve badge_id if still present in attrs
+        badge_id = attrs.pop('badge_id', None)
+        if badge_id is not None and 'badge' not in attrs:
+            if badge_id:
+                try:
+                    attrs['badge'] = Badge.all_objects.get(id=badge_id)
+                except Badge.DoesNotExist:
+                    raise serializers.ValidationError({'badge_id': 'Badge not found.'})
+            else:
+                attrs['badge'] = None
+        return super().validate(attrs)
 
 
 class RewardCatalogItemSerializer(serializers.ModelSerializer):

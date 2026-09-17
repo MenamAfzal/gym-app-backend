@@ -1,8 +1,15 @@
 from rest_framework import serializers
-from .models import BillingFeature, BillingPlan, TenantBillingSubscription
+from .models import (
+    BillingFeature,
+    BillingPlan,
+    TenantBillingSubscription,
+    GymFeatureEntitlement,
+)
 
 
 class BillingFeatureSerializer(serializers.ModelSerializer):
+    platform_is_active = serializers.BooleanField(source="is_active", read_only=True)
+
     class Meta:
         model = BillingFeature
         fields = [
@@ -15,10 +22,32 @@ class BillingFeatureSerializer(serializers.ModelSerializer):
             "stripe_product_id",
             "stripe_price_id",
             "is_active",
+            "platform_is_active",
             "created_at",
             "updated_at",
         ]
         read_only_fields = ["id", "stripe_product_id", "stripe_price_id", "created_at", "updated_at"]
+
+
+class GymFeatureEntitlementSerializer(serializers.ModelSerializer):
+    feature = BillingFeatureSerializer(read_only=True)
+    is_entitled = serializers.SerializerMethodField()
+
+    class Meta:
+        model = GymFeatureEntitlement
+        fields = [
+            "id",
+            "feature",
+            "is_active",
+            "is_entitled",
+            "current_period_end",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = fields
+
+    def get_is_entitled(self, obj):
+        return obj.is_entitled()
 
 
 class BillingPlanSerializer(serializers.ModelSerializer):
@@ -31,6 +60,7 @@ class BillingPlanSerializer(serializers.ModelSerializer):
 class TenantBillingSubscriptionSerializer(serializers.ModelSerializer):
     billing_plan = BillingPlanSerializer(read_only=True)
     active_features = BillingFeatureSerializer(many=True, read_only=True)
+    feature_entitlements = serializers.SerializerMethodField()
 
     class Meta:
         model = TenantBillingSubscription
@@ -38,6 +68,7 @@ class TenantBillingSubscriptionSerializer(serializers.ModelSerializer):
             "id",
             "billing_plan",
             "active_features",
+            "feature_entitlements",
             "status",
             "current_period_end",
             "cancel_at_period_end",
@@ -47,6 +78,10 @@ class TenantBillingSubscriptionSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+    def get_feature_entitlements(self, obj):
+        entitlements = GymFeatureEntitlement.all_objects.filter(subscription=obj)
+        return GymFeatureEntitlementSerializer(entitlements, many=True).data
 
 
 class CheckoutRequestSerializer(serializers.Serializer):

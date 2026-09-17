@@ -305,6 +305,15 @@ class RewardTier(TenantAwareModel):
     def __str__(self):
         return f"{self.name} ({self.threshold_points}+ pts)"
 
+    @property
+    def level(self):
+        """Alias for threshold_points for backward compatibility."""
+        return self.threshold_points
+
+    @level.setter
+    def level(self, value):
+        self.threshold_points = value
+
 
 class RewardWallet(TenantAwareModel):
     """
@@ -662,3 +671,67 @@ class RewardPointLedger(TenantAwareModel):
     def __str__(self):
         sign = "+" if self.amount >= 0 else ""
         return f"{self.user.email}: {sign}{self.amount} pts ({self.transaction_type}) -> Bal: {self.balance_after}"
+
+
+class ClientReferral(TenantAwareModel):
+    """
+    Tracks client-to-client referrals within a gym tenant.
+    Enforces consent-based, registration-first referral attribution.
+    """
+    class ReferralMethod(models.TextChoices):
+        CODE = 'CODE', _('Referral Code')
+        LINK = 'LINK', _('Referral Link / Deep-Link')
+
+    class ReferralStatus(models.TextChoices):
+        PENDING = 'PENDING', _('Pending')
+        COMPLETED = 'COMPLETED', _('Completed')
+        EXPIRED = 'EXPIRED', _('Expired')
+
+    referrer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='referrals_given',
+        help_text="The existing gym client who shared their referral code/link"
+    )
+    referee = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='referral_received',
+        help_text="The newly referred client"
+    )
+    referral_code = models.CharField(
+        max_length=50,
+        db_index=True,
+        help_text="The referral code used"
+    )
+    method = models.CharField(
+        max_length=20,
+        choices=ReferralMethod.choices,
+        default=ReferralMethod.CODE,
+        help_text="Whether completed via direct in-app code or universal referral link"
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=ReferralStatus.choices,
+        default=ReferralStatus.COMPLETED,
+        db_index=True
+    )
+    points_awarded_referrer = models.PositiveIntegerField(default=0)
+    points_awarded_referee = models.PositiveIntegerField(default=0)
+    completed_at = models.DateTimeField(auto_now_add=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _('Client Referral')
+        verbose_name_plural = _('Client Referrals')
+        unique_together = ('tenant', 'referee')
+        ordering = ['-completed_at']
+        indexes = [
+            models.Index(fields=['tenant', 'referral_code']),
+            models.Index(fields=['tenant', 'referrer']),
+            models.Index(fields=['tenant', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.referrer.email} -> {self.referee.email} ({self.status})"
+

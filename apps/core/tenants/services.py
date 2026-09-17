@@ -18,7 +18,7 @@ from apps.core.tenants.models import (
 )
 from apps.users.services import UserService
 from apps.users.models import UserRole
-from django.db import transaction
+from django.db import transaction, models
 
 
 class TenantEntitlementService:
@@ -89,8 +89,33 @@ class TenantEntitlementService:
             for entitlement in plan_entitlements:
                 entitlements[entitlement.feature.key] = entitlement.value
         
-        # Step 2: Apply tenant-specific overrides
+        # Step 2: Apply GymFeatureEntitlement (payments app billing features)
+        # Decoupled from global BillingFeature.is_active: existing gyms retain access during active cycle
         now = timezone.now()
+        try:
+            from apps.payments.models import GymFeatureEntitlement, TenantBillingSubscription
+            gym_entitlements = GymFeatureEntitlement.all_objects.filter(
+                tenant=tenant,
+                is_active=True
+            ).select_related('subscription', 'feature')
+
+            for ge in gym_entitlements:
+                if ge.is_entitled():
+                    entitlements[ge.feature.code] = True
+
+            # Also check active TenantBillingSubscription features as fallback/supplement
+            active_billing_sub = TenantBillingSubscription.all_objects.filter(
+                tenant=tenant,
+                status=TenantBillingSubscription.StatusChoices.ACTIVE
+            ).prefetch_related('active_features').first()
+
+            if active_billing_sub and (not active_billing_sub.current_period_end or active_billing_sub.current_period_end >= now):
+                for feat in active_billing_sub.active_features.all():
+                    entitlements[feat.code] = True
+        except Exception:
+            pass
+
+        # Step 3: Apply tenant-specific overrides
         overrides = TenantEntitlementOverride.objects.filter(
             tenant=tenant
         ).filter(
@@ -144,18 +169,24 @@ class TenantEntitlementService:
         
         entitlements = cls.get_entitlements(tenant)
         
-        # Get value, default to False for boolean features
-        value = entitlements.get(feature_key, False)
-        
-        # Handle different value formats
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, float)):
-            return value > 0
-        if isinstance(value, str):
-            return value.lower() in ('true', '1', 'yes')
-        
-        return bool(value)
+        # Get value, default to None so we can differentiate missing vs explicit False
+        value = entitlements.get(feature_key, None)
+        if value is not None:
+            # Handle different value formats
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return value > 0
+            if isinstance(value, str):
+                return value.lower() in ('true', '1', 'yes')
+            return bool(value)
+
+        # Direct fallback check via GymFeatureEntitlement (safe and decoupled)
+        try:
+            from apps.payments.models import GymFeatureEntitlement
+            return GymFeatureEntitlement.is_gym_entitled(tenant, feature_key)
+        except Exception:
+            return False
     
     @classmethod
     def get_limit(cls, tenant, feature_key):
@@ -326,6 +357,3 @@ class TenantAdministrationService:
             }
         )
         return override
-
-# Import models for Q lookup
-from django.db import models

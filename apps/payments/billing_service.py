@@ -9,6 +9,7 @@ from .models import (
     BillingFeature,
     BillingPlan,
     TenantBillingSubscription,
+    GymFeatureEntitlement,
 )
 
 logger = logging.getLogger(__name__)
@@ -289,6 +290,7 @@ class FeatureBillingService:
 
         billing_sub.save()
         billing_sub.active_features.set(features)
+        GymFeatureEntitlement.sync_for_subscription(billing_sub)
 
         # Record the payment in the platform ledger
         amount_total = _get(session_obj, "amount_total")
@@ -410,6 +412,7 @@ class FeatureBillingService:
             )
 
         billing_sub.save(update_fields=["status", "current_period_end", "cancel_at_period_end"])
+        GymFeatureEntitlement.sync_for_subscription(billing_sub)
         logger.info("Synced subscription %s -> status=%s", stripe_sub_id, raw_status)
 
     @classmethod
@@ -432,6 +435,7 @@ class FeatureBillingService:
             )
             billing_sub.status = TenantBillingSubscription.StatusChoices.CANCELED
             billing_sub.save(update_fields=["status"])
+            GymFeatureEntitlement.all_objects.filter(subscription=billing_sub).update(is_active=False)
             logger.info("Subscription %s marked as canceled.", stripe_sub_id)
         except TenantBillingSubscription.DoesNotExist:
             logger.debug(

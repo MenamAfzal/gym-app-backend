@@ -7,9 +7,13 @@ from rest_framework.permissions import BasePermission
 from apps.core.tenants.services import TenantEntitlementService
 
 
+from apps.payments.permissions import GymFeaturePermission
+
+
 class TenantFeaturePermission(BasePermission):
     """
     Base permission class to check if tenant has access to a feature.
+    Checks tenant's active feature entitlement (decoupled from global feature is_active).
     
     Usage:
         class MyView(APIView):
@@ -19,10 +23,11 @@ class TenantFeaturePermission(BasePermission):
             feature_key = 'api_access'
     
     Subclasses must set:
-        - feature_key: The feature key to check
+        - feature_key or feature_code: The feature key to check
     """
     
     feature_key = None  # Override in subclass
+    feature_code = None
     
     def has_permission(self, request, view):
         """
@@ -35,18 +40,19 @@ class TenantFeaturePermission(BasePermission):
         Returns:
             bool: True if tenant has feature, False otherwise
         """
-        if not self.feature_key:
+        key = self.feature_key or getattr(self, 'feature_code', None) or getattr(view, 'feature_key', None) or getattr(view, 'feature_code', None)
+        if not key:
             raise ValueError(
-                f"{self.__class__.__name__} must define 'feature_key'"
+                f"{self.__class__.__name__} must define 'feature_key' or 'feature_code'"
             )
         
-        if not hasattr(request, 'tenant'):
+        if not hasattr(request, 'tenant') or not request.tenant:
             # Middleware not applied or request not tenant-scoped
             return False
         
         return TenantEntitlementService.has_feature(
             request.tenant, 
-            self.feature_key
+            key
         )
 
 

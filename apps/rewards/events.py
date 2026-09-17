@@ -234,6 +234,22 @@ class RewardEvent:
         )
 
     @classmethod
+    def create_referral_referee_reward(
+        cls,
+        tenant_id: UUID,
+        referee_id: UUID,
+        referrer_id: UUID
+    ) -> 'RewardEvent':
+        return cls(
+            tenant_id=tenant_id,
+            event_type='referral.referee_reward',
+            user_id=referee_id,
+            idempotency_key=f"referral_referee:{referee_id}",
+            payload={'referee_id': str(referee_id), 'referrer_id': str(referrer_id)}
+        )
+
+
+    @classmethod
     def create_social_post_created(
         cls,
         tenant_id: UUID,

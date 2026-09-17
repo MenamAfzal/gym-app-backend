@@ -1,6 +1,7 @@
 from django.shortcuts import get_object_or_404
 from django.db import transaction, models
 from django.db.models import Q, Count, F
+from django.db.models.deletion import ProtectedError
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from django.utils.dateparse import parse_date, parse_datetime
@@ -137,6 +138,15 @@ class SpotTypeViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         tenant = getattr(self.request, 'tenant', None) or self.request.user.tenant
         serializer.save(tenant=tenant)
+
+    def destroy(self, request, *args, **kwargs):
+        try:
+            return super().destroy(request, *args, **kwargs)
+        except ProtectedError:
+            return Response(
+                {"detail": "This Spot Type is currently in use by an active layout or room. You must remove it from the layout before deleting."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
 
 class RoomLayoutViewSet(viewsets.ModelViewSet):
