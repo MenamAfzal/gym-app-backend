@@ -19,9 +19,12 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from apps.food_logger.views import AnalyzeFoodAPIView
+from apps.rewards.views import ReferralJoinLandingView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    path('join/', ReferralJoinLandingView.as_view(), name='root-referral-join-landing'),
+    path('join', ReferralJoinLandingView.as_view(), name='root-referral-join-landing-no-slash'),
  
     path('ai/analyze-food/', AnalyzeFoodAPIView.as_view(), name='top-ai-analyze-food'),
     path('api/v1/ai/analyze-food/', AnalyzeFoodAPIView.as_view(), name='v1-ai-analyze-food'),

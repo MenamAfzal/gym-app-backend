@@ -11,9 +11,11 @@ from rest_framework import viewsets, status, mixins, parsers, filters
 from rest_framework.views import APIView
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework import permissions
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Sum, Count, Q
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 from apps.rewards.models import (
     RewardProgram, RewardRule, Badge, RewardTier,
@@ -872,22 +874,38 @@ class ClientRedemptionViewSet(viewsets.ModelViewSet):
 
 class ClientReferralView(APIView):
     """
-    Client Referral Management & Testing API.
-    Provides members with their referral code/link, and processes referral completions
-    by emitting the canonical referral.completed event to the Rewards Engine.
+    Client Referral Management API.
+    Provides members with their referral code/link, allows sharing/inviting via email
+    without creating unauthorized users, and processes referral redemptions.
     """
     permission_classes = [IsAuthenticated, IsRewardClient]
 
     def get(self, request):
         tenant = get_request_tenant(request)
         user = request.user
-        code = f"REF-{user.id.hex[:8].upper()}"
         base_url = request.build_absolute_uri('/')[:-1]
 
-        referral_count = ProcessedRewardEvent.all_objects.filter(
+        from apps.rewards.referral_service import ReferralService
+        from apps.rewards.models import ClientReferral, ReferralStatus
+
+        code = ReferralService.get_or_create_referral_code(user)
+
+        completed_count = ClientReferral.all_objects.filter(
             tenant=tenant,
-            event_type='referral.completed',
-            payload__referrer_id=str(user.id)
+            referrer=user,
+            status=ReferralStatus.COMPLETED
+        ).count()
+        if completed_count == 0:
+            completed_count = ProcessedRewardEvent.all_objects.filter(
+                tenant=tenant,
+                event_type='referral.completed',
+                payload__referrer_id=str(user.id)
+            ).count()
+
+        pending_count = ClientReferral.all_objects.filter(
+            tenant=tenant,
+            referrer=user,
+            status=ReferralStatus.PENDING
         ).count()
 
         return Response({
@@ -895,13 +913,15 @@ class ClientReferralView(APIView):
             'referrer_email': user.email,
             'referral_code': code,
             'referral_link': f"{base_url}/join?ref={code}",
-            'total_referrals_completed': referral_count,
-            'description': "Share your referral code with friends. When they join, you earn reward points and package credits."
+            'total_referrals_completed': completed_count,
+            'total_referrals_pending': pending_count,
+            'description': "Share your referral code with friends. When they join, you both earn reward points and bonuses."
         })
 
     def post(self, request):
         tenant = get_request_tenant(request)
-        referrer = request.user
+        current_user = request.user
+        base_url = request.build_absolute_uri('/')[:-1]
 
         referee_id = request.data.get('referee_id')
         referee_email = request.data.get('referee_email')
@@ -909,62 +929,323 @@ class ClientReferralView(APIView):
 
         if not referee_id and not referee_email and not referral_code:
             return Response(
-                {'error': 'Either referee_email or referee_id or referral_code is required.'},
+                {'error': 'Either referral_code, referee_email, or referee_id is required.'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        referee = None
-        if referee_id:
+        from apps.rewards.referral_service import ReferralService
+
+        # ----------------------------------------------------------------------
+        # Flow 1: Client B enters Client A's referral code from their account
+        # ----------------------------------------------------------------------
+        if referral_code:
+            referee = current_user
+            referrer = ReferralService.resolve_referrer_by_code(referral_code, tenant=tenant)
+            if not referrer:
+                return Response({'error': 'Invalid or expired referral code.', 'detail': 'Invalid or expired referral code.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            if referrer.id == referee.id:
+                return Response({'error': 'Self-referrals are not permitted.', 'detail': 'You cannot refer yourself.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                result = ReferralService.complete_referral(
+                    referrer=referrer,
+                    referee=referee,
+                    tenant=tenant,
+                    code=referral_code
+                )
+                return Response(result, status=status.HTTP_201_CREATED)
+            except DjangoValidationError as ex:
+                msg = ex.message if hasattr(ex, 'message') else str(ex)
+                return Response({'error': msg, 'detail': msg}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as ex:
+                return Response({'error': f"Failed processing referral: {str(ex)}", 'detail': str(ex)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # ----------------------------------------------------------------------
+        # Flow 2: Client A invites a friend via referee_email
+        # ----------------------------------------------------------------------
+        elif referee_email:
+            try:
+                result = ReferralService.invite_referee_by_email(
+                    referrer=current_user,
+                    referee_email=referee_email,
+                    tenant=tenant,
+                    base_url=base_url
+                )
+                return Response(result, status=status.HTTP_201_CREATED)
+            except DjangoValidationError as ex:
+                msg = ex.message if hasattr(ex, 'message') else str(ex)
+                return Response({'error': msg}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as ex:
+                return Response({'error': f"Failed processing referral: {str(ex)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # ----------------------------------------------------------------------
+        # Flow 3: Direct referee_id specification
+        # ----------------------------------------------------------------------
+        elif referee_id:
             try:
                 import uuid
-                referee = User.objects.filter(id=uuid.UUID(str(referee_id))).first()
+                referee = User.objects.filter(id=uuid.UUID(str(referee_id)), tenant=tenant).first()
             except (ValueError, TypeError):
                 return Response({'error': 'Invalid referee_id format.'}, status=status.HTTP_400_BAD_REQUEST)
-        elif referee_email:
-            referee_email = str(referee_email).strip().lower()
-            referee = User.objects.filter(email=referee_email).first()
+
             if not referee:
-                import secrets
-                referee = User.objects.create_user(
-                    email=referee_email,
-                    password=secrets.token_urlsafe(12),
-                    tenant=tenant,
-                    role=UserRole.CLIENT
+                return Response({'error': 'Referee user could not be resolved.'}, status=status.HTTP_404_NOT_FOUND)
+
+            if referee.id == current_user.id:
+                return Response({'error': 'Self-referrals are not permitted.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                result = ReferralService.complete_referral(
+                    referrer=current_user,
+                    referee=referee,
+                    tenant=tenant
                 )
-        elif referral_code:
-            referee = User.objects.filter(id=referrer.id).first()
+                return Response(result, status=status.HTTP_201_CREATED)
+            except DjangoValidationError as ex:
+                msg = ex.message if hasattr(ex, 'message') else str(ex)
+                return Response({'error': msg}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as ex:
+                return Response({'error': f"Failed processing referral: {str(ex)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        if not referee:
-            return Response({'error': 'Referee user could not be resolved.'}, status=status.HTTP_404_NOT_FOUND)
 
-        if referee.id == referrer.id:
-            return Response({'error': 'Self-referrals are not permitted.'}, status=status.HTTP_400_BAD_REQUEST)
+class ReferralResolveView(APIView):
+    """
+    Public endpoint for mobile apps and web clients to validate a referral code/link.
+    Returns gym details, referrer nickname, and deep link metadata.
+    """
+    permission_classes = [permissions.AllowAny]
 
-        try:
-            from apps.rewards.events import RewardEvent
-            from apps.rewards.services import RewardEngineService
+    def get(self, request):
+        code = request.query_params.get('code') or request.query_params.get('ref')
+        if not code:
+            return Response({'error': 'Referral code parameter "code" or "ref" is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-            event = RewardEvent.create_referral_completed(
-                tenant_id=tenant.id,
-                referrer_id=referrer.id,
-                referee_id=referee.id
-            )
-            transactions = RewardEngineService.handle_event(event)
-            points_awarded = sum(
-                tx.action_payload.get('amount', 0)
-                for tx in transactions
-                if tx.action_type == 'POINTS' and tx.result_status == 'SUCCESS'
-            )
+        from apps.rewards.referral_service import ReferralService
+        referrer = ReferralService.resolve_referrer_by_code(code)
+        if not referrer:
+            return Response({'valid': False, 'error': 'Invalid or expired referral code.'}, status=status.HTTP_404_NOT_FOUND)
+
+        tenant = referrer.tenant
+        referrer_name = ""
+        if hasattr(referrer, 'profile') and referrer.profile:
+            referrer_name = referrer.profile.nickname or f"{referrer.profile.first_name} {referrer.profile.last_name}".strip()
+        if not referrer_name:
+            referrer_name = referrer.email.split('@')[0]
+
+        clean_code = code.strip().upper()
+        deep_link = f"fitverx://referral?code={clean_code}&tenant_id={str(tenant.id) if tenant else ''}"
+
+        return Response({
+            'valid': True,
+            'referral_code': clean_code,
+            'referrer_name': referrer_name,
+            'tenant_id': str(tenant.id) if tenant else None,
+            'tenant_name': tenant.name if tenant else "FitVerx Gym",
+            'tenant_subdomain': tenant.subdomain if tenant else None,
+            'deep_link': deep_link,
+            'app_store_url': "https://apps.apple.com/app/fitverx",
+            'play_store_url': "https://play.google.com/store/apps/details?id=com.fitverx.client"
+        })
+
+
+class ReferralJoinLandingView(APIView):
+    """
+    Handles shared referral links e.g. https://<domain>/join?ref=REF-XXXX
+    If accessed via browser: serves an aesthetic, responsive HTML landing page
+    with Open in App (deep-link), App Store, Play Store, and web register buttons.
+    If accessed via API/JSON: returns the referral resolution JSON.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        code = request.query_params.get('ref') or request.query_params.get('code')
+        from apps.rewards.referral_service import ReferralService
+        referrer = ReferralService.resolve_referrer_by_code(code) if code else None
+
+        tenant = referrer.tenant if referrer else None
+        gym_name = tenant.name if tenant else "FitVerx Gym"
+
+        referrer_name = "A friend"
+        if referrer:
+            if hasattr(referrer, 'profile') and referrer.profile:
+                referrer_name = referrer.profile.nickname or f"{referrer.profile.first_name} {referrer.profile.last_name}".strip()
+            if not referrer_name:
+                referrer_name = referrer.email.split('@')[0]
+
+        clean_code = code.strip().upper() if code else ""
+        deep_link = f"fitverx://referral?code={clean_code}&tenant_id={str(tenant.id) if tenant else ''}"
+
+        accept_header = request.headers.get('Accept', '')
+        if 'application/json' in accept_header and 'text/html' not in accept_header:
             return Response({
-                'status': 'success',
-                'message': 'Referral completed successfully.',
-                'referrer_id': str(referrer.id),
-                'referrer_email': referrer.email,
-                'referee_id': str(referee.id),
-                'referee_email': referee.email,
-                'event_type': 'referral.completed',
-                'transactions_created': len(transactions),
-                'points_awarded': points_awarded
-            }, status=status.HTTP_201_CREATED)
-        except Exception as ex:
-            return Response({'error': f"Failed processing referral: {str(ex)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                'valid': bool(referrer),
+                'referral_code': clean_code,
+                'referrer_name': referrer_name,
+                'tenant_name': gym_name,
+                'deep_link': deep_link
+            })
+
+        html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Join {gym_name} on FitVerx</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {{
+            --bg-primary: #0f172a;
+            --card-bg: #1e293b;
+            --accent: #6366f1;
+            --accent-hover: #4f46e5;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+        }}
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: 'Outfit', sans-serif;
+            background: radial-gradient(circle at top, #1e1b4b, var(--bg-primary));
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }}
+        .card {{
+            background: var(--card-bg);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 24px;
+            padding: 40px 32px;
+            max-width: 480px;
+            width: 100%;
+            text-align: center;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(12px);
+        }}
+        .badge {{
+            display: inline-block;
+            background: rgba(99, 102, 241, 0.15);
+            color: #a5b4fc;
+            padding: 6px 14px;
+            border-radius: 9999px;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 20px;
+            letter-spacing: 0.5px;
+        }}
+        h1 {{
+            font-size: 26px;
+            font-weight: 700;
+            margin-bottom: 12px;
+            line-height: 1.3;
+        }}
+        p.subtitle {{
+            color: var(--text-secondary);
+            font-size: 15px;
+            line-height: 1.6;
+            margin-bottom: 28px;
+        }}
+        .code-box {{
+            background: rgba(15, 23, 42, 0.6);
+            border: 1px dashed rgba(99, 102, 241, 0.5);
+            border-radius: 14px;
+            padding: 16px;
+            margin-bottom: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }}
+        .code-val {{
+            font-family: monospace;
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: 2px;
+            color: #818cf8;
+        }}
+        .copy-btn {{
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            border: none;
+            padding: 8px 14px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.2s ease;
+        }}
+        .copy-btn:hover {{ background: rgba(255, 255, 255, 0.2); }}
+        .btn {{
+            display: block;
+            width: 100%;
+            padding: 14px;
+            border-radius: 12px;
+            font-weight: 600;
+            font-size: 16px;
+            text-decoration: none;
+            cursor: pointer;
+            margin-bottom: 12px;
+            transition: all 0.2s ease;
+        }}
+        .btn-primary {{
+            background: var(--accent);
+            color: white;
+            box-shadow: 0 4px 14px 0 rgba(99, 102, 241, 0.39);
+        }}
+        .btn-primary:hover {{ background: var(--accent-hover); }}
+        .btn-secondary {{
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-primary);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }}
+        .btn-secondary:hover {{ background: rgba(255, 255, 255, 0.1); }}
+        .store-links {{
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }}
+        .store-links .btn {{
+            font-size: 13px;
+            padding: 10px;
+            margin-bottom: 0;
+        }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="badge">FITVERX REWARDS INVITATION</div>
+        <h1>You're Invited to Join {gym_name}!</h1>
+        <p class="subtitle">{referrer_name} invited you to join {gym_name}! Join today and earn exclusive reward points, free classes, and member bonuses.</p>
+        
+        <div class="code-box">
+            <span class="code-val" id="refCode">{clean_code or "FITVERX"}</span>
+            <button class="copy-btn" onclick="copyCode()">Copy</button>
+        </div>
+
+        <a href="{deep_link}" class="btn btn-primary">Open in FitVerx App</a>
+        
+        <div class="store-links">
+            <a href="https://apps.apple.com/app/fitverx" class="btn btn-secondary">App Store</a>
+            <a href="https://play.google.com/store/apps/details?id=com.fitverx.client" class="btn btn-secondary">Google Play</a>
+        </div>
+    </div>
+
+    <script>
+        function copyCode() {{
+            const code = document.getElementById('refCode').innerText;
+            navigator.clipboard.writeText(code).then(() => {{
+                const btn = document.querySelector('.copy-btn');
+                btn.innerText = 'Copied!';
+                setTimeout(() => {{ btn.innerText = 'Copy'; }}, 2000);
+            }});
+        }}
+        if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {{
+            setTimeout(() => {{ window.location.href = "{deep_link}"; }}, 500);
+        }}
+    </script>
+</body>
+</html>"""
+        from django.http import HttpResponse
+        return HttpResponse(html_content, content_type="text/html; charset=utf-8")
+

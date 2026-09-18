@@ -143,6 +143,9 @@ class UserProfile(UUIDMixin, TimestampMixin):
         blank=True
     )
     
+    # Referral Tracking
+    referral_code = models.CharField(max_length=30, blank=True, null=True, db_index=True, help_text="Unique member referral code")
+
     # Personal Information
     first_name = models.CharField(max_length=100, blank=True, help_text="User's first name")
     last_name = models.CharField(max_length=100, blank=True, help_text="User's last name")
@@ -270,6 +273,9 @@ class PendingRegistration(models.Model):
     # Emergency Contact
     emergency_contact_name = models.CharField(max_length=100, blank=True)
     emergency_contact_phone = models.CharField(max_length=20, blank=True)
+
+    # Referral Tracking
+    referral_code = models.CharField(max_length=50, blank=True, null=True, help_text="Referral code used during registration")
 
     created_at = models.DateTimeField(auto_now_add=True)
 

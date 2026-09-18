@@ -94,6 +94,15 @@ class UserService:
 
         UserProfile.objects.create(user=user, **profile_fields)
 
+        # Referral processing
+        referral_code = profile_data.get('referral_code')
+        try:
+            from apps.rewards.referral_service import ReferralService
+            ReferralService.get_or_create_referral_code(user)
+            ReferralService.check_and_complete_pending_referrals_for_user(user, referral_code=referral_code)
+        except Exception as e:
+            logger.warning(f"Failed to process referral for new user {user.id}: {e}")
+
         return user
 
     @staticmethod
@@ -190,6 +199,8 @@ class AuthService:
             # Emergency Contact
             "emergency_contact_name": validated_data.get("emergency_contact_name", ""),
             "emergency_contact_phone": validated_data.get("emergency_contact_phone", ""),
+            # Referral Code
+            "referral_code": validated_data.get("referral_code"),
         }
 
         # Handle Image if present
@@ -333,8 +344,16 @@ class AuthService:
         
         profile.save()
 
-        # 3. Cleanup
+        # 3. Cleanup & referral completion
+        referral_code = pending.referral_code
         pending.delete()
+
+        try:
+            from apps.rewards.referral_service import ReferralService
+            ReferralService.get_or_create_referral_code(user)
+            ReferralService.check_and_complete_pending_referrals_for_user(user, referral_code=referral_code)
+        except Exception as e:
+            logger.warning(f"Failed to process referral for verified user {user.id}: {e}")
 
         return user
     

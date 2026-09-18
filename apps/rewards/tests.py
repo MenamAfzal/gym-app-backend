@@ -1324,18 +1324,33 @@ class PlatformAppsWiringIntegrationTests(RewardsBaseTestCase):
         # GET referral code info
         get_res = self.client.get("/api/v1/rewards/client/referrals/")
         self.assertEqual(get_res.status_code, 200)
-        self.assertIn("referral_code", get_res.data)
+        ref_code = get_res.data["referral_code"]
 
-        # POST complete referral
+        # POST referral invite for an unregistered email -> creates pending referral without creating User
         post_res = self.client.post(
             "/api/v1/rewards/client/referrals/",
             data={"referee_email": "friend_alex@alphafit.com"},
             format="json"
         )
         self.assertEqual(post_res.status_code, 201)
-        self.assertEqual(post_res.data["status"], "success")
+        self.assertEqual(post_res.data["status"], "pending")
+        self.assertFalse(User.objects.filter(email="friend_alex@alphafit.com").exists())
 
-        # Verify wallet credited
+        # Verify wallet not yet credited
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 0)
+
+        # Friend registers with the referral code -> completes referral and awards points
+        from apps.users.services import UserService
+        friend_user = UserService.create_user_with_profile(
+            email="friend_alex@alphafit.com",
+            password="SecurePassword123!",
+            role=UserRole.CLIENT,
+            tenant=self.tenant1,
+            referral_code=ref_code
+        )
+
+        # Verify referrer wallet credited
         self.member1_wallet.refresh_from_db()
         self.assertEqual(self.member1_wallet.balance, 500)
 
@@ -2414,6 +2429,13 @@ class RewardPaginationTests(RewardsBaseTestCase):
             ]
         )
 
+        friend_bob = User.objects.create_user(
+            email="friend_bob@alphafit.com",
+            tenant=self.tenant1,
+            role=UserRole.CLIENT
+        )
+        from apps.users.models import UserProfile
+        UserProfile.objects.create(user=friend_bob)
         self.client.force_authenticate(user=self.member1)
         ref_resp = self.client.post(
             "/api/v1/rewards/client/referrals/",
@@ -2421,6 +2443,7 @@ class RewardPaginationTests(RewardsBaseTestCase):
             format="json"
         )
         self.assertEqual(ref_resp.status_code, 201)
+        self.assertEqual(ref_resp.data["status"], "success")
 
         rule_pkg = Package.objects.filter(client=self.member1, grant_source=PackageGrantSource.REWARD_RULE).first()
         self.assertIsNotNone(rule_pkg)
@@ -2493,5 +2516,206 @@ class RewardPaginationTests(RewardsBaseTestCase):
         resp4 = view(req4)
         self.assertEqual(resp4.status_code, 400)
         self.assertIn("Monthly limit of 3 free package assignments", str(resp4.data))
+
+
+class ClientReferralEngineComprehensiveTests(RewardsBaseTestCase):
+    """
+    Comprehensive tests for Jira Ticket FITV-143:
+    Client Referral Code and Link Flow, Dual Rewarding,
+    and Consent-Based Invitation Without Unauthorized Account Creation.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.program = RewardProgram.objects.create(
+            tenant=self.tenant1,
+            name="Alpha Rewards",
+            program_type="loyalty",
+            status="active"
+        )
+        # Set up rules for referral.completed and referral.joined
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Referrer Reward",
+            event_type="referral.completed",
+            status="active",
+            actions=[
+                {"type": "POINTS", "amount": 250, "description": "Referred a friend bonus"}
+            ]
+        )
+        RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Referee Welcome Reward",
+            event_type="referral.joined",
+            status="active",
+            actions=[
+                {"type": "POINTS", "amount": 100, "description": "Welcome bonus for joining via referral"}
+            ]
+        )
+
+        from apps.users.models import UserProfile
+        self.member1_profile, _ = UserProfile.objects.get_or_create(user=self.member1)
+
+        # Create Client B in Tenant 1 as the referee
+        self.client_b = User.objects.create_user(
+            email="client_b@alphafit.com",
+            password="Password123!",
+            role=UserRole.CLIENT,
+            tenant=self.tenant1
+        )
+        self.client_b_wallet = RewardWalletService.get_or_create_wallet(tenant_id=self.tenant1.id, user=self.client_b)
+        self.client_b_profile, _ = UserProfile.objects.get_or_create(user=self.client_b)
+
+    def test_client_b_redeems_client_a_code_awards_both(self):
+        from apps.rewards.referral_service import ReferralService
+        from apps.rewards.models import ClientReferral, ReferralStatus
+
+        code_a = ReferralService.get_or_create_referral_code(self.member1)
+
+        # Authenticate as Client B (referee)
+        self.client.force_authenticate(user=self.client_b)
+
+        # Client B enters Member A's code via the redemption endpoint
+        resp = self.client.post(
+            "/api/v1/rewards/client/referrals/redeem/",
+            data={"referral_code": code_a},
+            format="json"
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data["status"], "success")
+
+        # Verify ClientReferral model
+        ref = ClientReferral.all_objects.get(referrer=self.member1, referee=self.client_b)
+        self.assertEqual(ref.status, ReferralStatus.COMPLETED)
+        self.assertEqual(ref.referral_code, code_a)
+
+        # Verify dual rewards:
+        # Member 1 (referrer) receives 250 points
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 250)
+
+        # Client B (referee) receives 100 points
+        self.client_b_wallet.refresh_from_db()
+        self.assertEqual(self.client_b_wallet.balance, 100)
+
+    def test_self_referral_rejected(self):
+        from apps.rewards.referral_service import ReferralService
+        code_a = ReferralService.get_or_create_referral_code(self.member1)
+
+        self.client.force_authenticate(user=self.member1)
+        resp = self.client.post(
+            "/api/v1/rewards/client/referrals/redeem/",
+            data={"referral_code": code_a},
+            format="json"
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("cannot refer yourself", resp.data["detail"].lower())
+
+    def test_single_use_restriction_referee_cannot_be_referred_twice(self):
+        from apps.rewards.referral_service import ReferralService
+        code_a = ReferralService.get_or_create_referral_code(self.member1)
+
+        # Member 3
+        member3 = User.objects.create_user(email="member3@alphafit.com", tenant=self.tenant1, role=UserRole.CLIENT)
+        code_3 = ReferralService.get_or_create_referral_code(member3)
+
+        # First referral of Client B succeeds
+        self.client.force_authenticate(user=self.client_b)
+        resp1 = self.client.post(
+            "/api/v1/rewards/client/referrals/redeem/",
+            data={"referral_code": code_a},
+            format="json"
+        )
+        self.assertEqual(resp1.status_code, 201)
+
+        # Second referral attempt with Member 3's code fails
+        resp2 = self.client.post(
+            "/api/v1/rewards/client/referrals/redeem/",
+            data={"referral_code": code_3},
+            format="json"
+        )
+        self.assertEqual(resp2.status_code, 400)
+        self.assertIn("already", resp2.data["detail"].lower())
+
+    def test_unregistered_email_creates_pending_invitation_without_creating_user(self):
+        from apps.rewards.models import ClientReferral, ReferralStatus
+        self.client.force_authenticate(user=self.member1)
+
+        unregistered_email = "not_yet_a_user@example.com"
+        resp = self.client.post(
+            "/api/v1/rewards/client/referrals/",
+            data={"referee_email": unregistered_email},
+            format="json"
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data["status"], "pending")
+
+        # CRITICAL SECURITY CHECK: No user account was created!
+        self.assertFalse(User.objects.filter(email=unregistered_email).exists())
+
+        # Invitation is recorded as PENDING
+        inv = ClientReferral.all_objects.get(referee_email=unregistered_email)
+        self.assertEqual(inv.status, ReferralStatus.PENDING)
+        self.assertEqual(inv.referrer, self.member1)
+        self.assertIsNone(inv.referee)
+
+    def test_registration_with_referral_code_autocompletes_and_rewards_both(self):
+        from apps.rewards.referral_service import ReferralService
+        from apps.rewards.models import ClientReferral, ReferralStatus, RewardWallet
+        from apps.users.services import UserService
+
+        code_a = ReferralService.get_or_create_referral_code(self.member1)
+
+        new_user = UserService.create_user_with_profile(
+            email="join_with_code@example.com",
+            password="SecurePassword99!",
+            role=UserRole.CLIENT,
+            tenant=self.tenant1,
+            referral_code=code_a
+        )
+
+        self.assertIsNotNone(new_user)
+        ref = ClientReferral.all_objects.get(referee=new_user)
+        self.assertEqual(ref.status, ReferralStatus.COMPLETED)
+        self.assertEqual(ref.referrer, self.member1)
+
+        # Referrer wallet rewarded
+        self.member1_wallet.refresh_from_db()
+        self.assertEqual(self.member1_wallet.balance, 250)
+
+        # New user wallet rewarded
+        new_wallet = RewardWallet.objects.get(user=new_user, tenant=self.tenant1)
+        self.assertEqual(new_wallet.balance, 100)
+
+    def test_referral_resolve_endpoint(self):
+        from apps.rewards.referral_service import ReferralService
+        code_a = ReferralService.get_or_create_referral_code(self.member1)
+
+        # Test valid code resolution (public endpoint)
+        resp = self.client.get(f"/api/v1/rewards/referrals/resolve/?code={code_a}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.data["valid"])
+        self.assertEqual(resp.data["referral_code"], code_a)
+        self.assertEqual(resp.data["referrer_name"], "member1")
+        self.assertEqual(resp.data["tenant_name"], self.tenant1.name)
+
+        # Test invalid code resolution
+        resp_invalid = self.client.get("/api/v1/rewards/referrals/resolve/?code=NONEXISTENT123")
+        self.assertEqual(resp_invalid.status_code, 404)
+        self.assertFalse(resp_invalid.data["valid"])
+
+    def test_referral_join_landing_page(self):
+        from apps.rewards.referral_service import ReferralService
+        code_a = ReferralService.get_or_create_referral_code(self.member1)
+
+        # Test root landing page
+        resp = self.client.get(f"/join/?ref={code_a}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b"You're Invited to Join", resp.content)
+        self.assertIn(code_a.encode(), resp.content)
+        self.assertIn(b"fitverx://referral?", resp.content)
+
 
 

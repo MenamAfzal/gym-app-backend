@@ -11,7 +11,7 @@ from apps.rewards.views import (
     AdminRewardRuleVersionViewSet,
     ClientRewardWalletView, ClientRewardLedgerView, ClientBadgeView,
     ClientStreakView, ClientRewardStoreViewSet, ClientRedemptionViewSet,
-    ClientReferralView
+    ClientReferralView, ReferralResolveView, ReferralJoinLandingView
 )
 
 router_admin = DefaultRouter()
@@ -41,5 +41,9 @@ urlpatterns = [
     path('client/streaks/', ClientStreakView.as_view(), name='client-reward-streaks'),
     path('client/referrals/', ClientReferralView.as_view(), name='client-reward-referrals'),
     path('client/referrals/complete/', ClientReferralView.as_view(), name='client-reward-referrals-complete'),
+    path('client/referrals/redeem/', ClientReferralView.as_view(), name='client-reward-referrals-redeem'),
+    path('referrals/resolve/', ReferralResolveView.as_view(), name='referral-resolve'),
+    path('join/', ReferralJoinLandingView.as_view(), name='referral-join-landing'),
+    path('join', ReferralJoinLandingView.as_view(), name='referral-join-landing-no-slash'),
     path('client/', include(router_client.urls)),
 ]

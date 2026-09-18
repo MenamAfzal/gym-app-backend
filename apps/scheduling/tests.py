@@ -1120,8 +1120,7 @@ class GymSchedulingSystemTestCase(TestCase):
         sessions = ClassSession.objects.filter(recurrence_rule_id=rule_id)
         self.assertEqual(sessions.count(), 1)
         session = sessions.first()
-
-        # Verify the session start_at matches the exact entered time (13:00:00)
+ 
         self.assertEqual(session.start_at.hour, 13)
         self.assertEqual(session.start_at.minute, 0)
         self.assertEqual(session.start_at.date(), target_date)

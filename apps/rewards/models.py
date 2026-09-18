@@ -662,3 +662,64 @@ class RewardPointLedger(TenantAwareModel):
     def __str__(self):
         sign = "+" if self.amount >= 0 else ""
         return f"{self.user.email}: {sign}{self.amount} pts ({self.transaction_type}) -> Bal: {self.balance_after}"
+
+
+class ReferralStatus(models.TextChoices):
+    PENDING = 'PENDING', _('Pending Registration')
+    COMPLETED = 'COMPLETED', _('Completed')
+    EXPIRED = 'EXPIRED', _('Expired')
+
+
+class ClientReferral(TenantAwareModel):
+    """
+    Tracks client-to-client referrals, email invitations, and reward completions.
+    Prevents unintended user creation by holding pending invitations in this table.
+    """
+    referrer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='referrals_sent',
+        help_text="Member who shared the referral code/link"
+    )
+    referee = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='referrals_received',
+        help_text="Referred member once registered"
+    )
+    referee_email = models.EmailField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Invited referee email address before registration"
+    )
+    referral_code = models.CharField(
+        max_length=50,
+        db_index=True,
+        help_text="Referral code used for this referral"
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=ReferralStatus.choices,
+        default=ReferralStatus.PENDING,
+        db_index=True
+    )
+    completed_at = models.DateTimeField(null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = _('Client Referral')
+        verbose_name_plural = _('Client Referrals')
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['tenant', 'referral_code']),
+            models.Index(fields=['tenant', 'referee']),
+            models.Index(fields=['tenant', 'referee_email']),
+            models.Index(fields=['tenant', 'status']),
+        ]
+
+    def __str__(self):
+        referee_identifier = self.referee.email if self.referee else (self.referee_email or "Unknown")
+        return f"{self.referrer.email} -> {referee_identifier} ({self.status})"

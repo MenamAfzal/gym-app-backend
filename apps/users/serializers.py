@@ -67,6 +67,9 @@ class CreateUserSerializer(serializers.Serializer):
     emergency_contact_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
     emergency_contact_phone = serializers.CharField(required=False, allow_blank=True, max_length=20)
 
+    # Referral Tracking
+    referral_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
     def validate(self, attrs):
         """
         Cross-field validation if necessary.
@@ -197,6 +200,9 @@ class RegistrationInitSerializer(serializers.Serializer):
     # Emergency Contact (all optional)
     emergency_contact_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
     emergency_contact_phone = serializers.CharField(required=False, allow_blank=True, max_length=20)
+
+    # Referral Tracking
+    referral_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     def validate_email(self, value):
         if User.objects.filter(email__iexact=value).exists():
