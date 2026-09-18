@@ -744,6 +744,20 @@ class UserRegistrationView(APIView):
                 emergency_contact_phone=data.get('emergency_contact_phone'),
             )
             
+            # Auto-process referral if referral_code provided
+            referral_code = data.get('referral_code')
+            if referral_code and user.role == UserRole.CLIENT:
+                try:
+                    from apps.rewards.services import ClientReferralService
+                    ClientReferralService.process_referral(
+                        tenant=target_tenant,
+                        referee=user,
+                        referral_code=referral_code,
+                        method='LINK'
+                    )
+                except Exception as e:
+                    logger.warning("Failed to auto-process referral on direct registration for %s: %s", user.email, e)
+
             return Response(
                 UserSerializer(user).data, 
                 status=status.HTTP_201_CREATED

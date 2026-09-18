@@ -41,6 +41,7 @@ class CreateUserSerializer(serializers.Serializer):
     password = serializers.CharField(write_only=True, min_length=8)
     role = serializers.ChoiceField(choices=UserRole.choices)
     tenant_id = serializers.UUIDField(required=False)
+    referral_code = serializers.CharField(required=False, allow_blank=True, max_length=50)
     
     # Basic Profile Fields
     nickname = serializers.CharField(required=False, allow_blank=True)
@@ -173,6 +174,7 @@ class RegistrationInitSerializer(serializers.Serializer):
     
     tenant_id = serializers.UUIDField(required=False)
     platform_name = serializers.CharField(required=False, allow_blank=True, default='')
+    referral_code = serializers.CharField(required=False, allow_blank=True, max_length=50)
     
     # Basic Profile Data (Collected upfront)
     nickname = serializers.CharField(required=False, allow_blank=True)

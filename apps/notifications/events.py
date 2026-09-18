@@ -42,6 +42,21 @@ class NotificationEvent:
     entity_id:    Optional[UUID] = None
     context_data: Dict[str, Any] = field(default_factory=dict)
     
+    def __init__(
+        self,
+        tenant_id: UUID,
+        recipient_id: UUID,
+        entity_id: Optional[UUID] = None,
+        context_data: Optional[Dict[str, Any]] = None,
+        event_type: Optional[str] = None,
+    ):
+        self.tenant_id = tenant_id
+        self.recipient_id = recipient_id
+        self.entity_id = entity_id
+        self.context_data = context_data if context_data is not None else {}
+        if event_type is not None:
+            self._event_type = event_type
+
     @property
     def event_type(self) -> str:
         return getattr(self, '_event_type', 'unknown')
@@ -120,3 +135,9 @@ class MembershipExpiringEvent(NotificationEvent):
 class RewardEarnedEvent(NotificationEvent):
     """Emitted when a client earns points, badges, or unlocks a reward."""
     _event_type = 'reward_earned'
+
+
+@dataclass
+class SubstituteRequestBroadcastEvent(NotificationEvent):
+    """Emitted when a substitute request is broadcast to eligible staff."""
+    _event_type = 'substitute_request_broadcast'

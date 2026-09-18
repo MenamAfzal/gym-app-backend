@@ -16,7 +16,7 @@ class IsOwnerOrManager(permissions.BasePermission):
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
-        return request.user.role in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER]
+        return request.user.role in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.GYM_ADMIN]
 
 
 class IsGymStaffOrOwner(permissions.BasePermission):
@@ -31,6 +31,7 @@ class IsGymStaffOrOwner(permissions.BasePermission):
         return getattr(request.user, "role", None) in [
             UserRole.GYM_OWNER, 
             UserRole.GYM_MANAGER, 
+            UserRole.GYM_ADMIN,
             UserRole.TRAINER, 
             UserRole.FRONT_DESK
         ]

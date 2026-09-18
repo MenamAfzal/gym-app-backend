@@ -457,6 +457,14 @@ class NotificationService:
                 DeliveryPolicy.PUSH_ONLY,
                 False,
             ),
+            'substitute_request_broadcast': (
+                'Substitute Trainer Needed',
+                'A substitute trainer is needed for an upcoming class.',
+                NotificationPriority.HIGH,
+                NotificationType.CLASS,
+                DeliveryPolicy.PUSH_ONLY,
+                False,
+            ),
         }
 
         return DEFAULTS.get(

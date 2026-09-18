@@ -149,3 +149,27 @@ class NotificationServiceTests(TestCase):
         self.assertEqual(inbox.title, 'Workout Milestone! 🏆')
         self.assertEqual(inbox.body, 'You earned 50 points for completing your workout!')
 
+    def test_substitute_request_broadcast_event(self):
+        """SubstituteRequestBroadcastEvent handles correctly and emits notification inbox."""
+        from apps.notifications.events import SubstituteRequestBroadcastEvent, NotificationEvent
+        from apps.notifications.models import NotificationInbox
+
+        event = SubstituteRequestBroadcastEvent(
+            tenant_id=self.tenant.id,
+            recipient_id=self.user.id,
+        )
+        self.assertEqual(event.event_type, 'substitute_request_broadcast')
+        NotificationService.handle_event(event)
+
+        inbox = NotificationInbox.all_objects.filter(recipient=self.user).first()
+        self.assertIsNotNone(inbox)
+        self.assertEqual(inbox.title, 'Substitute Trainer Needed')
+
+        # Also verify generic NotificationEvent with event_type argument works
+        generic_event = NotificationEvent(
+            tenant_id=self.tenant.id,
+            recipient_id=self.user.id,
+            event_type='substitute_request_broadcast',
+        )
+        self.assertEqual(generic_event.event_type, 'substitute_request_broadcast')
+

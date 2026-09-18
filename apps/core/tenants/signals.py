@@ -1,8 +1,9 @@
 import logging
-from django.db.models.signals import post_save, post_delete
+from django.db.models.signals import post_save, post_delete, m2m_changed
 from django.dispatch import receiver
 from apps.core.tenants.models import Tenant, TenantSubscription, TenantEntitlementOverride
 from apps.core.tenants.services import TenantEntitlementService
+from apps.payments.models import BillingPlan, TenantBillingSubscription, GymFeatureEntitlement
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,26 @@ def invalidate_subscription_cache(sender, instance, **kwargs):
 @receiver(post_delete, sender=TenantEntitlementOverride)
 def invalidate_override_cache(sender, instance, **kwargs):
     if instance.tenant:
+        TenantEntitlementService.invalidate_tenant_cache(instance.tenant)
+
+
+@receiver(post_save, sender=GymFeatureEntitlement)
+@receiver(post_delete, sender=GymFeatureEntitlement)
+def invalidate_gym_feature_entitlement_cache(sender, instance, **kwargs):
+    if instance.tenant:
+        TenantEntitlementService.invalidate_tenant_cache(instance.tenant)
+
+
+@receiver(post_save, sender=TenantBillingSubscription)
+@receiver(post_delete, sender=TenantBillingSubscription)
+def invalidate_billing_subscription_cache(sender, instance, **kwargs):
+    if instance.tenant:
+        TenantEntitlementService.invalidate_tenant_cache(instance.tenant)
+
+
+@receiver(m2m_changed, sender=TenantBillingSubscription.active_features.through)
+def invalidate_billing_subscription_features_cache(sender, instance, **kwargs):
+    if hasattr(instance, 'tenant') and instance.tenant:
         TenantEntitlementService.invalidate_tenant_cache(instance.tenant)
 
 

@@ -11,7 +11,7 @@ from apps.rewards.views import (
     AdminRewardRuleVersionViewSet,
     ClientRewardWalletView, ClientRewardLedgerView, ClientBadgeView,
     ClientStreakView, ClientRewardStoreViewSet, ClientRedemptionViewSet,
-    ClientReferralView
+    ClientReferralView, ClientReferralApplyView, ReferralLookupView, ReferralJoinRedirectView
 )
 
 router_admin = DefaultRouter()
@@ -34,12 +34,17 @@ urlpatterns = [
     path('admin/analytics/', AdminRewardAnalyticsView.as_view(), name='admin-reward-analytics'),
     path('admin/', include(router_admin.urls)),
 
+    # Referral Endpoints (Public)
+    path('referrals/lookup/', ReferralLookupView.as_view(), name='referral-lookup'),
+    path('referrals/join/', ReferralJoinRedirectView.as_view(), name='referral-join-redirect'),
+
     # Client Endpoints
     path('client/wallet/', ClientRewardWalletView.as_view(), name='client-reward-wallet'),
     path('client/history/', ClientRewardLedgerView.as_view(), name='client-reward-history'),
     path('client/badges/', ClientBadgeView.as_view(), name='client-reward-badges'),
     path('client/streaks/', ClientStreakView.as_view(), name='client-reward-streaks'),
     path('client/referrals/', ClientReferralView.as_view(), name='client-reward-referrals'),
+    path('client/referrals/apply/', ClientReferralApplyView.as_view(), name='client-reward-referrals-apply'),
     path('client/referrals/complete/', ClientReferralView.as_view(), name='client-reward-referrals-complete'),
     path('client/', include(router_client.urls)),
 ]

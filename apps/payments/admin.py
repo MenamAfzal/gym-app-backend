@@ -8,6 +8,7 @@ from .models import (
     BillingFeature,
     BillingPlan,
     TenantBillingSubscription,
+    GymFeatureEntitlement,
 )
 
 
@@ -133,4 +134,25 @@ class TenantBillingSubscriptionAdmin(TenantAdminMixin, admin.ModelAdmin):
     )
 
 
-
+@admin.register(GymFeatureEntitlement)
+class GymFeatureEntitlementAdmin(TenantAdminMixin, admin.ModelAdmin):
+    list_display = (
+        'tenant',
+        'feature',
+        'is_active',
+        'current_period_end',
+        'subscription',
+        'created_at',
+    )
+    list_filter = ('is_active', 'feature', 'tenant')
+    search_fields = ('tenant__name', 'feature__name', 'feature__code')
+    readonly_fields = ('id', 'created_at', 'updated_at')
+    fieldsets = (
+        ('Entitlement Details', {
+            'fields': ('tenant', 'feature', 'is_active', 'subscription', 'current_period_end'),
+        }),
+        ('Metadata', {
+            'fields': ('id', 'created_at', 'updated_at'),
+            'classes': ('collapse',),
+        }),
+    )
