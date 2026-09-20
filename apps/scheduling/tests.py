@@ -1126,5 +1126,246 @@ class GymSchedulingSystemTestCase(TestCase):
         self.assertEqual(session.start_at.date(), target_date)
 
 
+class ClientBookingPreferenceTests(GymSchedulingSystemTestCase):
+    """
+    Automated tests for Client Booking Preferences CRUD API:
+    - Model persistence across sessions
+    - Non-boolean string/choice values matching booking APIs
+    - Default values on GET when not yet configured
+    - In-app booking creation fallback integration
+    """
+
+    def setUp(self):
+        super().setUp()
+        from rest_framework.test import APIRequestFactory
+        self.factory = APIRequestFactory()
+
+    def test_get_preferences_returns_defaults_when_no_record_exists(self):
+        from apps.scheduling.views import ClientBookingPreferenceView
+        from rest_framework.test import force_authenticate
+
+        view = ClientBookingPreferenceView.as_view()
+        request = self.factory.get('/api/v1/scheduling/booking-preferences/')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.client1)
+
+        response = view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['join_mode'], 'physical')
+        self.assertEqual(response.data['remote_session'], 'physical')
+        self.assertEqual(response.data['virtual_coach'], '')
+        self.assertEqual(response.data['music_preference'], '')
+        self.assertEqual(response.data['client'], str(self.client1.id))
+
+    def test_create_preferences_with_string_values(self):
+        from apps.scheduling.views import ClientBookingPreferenceView
+        from apps.scheduling.models import ClientBookingPreference
+        from rest_framework.test import force_authenticate
+
+        view = ClientBookingPreferenceView.as_view()
+        payload = {
+            'join_mode': 'remote',
+            'virtual_coach': 'virtual',
+            'music_preference': 'Chill Hop'
+        }
+        request = self.factory.post('/api/v1/scheduling/booking-preferences/', payload, format='json')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.client1)
+
+        response = view(request)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['join_mode'], 'remote')
+        self.assertEqual(response.data['virtual_coach'], 'virtual')
+        self.assertEqual(response.data['music_preference'], 'Chill Hop')
+
+        # Verify DB persistence
+        pref = ClientBookingPreference.all_objects.get(client=self.client1)
+        self.assertEqual(pref.join_mode, 'remote')
+        self.assertEqual(pref.virtual_coach, 'virtual')
+        self.assertEqual(pref.music_preference, 'Chill Hop')
+
+    def test_update_preferences_patch_and_put(self):
+        from apps.scheduling.views import ClientBookingPreferenceView
+        from apps.scheduling.models import ClientBookingPreference
+        from rest_framework.test import force_authenticate
+
+        ClientBookingPreference.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            join_mode='physical',
+            virtual_coach='in_person',
+            music_preference='Rock'
+        )
+
+        view = ClientBookingPreferenceView.as_view()
+        # Partial update via PATCH
+        request = self.factory.patch(
+            '/api/v1/scheduling/booking-preferences/',
+            {'music_preference': 'Upbeat EDM', 'join_mode': 'remote'},
+            format='json'
+        )
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.client1)
+
+        response = view(request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['music_preference'], 'Upbeat EDM')
+        self.assertEqual(response.data['join_mode'], 'remote')
+        self.assertEqual(response.data['virtual_coach'], 'in_person')
+
+        # Verify in DB
+        pref = ClientBookingPreference.all_objects.get(client=self.client1)
+        self.assertEqual(pref.music_preference, 'Upbeat EDM')
+        self.assertEqual(pref.join_mode, 'remote')
+
+    def test_flexible_key_aliases(self):
+        from apps.scheduling.views import ClientBookingPreferenceView
+        from apps.scheduling.models import ClientBookingPreference
+        from rest_framework.test import force_authenticate
+
+        view = ClientBookingPreferenceView.as_view()
+        # Using alternative keys: remote_session, virtualCoach, musicPreference
+        payload = {
+            'remote_session': 'remote',
+            'virtualCoach': 'ai_coach',
+            'musicPreference': 'Pop'
+        }
+        request = self.factory.post('/api/v1/scheduling/booking-preferences/', payload, format='json')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.client1)
+
+        response = view(request)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['join_mode'], 'remote')
+        self.assertEqual(response.data['virtual_coach'], 'ai_coach')
+        self.assertEqual(response.data['music_preference'], 'Pop')
+
+    def test_delete_resets_preferences(self):
+        from apps.scheduling.views import ClientBookingPreferenceView
+        from apps.scheduling.models import ClientBookingPreference
+        from rest_framework.test import force_authenticate
+
+        ClientBookingPreference.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            join_mode='remote',
+            virtual_coach='virtual',
+            music_preference='Jazz'
+        )
+
+        view = ClientBookingPreferenceView.as_view()
+        request = self.factory.delete('/api/v1/scheduling/booking-preferences/')
+        request.tenant = self.tenant
+        force_authenticate(request, user=self.client1)
+
+        response = view(request)
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(ClientBookingPreference.all_objects.filter(client=self.client1).exists())
+
+        # Next GET returns defaults
+        get_req = self.factory.get('/api/v1/scheduling/booking-preferences/')
+        get_req.tenant = self.tenant
+        force_authenticate(get_req, user=self.client1)
+        get_res = view(get_req)
+        self.assertEqual(get_res.status_code, 200)
+        self.assertEqual(get_res.data['join_mode'], 'physical')
+
+    def test_persistence_across_sessions(self):
+        from apps.scheduling.views import ClientBookingPreferenceView
+        from rest_framework.test import force_authenticate
+
+        view = ClientBookingPreferenceView.as_view()
+
+        # Session 1: Client saves preference
+        post_req = self.factory.post(
+            '/api/v1/scheduling/booking-preferences/',
+            {'join_mode': 'remote', 'music_preference': 'Deep House'},
+            format='json'
+        )
+        post_req.tenant = self.tenant
+        force_authenticate(post_req, user=self.client1)
+        post_res = view(post_req)
+        self.assertEqual(post_res.status_code, 201)
+
+        # Simulate logout & login (Session 2: fresh request, same user)
+        fresh_req = self.factory.get('/api/v1/scheduling/booking-preferences/')
+        fresh_req.tenant = self.tenant
+        force_authenticate(fresh_req, user=self.client1)
+        fresh_res = view(fresh_req)
+
+        self.assertEqual(fresh_res.status_code, 200)
+        self.assertEqual(fresh_res.data['join_mode'], 'remote')
+        self.assertEqual(fresh_res.data['music_preference'], 'Deep House')
+
+    def test_client_isolation(self):
+        from apps.scheduling.views import ClientBookingPreferenceView
+        from apps.scheduling.models import ClientBookingPreference
+        from rest_framework.test import force_authenticate
+
+        ClientBookingPreference.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            join_mode='remote',
+            music_preference='Hip Hop'
+        )
+
+        view = ClientBookingPreferenceView.as_view()
+
+        # Client 2 queries preferences
+        req2 = self.factory.get('/api/v1/scheduling/booking-preferences/')
+        req2.tenant = self.tenant
+        force_authenticate(req2, user=self.client2)
+        res2 = view(req2)
+
+        self.assertEqual(res2.status_code, 200)
+        # Client 2 should receive default values, not Client 1's
+        self.assertEqual(res2.data['join_mode'], 'physical')
+        self.assertEqual(res2.data['music_preference'], '')
+
+    def test_booking_creation_uses_preferences_as_fallback(self):
+        from apps.scheduling.views import BookingViewSet
+        from apps.scheduling.models import ClientBookingPreference, ClassSession, Package
+        from rest_framework.test import force_authenticate
+
+        # Configure Client 1's preferences
+        ClientBookingPreference.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            join_mode='remote',
+            music_preference='Lo-Fi Beats'
+        )
+
+        # Client 1 already has self.pkg1 with remaining credits from setUp
+
+        # Create session
+        start_time = timezone.now() + timedelta(days=2)
+        session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=start_time,
+            end_at=start_time + timedelta(minutes=60),
+            capacity=10,
+            status='scheduled'
+        )
+
+        # Book session without specifying join_mode or music_preference
+        view = BookingViewSet.as_view({'post': 'create'})
+        req = self.factory.post(
+            '/api/bookings/',
+            {'session': str(session.id)},
+            format='json'
+        )
+        req.tenant = self.tenant
+        force_authenticate(req, user=self.client1)
+
+        res = view(req)
+        self.assertEqual(res.status_code, 201)
+        self.assertEqual(res.data['join_mode'], 'remote')
+        self.assertEqual(res.data['music_preference'], 'Lo-Fi Beats')
+
+
+
 
 

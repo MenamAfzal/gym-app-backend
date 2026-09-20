@@ -7,7 +7,7 @@ from .models import (
     Location, Room, SpotType, RoomLayout, Spot, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, PackageGrantSource, Payment, CancellationPolicy,
-    StaffClientAssignment, FacilityAccessLog
+    StaffClientAssignment, FacilityAccessLog, ClientBookingPreference
 )
 from apps.users.models import User, UserRole
 
@@ -762,3 +762,68 @@ class FacilityAccessLogSerializer(serializers.ModelSerializer):
             return name if name else obj.client.email
         except Exception:
             return obj.client.email
+
+
+class ClientBookingPreferenceSerializer(serializers.ModelSerializer):
+    remote_session = serializers.SerializerMethodField()
+    client_email = serializers.EmailField(source='client.email', read_only=True)
+
+    class Meta:
+        model = ClientBookingPreference
+        fields = [
+            'id',
+            'client',
+            'client_email',
+            'join_mode',
+            'remote_session',
+            'virtual_coach',
+            'music_preference',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'client', 'client_email', 'remote_session', 'created_at', 'updated_at']
+
+    def get_remote_session(self, obj):
+        return obj.join_mode
+
+    def to_internal_value(self, data):
+        normalized = data.copy() if hasattr(data, 'copy') else dict(data)
+
+        # 1. Map join_mode / remote_session / attendance_type
+        for key in ['remote_session', 'remoteSession', 'Remote Session', 'attendance_type', 'attendanceType']:
+            if key in normalized and 'join_mode' not in normalized:
+                val = normalized.pop(key)
+                if isinstance(val, bool):
+                    normalized['join_mode'] = 'remote' if val else 'physical'
+                else:
+                    normalized['join_mode'] = str(val)
+
+        # If join_mode itself is a boolean
+        if 'join_mode' in normalized and isinstance(normalized['join_mode'], bool):
+            normalized['join_mode'] = 'remote' if normalized['join_mode'] else 'physical'
+
+        # 2. Map virtual_coach
+        for key in ['virtualCoach', 'Virtual Coach', 'virtual_coaching']:
+            if key in normalized and 'virtual_coach' not in normalized:
+                val = normalized.pop(key)
+                if isinstance(val, bool):
+                    normalized['virtual_coach'] = 'virtual' if val else 'in_person'
+                else:
+                    normalized['virtual_coach'] = str(val)
+
+        if 'virtual_coach' in normalized and isinstance(normalized['virtual_coach'], bool):
+            normalized['virtual_coach'] = 'virtual' if normalized['virtual_coach'] else 'in_person'
+
+        # 3. Map music_preference
+        for key in ['musicPreference', 'Music Preference', 'music']:
+            if key in normalized and 'music_preference' not in normalized:
+                val = normalized.pop(key)
+                if isinstance(val, bool):
+                    normalized['music_preference'] = 'standard' if val else ''
+                else:
+                    normalized['music_preference'] = str(val)
+
+        if 'music_preference' in normalized and isinstance(normalized['music_preference'], bool):
+            normalized['music_preference'] = 'standard' if normalized['music_preference'] else ''
+
+        return super().to_internal_value(normalized)

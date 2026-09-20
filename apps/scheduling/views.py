@@ -753,14 +753,22 @@ class BookingViewSet(viewsets.ModelViewSet):
 
         is_guest = serializer.validated_data.get('is_guest', False)
 
+        # Determine fallback preferences from ClientBookingPreference
+        client_pref = getattr(target_client, 'booking_preferences', None)
+        default_join_mode = getattr(client_pref, 'join_mode', 'physical') if client_pref else 'physical'
+        default_music = getattr(client_pref, 'music_preference', '') if client_pref else ''
+
+        final_join_mode = serializer.validated_data.get('join_mode') or default_join_mode
+        final_music_preference = serializer.validated_data.get('music_preference') or default_music
+
         if existing_booking:
             # Reactivate existing booking row to satisfy unique_together constraint
             existing_booking.status = 'booked'
             existing_booking.credit_source = package
             existing_booking.spot = spot
             existing_booking.is_guest = is_guest
-            existing_booking.join_mode = serializer.validated_data.get('join_mode', 'physical')
-            existing_booking.music_preference = serializer.validated_data.get('music_preference', '')
+            existing_booking.join_mode = final_join_mode
+            existing_booking.music_preference = final_music_preference
             existing_booking.save()
             booking = existing_booking
         else:
@@ -773,8 +781,8 @@ class BookingViewSet(viewsets.ModelViewSet):
                 is_guest=is_guest,
                 credit_source=package,
                 status='booked',
-                join_mode=serializer.validated_data.get('join_mode', 'physical'),
-                music_preference=serializer.validated_data.get('music_preference', '')
+                join_mode=final_join_mode,
+                music_preference=final_music_preference
             )
 
         # Create confirmation notification
@@ -1675,3 +1683,82 @@ class UpdateBookingAttributesAPIView(APIView):
 
         from .serializers import BookingReadSerializer
         return Response(BookingReadSerializer(booking, context={'request': request}).data, status=status.HTTP_200_OK)
+
+
+class ClientBookingPreferenceView(APIView):
+    """
+    CRUD API for Client's Booking Preferences:
+    - Join Mode / Remote Session ('physical', 'remote', etc.)
+    - Virtual Coach ('virtual', 'in_person', etc.)
+    - Music Preference ('Chill Hop', 'Upbeat EDM', 'Rock', etc.)
+
+    Identifies client via request.user from auth token.
+    Returns default values ('physical', '', '') if client has no preferences yet.
+    Settings persist across login/logout.
+    """
+    permission_classes = [IsAuthenticated]
+
+    DEFAULT_PREFERENCES = {
+        'join_mode': 'physical',
+        'remote_session': 'physical',
+        'virtual_coach': '',
+        'music_preference': '',
+    }
+
+    def get(self, request):
+        from .models import ClientBookingPreference
+        from .serializers import ClientBookingPreferenceSerializer
+
+        preference = ClientBookingPreference.all_objects.filter(client=request.user).first()
+        if not preference:
+            data = {
+                'id': None,
+                'client': str(request.user.id),
+                'client_email': request.user.email,
+                **self.DEFAULT_PREFERENCES
+            }
+            return Response(data, status=status.HTTP_200_OK)
+
+        serializer = ClientBookingPreferenceSerializer(preference)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request):
+        return self._save_preferences(request, partial=True, is_create=True)
+
+    def put(self, request):
+        return self._save_preferences(request, partial=False, is_create=False)
+
+    def patch(self, request):
+        return self._save_preferences(request, partial=True, is_create=False)
+
+    def delete(self, request):
+        from .models import ClientBookingPreference
+        preference = ClientBookingPreference.all_objects.filter(client=request.user).first()
+        if preference:
+            preference.delete()
+        return Response({'detail': 'Booking preferences reset to defaults.'}, status=status.HTTP_204_NO_CONTENT)
+
+    def _save_preferences(self, request, partial=True, is_create=False):
+        from .models import ClientBookingPreference
+        from .serializers import ClientBookingPreferenceSerializer
+
+        preference = ClientBookingPreference.all_objects.filter(client=request.user).first()
+        created = False
+        if not preference:
+            tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+            preference = ClientBookingPreference(
+                client=request.user,
+                tenant=tenant,
+                join_mode='physical',
+                virtual_coach='',
+                music_preference=''
+            )
+            created = True
+
+        serializer = ClientBookingPreferenceSerializer(preference, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        status_code = status.HTTP_201_CREATED if (created and is_create) else status.HTTP_200_OK
+        return Response(serializer.data, status=status_code)
+

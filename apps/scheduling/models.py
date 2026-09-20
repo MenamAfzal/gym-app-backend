@@ -656,3 +656,48 @@ class FacilityAccessLog(UUIDMixin, TimestampMixin, TenantMixin):
     def __str__(self):
         return f"{self.client.email} at {self.location.name} (In: {self.checked_in_at})"
 
+
+class ClientBookingPreference(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    Stores each Client's personal booking preferences against their authenticated account:
+    - Join Mode / Remote Session (e.g. 'physical', 'remote', 'virtual')
+    - Virtual Coach (e.g. 'virtual', 'in_person')
+    - Music Preference (e.g. 'Chill Hop', 'Upbeat EDM', 'Rock', 'Pop')
+    """
+    client = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='booking_preferences'
+    )
+    join_mode = models.CharField(
+        max_length=50,
+        default='physical',
+        help_text=_("Preferred attendance mode: 'physical', 'remote', etc.")
+    )
+    virtual_coach = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+        help_text=_("Preferred coach mode (e.g. 'virtual', 'in_person')")
+    )
+    music_preference = models.CharField(
+        max_length=100,
+        blank=True,
+        default='',
+        help_text=_("Preferred music genre/station (e.g. 'Chill Hop', 'Upbeat EDM')")
+    )
+
+    class Meta:
+        ordering = ['-updated_at']
+        verbose_name = _('Client Booking Preference')
+        verbose_name_plural = _('Client Booking Preferences')
+
+    def __str__(self):
+        return f"Booking Preferences for {self.client.email} ({self.join_mode})"
+
+    def save(self, *args, **kwargs):
+        if not self.tenant_id and self.client_id and hasattr(self.client, 'tenant') and self.client.tenant:
+            self.tenant = self.client.tenant
+        super().save(*args, **kwargs)
+
+

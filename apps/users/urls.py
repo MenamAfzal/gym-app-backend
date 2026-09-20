@@ -11,6 +11,7 @@ from apps.users.views import (
     ForgotPasswordInitView,
     ForgotPasswordVerifyView
 )
+from apps.scheduling.views import ClientBookingPreferenceView
 
 router = DefaultRouter()
 router.register(r'profiles', UserViewSet, basename='users')
@@ -35,6 +36,10 @@ urlpatterns = [
     # Change Password Route
     path('auth/change-password/', ChangePasswordView.as_view(), name='change_password'),
     
+    # Booking Preferences Alias
+    path('booking-preferences/', ClientBookingPreferenceView.as_view(), name='user-booking-preferences'),
+
     # ViewSets
     path('', include(router.urls)),
 ]
+
