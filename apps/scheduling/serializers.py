@@ -278,9 +278,9 @@ class ClassSessionSerializer(serializers.ModelSerializer):
 
     def get_bookings(self, obj):
         request = self.context.get('request')
-        if request and request.user and request.user.role in ['trainer', 'gym_owner', 'gym_manager', 'staff']:
+        if request and request.user and request.user.role in ['trainer', 'gym_owner', 'gym_manager', 'staff', 'front_desk']:
             if hasattr(obj, 'bookings'):
-                active_bookings = obj.bookings.filter(status__in=['booked', 'checked_in', 'attended']).select_related('client', 'client__profile')
+                active_bookings = obj.bookings.filter(status__in=['booked', 'checked_in', 'attended']).select_related('client', 'client__profile').order_by('-created_at')
                 results = []
                 for b in active_bookings:
                     c = b.client
@@ -573,6 +573,9 @@ class PackageSerializer(serializers.ModelSerializer):
 
 
 class BookingCreateSerializer(serializers.ModelSerializer):
+    session = serializers.PrimaryKeyRelatedField(
+        queryset=ClassSession.all_objects.all()
+    )
     client = serializers.PrimaryKeyRelatedField(
         queryset=User.objects.all(),
         required=False,
@@ -615,16 +618,54 @@ class BookingCreateSerializer(serializers.ModelSerializer):
 class BookingReadSerializer(serializers.ModelSerializer):
     session = ClassSessionSerializer(read_only=True)
     client_email = serializers.CharField(source='client.email', read_only=True)
+    client_name = serializers.SerializerMethodField()
+    client_first_name = serializers.CharField(source='client.first_name', read_only=True, default='')
+    client_last_name = serializers.CharField(source='client.last_name', read_only=True, default='')
+    session_name = serializers.CharField(source='session.template.name', read_only=True, default='')
+    staff_name = serializers.SerializerMethodField()
     spot_label = serializers.CharField(source='spot.label', read_only=True, default=None)
     spot_number = serializers.IntegerField(source='spot.number', read_only=True, default=None)
 
     class Meta:
         model = Booking
         fields = [
-            'id', 'client', 'client_email', 'session', 'spot', 'spot_label',
+            'id', 'client', 'client_email', 'client_name', 'client_first_name', 'client_last_name',
+            'session', 'session_name', 'staff_name', 'spot', 'spot_label',
             'spot_number', 'is_guest', 'status', 'credit_source', 'checked_in_at',
-            'join_mode', 'music_preference', 'created_at'
+            'checked_out_at', 'join_mode', 'music_preference', 'created_at', 'updated_at'
         ]
+
+    def get_client_name(self, obj):
+        if not obj.client:
+            return ""
+        profile = getattr(obj.client, 'profile', None)
+        if profile:
+            full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip()
+            if full_name:
+                return full_name
+            if profile.nickname:
+                return profile.nickname
+        user_name = f"{obj.client.first_name or ''} {obj.client.last_name or ''}".strip()
+        if user_name:
+            return user_name
+        return obj.client.email.split('@')[0] if obj.client.email else ""
+
+    def get_staff_name(self, obj):
+        session = getattr(obj, 'session', None)
+        staff = getattr(session, 'staff', None) if session else None
+        if not staff:
+            return ""
+        profile = getattr(staff, 'profile', None)
+        if profile:
+            full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip()
+            if full_name:
+                return full_name
+            if profile.nickname:
+                return profile.nickname
+        user_name = f"{staff.first_name or ''} {staff.last_name or ''}".strip()
+        if user_name:
+            return user_name
+        return staff.email.split('@')[0] if staff.email else ""
 
 
 class BookingChangeSpotSerializer(serializers.Serializer):

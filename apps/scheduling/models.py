@@ -431,6 +431,7 @@ class Booking(UUIDMixin, TimestampMixin, TenantMixin):
     music_preference = models.CharField(max_length=100, blank=True)
 
     class Meta:
+        ordering = ['-created_at']
         unique_together = ['client', 'session']
         constraints = [
             models.UniqueConstraint(

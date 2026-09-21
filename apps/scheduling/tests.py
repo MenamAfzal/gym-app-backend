@@ -1366,6 +1366,164 @@ class ClientBookingPreferenceTests(GymSchedulingSystemTestCase):
         self.assertEqual(res.data['music_preference'], 'Lo-Fi Beats')
 
 
+class BookingSortingAndFilteringTests(GymSchedulingSystemTestCase):
+    """
+    Tests for Booking Sorting and Search/Filter Capabilities:
+    - Latest-first ordering (-created_at) across pagination
+    - Reflection of client-app created bookings in Gym Admin Portal list
+    - Search and filter options for User/Client, Session, and Staff
+    """
+
+    def setUp(self):
+        super().setUp()
+        from rest_framework.test import APIClient
+        self.client = APIClient()
+
+        # Set up a second trainer and template
+        self.trainer2 = User.objects.create_user(
+            email="coach_sarah@aligym.com", password="password123", role=UserRole.TRAINER, tenant=self.tenant
+        )
+        self.template_pilates = ClassTemplate.objects.create(
+            tenant=self.tenant, location=self.location, name="Evening Pilates", duration_min=45, default_capacity=5
+        )
+
+        # Create 2 sessions
+        start1 = timezone.now() + timedelta(days=1)
+        self.session1 = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer,
+            start_at=start1,
+            end_at=start1 + timedelta(minutes=60),
+            capacity=10,
+            status='scheduled'
+        )
+
+        start2 = timezone.now() + timedelta(days=2)
+        self.session2 = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template_pilates,
+            room=self.room,
+            staff=self.trainer2,
+            start_at=start2,
+            end_at=start2 + timedelta(minutes=45),
+            capacity=10,
+            status='scheduled'
+        )
+
+    def test_client_booking_reflected_in_admin_portal(self):
+        """Bookings created from Client App are properly synced and reflected in the Bookings section."""
+        # Client creates a booking
+        self.client.force_authenticate(user=self.client1)
+        res = self.client.post("/api/v1/scheduling/bookings/", {
+            "session": str(self.session1.id)
+        }, format='json')
+        self.assertEqual(res.status_code, 201)
+        booking_id = res.json()["id"]
+
+        # Gym Owner logs in and views Bookings list
+        self.client.force_authenticate(user=self.owner)
+        admin_res = self.client.get("/api/v1/scheduling/bookings/")
+        self.assertEqual(admin_res.status_code, 200)
+
+        results = admin_res.json()["results"]
+        booking_ids = [b["id"] for b in results]
+        self.assertIn(booking_id, booking_ids)
+
+        # Verify serialized details
+        b_data = next(b for b in results if b["id"] == booking_id)
+        self.assertEqual(b_data["client_email"], self.client1.email)
+        self.assertEqual(b_data["session_name"], "Morning Yoga")
+        self.assertIn("trainer", b_data["staff_name"].lower() if b_data["staff_name"] else self.trainer.email)
+
+    def test_bookings_sorted_latest_first_by_default(self):
+        """Bookings are sorted by latest booking first (-created_at) by default across pagination."""
+        b1 = Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            session=self.session1,
+            status='booked'
+        )
+        b2 = Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client2,
+            session=self.session2,
+            status='booked'
+        )
+
+        # Simulate older created_at on b1
+        Booking.all_objects.filter(id=b1.id).update(created_at=timezone.now() - timedelta(hours=2))
+        Booking.all_objects.filter(id=b2.id).update(created_at=timezone.now() - timedelta(hours=1))
+
+        self.client.force_authenticate(user=self.owner)
+        resp = self.client.get("/api/v1/scheduling/bookings/")
+        self.assertEqual(resp.status_code, 200)
+
+        results = resp.json()["results"]
+        # b2 is newer than b1, so b2 must come first
+        ids = [b["id"] for b in results]
+        self.assertLess(ids.index(str(b2.id)), ids.index(str(b1.id)))
+
+    def test_filter_and_search_by_client(self):
+        """Admin can filter and search bookings by Client ID, email, and name."""
+        b1 = Booking.objects.create(tenant=self.tenant, client=self.client1, session=self.session1, status='booked')
+        b2 = Booking.objects.create(tenant=self.tenant, client=self.client2, session=self.session2, status='booked')
+
+        self.client.force_authenticate(user=self.owner)
+
+        # 1. Filter by client ID
+        res_id = self.client.get(f"/api/v1/scheduling/bookings/?client={self.client1.id}")
+        self.assertEqual(res_id.status_code, 200)
+        self.assertEqual(len(res_id.json()["results"]), 1)
+        self.assertEqual(res_id.json()["results"][0]["id"], str(b1.id))
+
+        # 2. Filter by client email
+        res_email = self.client.get("/api/v1/scheduling/bookings/?email=client2")
+        self.assertEqual(res_email.status_code, 200)
+        self.assertEqual(len(res_email.json()["results"]), 1)
+        self.assertEqual(res_email.json()["results"][0]["id"], str(b2.id))
+
+    def test_filter_and_search_by_session(self):
+        """Admin can filter and search bookings by Session ID and Session/Class Name."""
+        b1 = Booking.objects.create(tenant=self.tenant, client=self.client1, session=self.session1, status='booked')
+        b2 = Booking.objects.create(tenant=self.tenant, client=self.client2, session=self.session2, status='booked')
+
+        self.client.force_authenticate(user=self.owner)
+
+        # 1. Filter by session ID
+        res_sess = self.client.get(f"/api/v1/scheduling/bookings/?session={self.session2.id}")
+        self.assertEqual(res_sess.status_code, 200)
+        self.assertEqual(len(res_sess.json()["results"]), 1)
+        self.assertEqual(res_sess.json()["results"][0]["id"], str(b2.id))
+
+        # 2. Search by class name
+        res_search = self.client.get("/api/v1/scheduling/bookings/?session_name=Pilates")
+        self.assertEqual(res_search.status_code, 200)
+        self.assertEqual(len(res_search.json()["results"]), 1)
+        self.assertEqual(res_search.json()["results"][0]["id"], str(b2.id))
+
+    def test_filter_and_search_by_staff(self):
+        """Admin can filter and search bookings by Staff/Trainer ID and name."""
+        b1 = Booking.objects.create(tenant=self.tenant, client=self.client1, session=self.session1, status='booked')
+        b2 = Booking.objects.create(tenant=self.tenant, client=self.client2, session=self.session2, status='booked')
+
+        self.client.force_authenticate(user=self.owner)
+
+        # 1. Filter by staff ID
+        res_staff = self.client.get(f"/api/v1/scheduling/bookings/?staff={self.trainer.id}")
+        self.assertEqual(res_staff.status_code, 200)
+        self.assertEqual(len(res_staff.json()["results"]), 1)
+        self.assertEqual(res_staff.json()["results"][0]["id"], str(b1.id))
+
+        # 2. Filter by staff name / email keyword
+        res_name = self.client.get("/api/v1/scheduling/bookings/?staff_name=sarah")
+        self.assertEqual(res_name.status_code, 200)
+        self.assertEqual(len(res_name.json()["results"]), 1)
+        self.assertEqual(res_name.json()["results"][0]["id"], str(b2.id))
+
+
+
 
 
 

@@ -5,7 +5,7 @@ from django.utils import timezone
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.exceptions import ValidationError
 from django.utils.dateparse import parse_date, parse_datetime
-from rest_framework import viewsets, status, permissions, serializers
+from rest_framework import viewsets, status, permissions, serializers, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -609,6 +609,40 @@ class BookingViewSet(viewsets.ModelViewSet):
     queryset = Booking.all_objects.all()
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields = [
+        'client__email', 'client__first_name', 'client__last_name',
+        'client__profile__first_name', 'client__profile__last_name', 'client__profile__nickname',
+        'session__template__name', 'session__room__name', 'session__template__location__name',
+        'session__staff__email', 'session__staff__first_name', 'session__staff__last_name',
+        'session__staff__profile__first_name', 'session__staff__profile__last_name', 'session__staff__profile__nickname'
+    ]
+    ordering_fields = ['created_at', 'status', 'session__start_at', 'client__email']
+    ordering = ['-created_at']
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        from apps.core.tenants.context import set_current_tenant, get_current_tenant
+        tenant = getattr(request, 'tenant', None)
+        if not tenant:
+            header_tenant_id = (
+                request.headers.get('X-Tenant-Id')
+                or request.headers.get('X-Tenant-ID')
+                or request.META.get('HTTP_X_TENANT_ID')
+            )
+            if header_tenant_id:
+                try:
+                    from apps.core.tenants.models import Tenant
+                    tenant = Tenant.objects.filter(id=header_tenant_id).first()
+                except Exception:
+                    pass
+        if not tenant and getattr(request.user, 'is_authenticated', False) and getattr(request.user, 'tenant', None):
+            tenant = request.user.tenant
+        if not tenant:
+            tenant = get_current_tenant()
+        if tenant:
+            request.tenant = tenant
+            set_current_tenant(tenant)
 
     def get_serializer_class(self):
         if self.action == 'create':
@@ -631,21 +665,151 @@ class BookingViewSet(viewsets.ModelViewSet):
         ClassSession.auto_complete_past_sessions()
         Appointment.auto_complete_past_appointments()
         user = self.request.user
-        qs = Booking.objects.select_related(
+
+        # 1. Resolve active tenant for strict isolation and consistent cross-device synchronization
+        tenant = getattr(self.request, 'tenant', None)
+        if not tenant:
+            header_tenant_id = (
+                self.request.headers.get('X-Tenant-Id')
+                or self.request.headers.get('X-Tenant-ID')
+                or self.request.META.get('HTTP_X_TENANT_ID')
+            )
+            if header_tenant_id:
+                try:
+                    from apps.core.tenants.models import Tenant
+                    tenant = Tenant.objects.filter(id=header_tenant_id).first()
+                except Exception:
+                    pass
+        if not tenant and getattr(user, 'tenant', None):
+            tenant = user.tenant
+        if not tenant:
+            from apps.core.tenants.context import get_current_tenant
+            tenant = get_current_tenant()
+
+        # 2. Build tenant-isolated base query
+        # Ensures bookings created from Client App or Portal are always matched via booking.tenant OR session.tenant
+        if tenant:
+            base_qs = Booking.all_objects.filter(Q(tenant=tenant) | Q(session__tenant=tenant))
+        elif user.is_superuser or getattr(user, 'role', None) == UserRole.PLATFORM_ADMIN:
+            base_qs = Booking.all_objects.all()
+        else:
+            base_qs = Booking.objects.all()
+
+        qs = base_qs.select_related(
             'session', 'session__template', 'session__template__location',
             'session__room', 'session__staff', 'session__staff__profile',
             'client', 'client__profile', 'credit_source'
         )
+
+        # 3. Role-based scoping
         if user.role == UserRole.CLIENT:
             qs = qs.filter(client=user)
         elif user.role in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
-            qs = qs.filter(session__template__location__location_staff__staff=user).distinct()
+            from apps.scheduling.models import StaffLocation
+            assigned_locations = StaffLocation.all_objects.filter(staff=user).values_list('location_id', flat=True)
+            if assigned_locations.exists():
+                qs = qs.filter(session__template__location_id__in=assigned_locations).distinct()
         elif user.role == UserRole.TRAINER:
-            qs = qs.filter(Q(session__staff=user) | Q(session__template__location__location_staff__staff=user)).distinct()
-        
-        client_id = self.request.query_params.get('client')
-        if client_id:
-            qs = qs.filter(client_id=client_id)
+            from apps.scheduling.models import StaffLocation
+            assigned_locations = StaffLocation.all_objects.filter(staff=user).values_list('location_id', flat=True)
+            trainer_filter = Q(session__staff=user)
+            if assigned_locations.exists():
+                trainer_filter |= Q(session__template__location_id__in=assigned_locations)
+            qs = qs.filter(trainer_filter).distinct()
+
+        # 4. Search & Filter Options
+        params = self.request.query_params
+
+        # Client / User filter
+        client_param = params.get('client') or params.get('client_id') or params.get('user') or params.get('user_id')
+        if client_param:
+            try:
+                import uuid
+                uuid.UUID(str(client_param))
+                qs = qs.filter(client_id=client_param)
+            except (ValueError, AttributeError):
+                qs = qs.filter(
+                    Q(client__email__icontains=client_param) |
+                    Q(client__profile__first_name__icontains=client_param) |
+                    Q(client__profile__last_name__icontains=client_param) |
+                    Q(client__first_name__icontains=client_param) |
+                    Q(client__last_name__icontains=client_param)
+                )
+
+        client_email = params.get('client_email') or params.get('email')
+        if client_email:
+            qs = qs.filter(client__email__icontains=client_email)
+
+        # Session filter
+        session_param = params.get('session') or params.get('session_id')
+        if session_param:
+            try:
+                import uuid
+                uuid.UUID(str(session_param))
+                qs = qs.filter(session_id=session_param)
+            except (ValueError, AttributeError):
+                qs = qs.filter(session__template__name__icontains=session_param)
+
+        session_name = params.get('session_name') or params.get('class_name')
+        if session_name:
+            qs = qs.filter(session__template__name__icontains=session_name)
+
+        # Staff / Trainer filter
+        staff_param = params.get('staff') or params.get('staff_id') or params.get('trainer') or params.get('trainer_id')
+        if staff_param:
+            try:
+                import uuid
+                uuid.UUID(str(staff_param))
+                qs = qs.filter(session__staff_id=staff_param)
+            except (ValueError, AttributeError):
+                qs = qs.filter(
+                    Q(session__staff__email__icontains=staff_param) |
+                    Q(session__staff__profile__first_name__icontains=staff_param) |
+                    Q(session__staff__profile__last_name__icontains=staff_param) |
+                    Q(session__staff__first_name__icontains=staff_param) |
+                    Q(session__staff__last_name__icontains=staff_param)
+                )
+
+        staff_name = params.get('staff_name') or params.get('trainer_name')
+        if staff_name:
+            qs = qs.filter(
+                Q(session__staff__profile__first_name__icontains=staff_name) |
+                Q(session__staff__profile__last_name__icontains=staff_name) |
+                Q(session__staff__first_name__icontains=staff_name) |
+                Q(session__staff__last_name__icontains=staff_name) |
+                Q(session__staff__email__icontains=staff_name)
+            )
+
+        # Status filter
+        status_param = params.get('status')
+        if status_param and status_param.lower() != 'all':
+            qs = qs.filter(status__iexact=status_param)
+
+        # Location filter
+        location_param = params.get('location') or params.get('location_id')
+        if location_param:
+            qs = qs.filter(session__template__location_id=location_param)
+
+        # Date filters
+        date_param = params.get('date')
+        if date_param:
+            from django.utils.dateparse import parse_date
+            parsed = parse_date(date_param) or date_param[:10]
+            qs = qs.filter(session__start_at__date=parsed)
+
+        date_from = params.get('date_from') or params.get('start_date')
+        if date_from:
+            qs = qs.filter(session__start_at__gte=date_from)
+
+        date_to = params.get('date_to') or params.get('end_date')
+        if date_to:
+            qs = qs.filter(session__start_at__lte=date_to)
+
+        # 5. Latest-first sorting default across all pages
+        ordering = self.request.query_params.get('ordering')
+        if not ordering:
+            qs = qs.order_by('-created_at')
+
         return qs
 
     @transaction.atomic
@@ -672,26 +836,32 @@ class BookingViewSet(viewsets.ModelViewSet):
             if serializer.validated_data.get('client') and serializer.validated_data['client'] != request.user:
                 return Response({"detail": "You cannot make bookings on behalf of other clients."}, status=status.HTTP_403_FORBIDDEN)
 
-        # Row lock session
-        session = ClassSession.objects.select_for_update().get(id=session_id)
+        # Row lock session using all_objects to prevent isolation gaps
+        session = ClassSession.all_objects.select_for_update().get(id=session_id)
 
         if session.status != 'scheduled':
             return Response({"detail": "Session is not scheduled."}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Set tenant context to session.tenant for consistent scoping
+        if session.tenant:
+            from apps.core.tenants.context import set_current_tenant
+            set_current_tenant(session.tenant)
+            request.tenant = session.tenant
+
         # Check existing booking
-        existing_booking = Booking.objects.filter(client=target_client, session=session).first()
+        existing_booking = Booking.all_objects.filter(client=target_client, session=session).first()
         if existing_booking and existing_booking.status in ['booked', 'checked_in', 'attended']:
             return Response({"detail": "Already booked this session."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Check schedule conflict: client cannot book overlapping sessions or appointments
-        client_session_conflict = Booking.objects.filter(
+        client_session_conflict = Booking.all_objects.filter(
             client=target_client,
             session__start_at__lt=session.end_at,
             session__end_at__gt=session.start_at,
             status__in=['booked', 'checked_in', 'attended']
         ).exclude(session=session).exists()
 
-        client_appt_conflict = Appointment.objects.filter(
+        client_appt_conflict = Appointment.all_objects.filter(
             client=target_client,
             start_at__lt=session.end_at,
             end_at__gt=session.start_at,
@@ -713,7 +883,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         spot = serializer.validated_data.get('spot')
         if spot:
             # Row lock the specific spot to cleanly catch race conditions
-            spot = Spot.objects.select_for_update().get(id=spot.id)
+            spot = Spot.all_objects.select_for_update().get(id=spot.id)
             is_spot_taken = session.bookings.filter(
                 spot=spot,
                 status='booked'
@@ -724,7 +894,7 @@ class BookingViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_409_CONFLICT
                 )
 
-        package = Package.objects.select_for_update().filter(
+        package = Package.all_objects.select_for_update().filter(
             client=target_client,
             credits_remaining__gt=0,
             expires_at__gt=timezone.now(),
@@ -732,7 +902,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         ).first()
 
         if not package:
-            has_other_packages = Package.objects.filter(
+            has_other_packages = Package.all_objects.filter(
                 client=target_client,
                 credits_remaining__gt=0,
                 expires_at__gt=timezone.now()
@@ -761,6 +931,13 @@ class BookingViewSet(viewsets.ModelViewSet):
         final_join_mode = serializer.validated_data.get('join_mode') or default_join_mode
         final_music_preference = serializer.validated_data.get('music_preference') or default_music
 
+        booking_tenant = (
+            session.tenant
+            or getattr(request, 'tenant', None)
+            or getattr(target_client, 'tenant', None)
+            or get_current_tenant()
+        )
+
         if existing_booking:
             # Reactivate existing booking row to satisfy unique_together constraint
             existing_booking.status = 'booked'
@@ -769,12 +946,14 @@ class BookingViewSet(viewsets.ModelViewSet):
             existing_booking.is_guest = is_guest
             existing_booking.join_mode = final_join_mode
             existing_booking.music_preference = final_music_preference
+            if not existing_booking.tenant_id and booking_tenant:
+                existing_booking.tenant = booking_tenant
             existing_booking.save()
             booking = existing_booking
         else:
             # Create Booking
-            booking = Booking.objects.create(
-                tenant=request.tenant,
+            booking = Booking.all_objects.create(
+                tenant=booking_tenant,
                 client=target_client,
                 session=session,
                 spot=spot,
@@ -788,17 +967,23 @@ class BookingViewSet(viewsets.ModelViewSet):
         # Create confirmation notification
         from apps.notifications.services import NotificationService
         from apps.notifications.events import BookingConfirmedEvent
-        NotificationService.handle_event(BookingConfirmedEvent(
-            tenant_id=request.tenant.id,
-            recipient_id=target_client.id,
-            entity_id=booking.id,
-            context_data={
-                'client_name': target_client.profile.first_name if hasattr(target_client, 'profile') else target_client.email,
-                'class_name': session.template.name,
-                'class_time': str(session.start_at),
-                'gym_name': request.tenant.name,
-            }
-        ))
+        tenant_id = getattr(booking_tenant, 'id', None) or getattr(getattr(request, 'tenant', None), 'id', None)
+        gym_name = getattr(booking_tenant, 'name', '') or getattr(getattr(request, 'tenant', None), 'name', 'Your Gym')
+        if tenant_id:
+            try:
+                NotificationService.handle_event(BookingConfirmedEvent(
+                    tenant_id=tenant_id,
+                    recipient_id=target_client.id,
+                    entity_id=booking.id,
+                    context_data={
+                        'client_name': target_client.profile.first_name if hasattr(target_client, 'profile') else target_client.email,
+                        'class_name': session.template.name,
+                        'class_time': str(session.start_at),
+                        'gym_name': gym_name,
+                    }
+                ))
+            except Exception:
+                pass
 
         # Emit Rewards Event
         try:

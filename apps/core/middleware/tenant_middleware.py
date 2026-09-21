@@ -21,29 +21,44 @@ class TenantMiddleware(MiddlewareMixin):
         tenant = None
         
         # ------------------------------------------------------------------
+        # STRATEGY 0: Header Resolution (Mobile Apps / API Proxies / Admin)
+        # ------------------------------------------------------------------
+        header_tenant_id = (
+            request.headers.get('X-Tenant-Id')
+            or request.headers.get('X-Tenant-ID')
+            or request.META.get('HTTP_X_TENANT_ID')
+        )
+        if header_tenant_id:
+            try:
+                tenant = Tenant.objects.get(id=header_tenant_id)
+            except Exception:
+                pass
+
+        # ------------------------------------------------------------------
         # STRATEGY 1: JWT Resolution (Highest priority for authenticated API requests)
         # ------------------------------------------------------------------
-        auth_header = request.headers.get('Authorization')
-        if auth_header and auth_header.startswith('Bearer '):
-            token = auth_header.split(' ')[1]
-            try:
-                # We decode purely to read the claim. 
-                # DRF will verify signature/expiry later in the view.
-                payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
-                tenant_id = payload.get('tenant_id')
-                
-                if tenant_id:
-                    try:
-                        tenant = Tenant.objects.get(id=tenant_id)
-                    except Tenant.DoesNotExist:
-                        pass # Token refers to deleted tenant? Ignore.
-                        
-            except jwt.ExpiredSignatureError as e:
-                print("TenantMiddleware: JWT ExpiredSignatureError:", e)
-            except jwt.DecodeError as e:
-                print("TenantMiddleware: JWT DecodeError:", e)
-            except Exception as e:
-                print("TenantMiddleware: General exception:", e)
+        if not tenant:
+            auth_header = request.headers.get('Authorization')
+            if auth_header and auth_header.startswith('Bearer '):
+                token = auth_header.split(' ')[1]
+                try:
+                    # We decode purely to read the claim. 
+                    # DRF will verify signature/expiry later in the view.
+                    payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+                    tenant_id = payload.get('tenant_id')
+                    
+                    if tenant_id:
+                        try:
+                            tenant = Tenant.objects.get(id=tenant_id)
+                        except Tenant.DoesNotExist:
+                            pass # Token refers to deleted tenant? Ignore.
+                            
+                except jwt.ExpiredSignatureError as e:
+                    print("TenantMiddleware: JWT ExpiredSignatureError:", e)
+                except jwt.DecodeError as e:
+                    print("TenantMiddleware: JWT DecodeError:", e)
+                except Exception as e:
+                    print("TenantMiddleware: General exception:", e)
 
         # ------------------------------------------------------------------
         # STRATEGY 2: Subdomain Resolution (Fallback for Web/Public/Public APIs)
