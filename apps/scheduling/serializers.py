@@ -36,20 +36,70 @@ class RoomSerializer(serializers.ModelSerializer):
 
 class SpotTypeSerializer(serializers.ModelSerializer):
     location_name = serializers.CharField(source='location.name', read_only=True)
+    spots_count = serializers.SerializerMethodField()
 
     class Meta:
         model = SpotType
-        fields = ['id', 'location', 'location_name', 'name', 'prefix', 'is_bookable', 'color', 'created_at']
-        read_only_fields = ['id', 'location_name', 'created_at']
+        fields = [
+            'id', 'location', 'location_name', 'name', 'prefix',
+            'is_bookable', 'color', 'spots_count', 'created_at'
+        ]
+        read_only_fields = ['id', 'location_name', 'spots_count', 'created_at']
+        extra_kwargs = {
+            'location': {'required': False}
+        }
+
+    def get_spots_count(self, obj):
+        from .models import Spot
+        return Spot.all_objects.filter(spot_type=obj).count()
 
     def validate(self, attrs):
         location = attrs.get('location') or (self.instance.location if self.instance else None)
-        if not self.instance and location:
+
+        # Check maximum spot types per location
+        if location and (not self.instance or self.instance.location != location):
             if SpotType.objects.filter(location=location).count() >= SpotType.MAX_PER_LOCATION:
                 raise serializers.ValidationError(
                     {"detail": f"Maximum of {SpotType.MAX_PER_LOCATION} spot types allowed per location."}
                 )
+
+        # Prevent changing location if spots are already in use
+        if self.instance and 'location' in attrs and attrs['location'] != self.instance.location:
+            from .models import Spot
+            if Spot.all_objects.filter(spot_type=self.instance).exists():
+                raise serializers.ValidationError(
+                    {"location": "Cannot change the location of a spot type that is already referenced by layout spots."}
+                )
+
+        # Case-insensitive name uniqueness within location
+        name = attrs.get('name')
+        if name and location:
+            name_clean = name.strip()
+            qs = SpotType.all_objects.filter(location=location, name__iexact=name_clean)
+            if self.instance:
+                qs = qs.exclude(id=self.instance.id)
+            if qs.exists():
+                raise serializers.ValidationError(
+                    {"name": f"A spot type with the name '{name_clean}' already exists for this location."}
+                )
+
+        prefix = attrs.get('prefix')
+        if prefix:
+            attrs['prefix'] = prefix.strip()
+
         return attrs
+
+    def update(self, instance, validated_data):
+        old_prefix = instance.prefix
+        instance = super().update(instance, validated_data)
+        new_prefix = instance.prefix
+        if old_prefix != new_prefix:
+            from .models import Spot
+            # Sync spot labels in layouts
+            for spot in Spot.all_objects.filter(spot_type=instance):
+                spot.label = f"{new_prefix}{spot.number}"
+                spot.save(update_fields=['label'])
+        return instance
 
 
 class SpotInputSerializer(serializers.Serializer):

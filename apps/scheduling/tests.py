@@ -10,7 +10,7 @@ from apps.core.tenants.context import set_current_tenant
 from apps.scheduling.models import (
     Location, Room, ClassTemplate, RecurrenceRule, ClassSession,
     Booking, PackageType, Package, Waitlist, CancellationPolicy,
-    Appointment
+    Appointment, SpotType, RoomLayout, Spot
 )
 from apps.scheduling.tasks import process_waitlist_promotion_job, run_no_show_marking_job
 
@@ -1521,6 +1521,180 @@ class BookingSortingAndFilteringTests(GymSchedulingSystemTestCase):
         self.assertEqual(res_name.status_code, 200)
         self.assertEqual(len(res_name.json()["results"]), 1)
         self.assertEqual(res_name.json()["results"][0]["id"], str(b2.id))
+
+
+class SpotTypeEditAndDeleteTests(GymSchedulingSystemTestCase):
+    """
+    Tests for editing and deleting Spot Types:
+    - Edit/update Spot Type (PUT/PATCH) by Admins
+    - Label synchronization when prefix is modified
+    - Deletion of unused Spot Types
+    - Safe prevention of deleting Spot Types in use by Room Layout spots
+    - RBAC: Clients/unauthorized users cannot edit or delete Spot Types
+    """
+
+    def setUp(self):
+        super().setUp()
+        from rest_framework.test import APIClient
+        self.client = APIClient()
+
+        # Create two initial spot types
+        self.bike_type = SpotType.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Spin Bike",
+            prefix="SB",
+            is_bookable=True,
+            color="#3B82F6"
+        )
+        self.mat_type = SpotType.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Yoga Mat",
+            prefix="YM",
+            is_bookable=True,
+            color="#10B981"
+        )
+
+    def test_admin_can_edit_spot_type_via_put_and_patch(self):
+        """Admin can edit/update an existing Spot Type using PUT and PATCH."""
+        self.client.force_authenticate(user=self.owner)
+
+        # 1. PATCH to update name and color
+        res = self.client.patch(f"/api/v1/scheduling/spot-types/{self.bike_type.id}/", {
+            "name": "Upgraded Spin Bike",
+            "color": "#EF4444"
+        }, format='json')
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.data["name"], "Upgraded Spin Bike")
+        self.assertEqual(res.data["color"], "#EF4444")
+        self.assertEqual(res.data["prefix"], "SB")
+
+        # Verify in DB
+        self.bike_type.refresh_from_db()
+        self.assertEqual(self.bike_type.name, "Upgraded Spin Bike")
+        self.assertEqual(self.bike_type.color, "#EF4444")
+
+        # 2. PUT via nested location URL
+        res_put = self.client.put(
+            f"/api/v1/scheduling/locations/{self.location.id}/spot-types/{self.bike_type.id}/",
+            {
+                "name": "Elite Spin Bike",
+                "prefix": "EB",
+                "color": "#6366F1",
+                "is_bookable": True
+            },
+            format='json'
+        )
+        self.assertEqual(res_put.status_code, 200)
+        self.assertEqual(res_put.data["name"], "Elite Spin Bike")
+        self.assertEqual(res_put.data["prefix"], "EB")
+
+        self.bike_type.refresh_from_db()
+        self.assertEqual(self.bike_type.name, "Elite Spin Bike")
+        self.assertEqual(self.bike_type.prefix, "EB")
+
+    def test_spot_type_prefix_update_syncs_existing_spot_labels(self):
+        """Updating a Spot Type prefix automatically synchronizes spot labels in room layouts."""
+        # Create a layout and spot using self.bike_type
+        layout = RoomLayout.objects.create(
+            tenant=self.tenant,
+            room=self.room,
+            name="Spin Studio Layout",
+            grid_rows=2,
+            grid_cols=2
+        )
+        spot = Spot.objects.create(
+            tenant=self.tenant,
+            layout=layout,
+            spot_type=self.bike_type,
+            row=0,
+            col=0,
+            number=1
+        )
+        self.assertEqual(spot.label, "SB1")
+
+        # Admin updates prefix from SB to BIKE
+        self.client.force_authenticate(user=self.owner)
+        res = self.client.patch(f"/api/v1/scheduling/spot-types/{self.bike_type.id}/", {
+            "prefix": "BIKE"
+        }, format='json')
+        self.assertEqual(res.status_code, 200)
+
+        # Verify spot label is updated
+        spot.refresh_from_db()
+        self.assertEqual(spot.label, "BIKE1")
+
+    def test_admin_cannot_duplicate_spot_type_name_in_same_location(self):
+        """Updating a Spot Type name to one that already exists in the same location is rejected."""
+        self.client.force_authenticate(user=self.owner)
+        res = self.client.patch(f"/api/v1/scheduling/spot-types/{self.bike_type.id}/", {
+            "name": "Yoga Mat"  # Already exists as self.mat_type
+        }, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertTrue("name" in res.data or "non_field_errors" in res.data)
+
+    def test_admin_can_delete_unused_spot_type(self):
+        """Admin can delete an existing Spot Type that is not referenced in any room layout."""
+        # Create an unused spot type
+        unused = SpotType.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Temporary Bench",
+            prefix="TB"
+        )
+        unused_id = str(unused.id)
+
+        self.client.force_authenticate(user=self.owner)
+        res = self.client.delete(f"/api/v1/scheduling/spot-types/{unused_id}/")
+        self.assertEqual(res.status_code, 200)
+        self.assertIn("deleted successfully", res.data.get("detail", ""))
+
+        # Verify deleted from DB
+        self.assertFalse(SpotType.objects.filter(id=unused_id).exists())
+
+    def test_admin_cannot_delete_spot_type_in_use_by_layout_spots(self):
+        """Deleting a Spot Type in use by spots in a room layout is safely prevented with 400 error."""
+        layout = RoomLayout.objects.create(
+            tenant=self.tenant,
+            room=self.room,
+            name="Main Room Layout",
+            grid_rows=2,
+            grid_cols=2
+        )
+        Spot.objects.create(
+            tenant=self.tenant,
+            layout=layout,
+            spot_type=self.bike_type,
+            row=0,
+            col=0,
+            number=1
+        )
+
+        self.client.force_authenticate(user=self.owner)
+        res = self.client.delete(f"/api/v1/scheduling/spot-types/{self.bike_type.id}/")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.data.get("code"), "spot_type_in_use")
+        self.assertEqual(res.data.get("spots_count"), 1)
+        self.assertIn("Cannot delete spot type", res.data.get("detail", ""))
+
+        # Spot type still exists in DB
+        self.assertTrue(SpotType.objects.filter(id=self.bike_type.id).exists())
+
+    def test_client_cannot_edit_or_delete_spot_type(self):
+        """Regular clients are forbidden from editing or deleting Spot Types."""
+        self.client.force_authenticate(user=self.client1)
+
+        # Attempt edit
+        res_patch = self.client.patch(f"/api/v1/scheduling/spot-types/{self.bike_type.id}/", {
+            "name": "Client Renamed"
+        }, format='json')
+        self.assertEqual(res_patch.status_code, 403)
+
+        # Attempt delete
+        res_del = self.client.delete(f"/api/v1/scheduling/spot-types/{self.bike_type.id}/")
+        self.assertEqual(res_del.status_code, 403)
+
 
 
 

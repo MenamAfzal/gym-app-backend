@@ -33,6 +33,10 @@ router.register(r'facility-access', FacilityAccessViewSet, basename='facility-ac
 urlpatterns = [
     # Nested Glofox endpoints
     path('locations/<uuid:location_pk>/rooms/', RoomViewSet.as_view({'get': 'list', 'post': 'create'}), name='location-rooms'),
+    path('locations/<uuid:location_pk>/spot-types/', SpotTypeViewSet.as_view({'get': 'list', 'post': 'create'}), name='location-spot-types'),
+    path('locations/<uuid:location_pk>/spot-types/<uuid:pk>/', SpotTypeViewSet.as_view({
+        'get': 'retrieve', 'put': 'update', 'patch': 'partial_update', 'delete': 'destroy'
+    }), name='location-spot-type-detail'),
     path('rooms/<uuid:room_pk>/layouts/', RoomLayoutViewSet.as_view({'get': 'list', 'post': 'create'}), name='room-layouts'),
 
     path('api/view-all-clients/', ViewAllClientsAPIView.as_view(), name='view-all-clients'),

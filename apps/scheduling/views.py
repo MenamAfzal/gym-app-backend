@@ -13,6 +13,7 @@ from rest_framework.pagination import PageNumberPagination
 from django_filters.rest_framework import DjangoFilterBackend
 import logging
 from datetime import datetime, timedelta, time, timezone as datetime_timezone
+from apps.core.tenants.context import get_current_tenant, set_current_tenant
 
 from .models import (
     Location, Room, SpotType, RoomLayout, Spot, StaffLocation, StaffAvailability, ClassTemplate,
@@ -122,6 +123,7 @@ class RoomViewSet(viewsets.ModelViewSet):
 
 
 class SpotTypeViewSet(viewsets.ModelViewSet):
+    queryset = SpotType.all_objects.all()
     serializer_class = SpotTypeSerializer
     permission_classes = [IsAuthenticated]
 
@@ -131,15 +133,103 @@ class SpotTypeViewSet(viewsets.ModelViewSet):
         return [IsAuthenticated()]
 
     def get_queryset(self):
-        qs = SpotType.objects.select_related('location').all()
-        location_id = self.request.query_params.get('location')
+        tenant = (
+            getattr(self.request, 'tenant', None)
+            or getattr(self.request.user, 'tenant', None)
+            or get_current_tenant()
+        )
+        if tenant:
+            qs = SpotType.all_objects.filter(tenant=tenant)
+        elif self.request.user.is_superuser or getattr(self.request.user, 'role', None) == UserRole.PLATFORM_ADMIN:
+            qs = SpotType.all_objects.all()
+        else:
+            qs = SpotType.objects.all()
+
+        qs = qs.select_related('location').prefetch_related('spots')
+
+        user = self.request.user
+        if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
+            qs = qs.filter(location__location_staff__staff=user).distinct()
+
+        location_id = self.kwargs.get('location_pk') or self.request.query_params.get('location')
         if location_id:
             qs = qs.filter(location_id=location_id)
-        return qs
+        return qs.order_by('name')
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        tenant = getattr(request, 'tenant', None)
+        if not tenant:
+            header_tenant_id = (
+                request.headers.get('X-Tenant-Id')
+                or request.headers.get('X-Tenant-ID')
+                or request.META.get('HTTP_X_TENANT_ID')
+            )
+            if header_tenant_id:
+                try:
+                    from apps.core.tenants.models import Tenant
+                    tenant = Tenant.objects.filter(id=header_tenant_id).first()
+                except Exception:
+                    pass
+        if not tenant and getattr(request.user, 'is_authenticated', False) and getattr(request.user, 'tenant', None):
+            tenant = request.user.tenant
+        if not tenant:
+            tenant = get_current_tenant()
+        if tenant:
+            request.tenant = tenant
+            set_current_tenant(tenant)
 
     def perform_create(self, serializer):
-        tenant = getattr(self.request, 'tenant', None) or self.request.user.tenant
+        tenant = (
+            getattr(self.request, 'tenant', None)
+            or getattr(self.request.user, 'tenant', None)
+            or get_current_tenant()
+        )
+        location_pk = self.kwargs.get('location_pk')
+        if location_pk and not serializer.validated_data.get('location'):
+            serializer.save(tenant=tenant, location_id=location_pk)
+        elif serializer.validated_data.get('location'):
+            serializer.save(tenant=tenant)
+        else:
+            raise serializers.ValidationError({"location": "Location is required."})
+
+    def perform_update(self, serializer):
+        tenant = (
+            getattr(self.request, 'tenant', None)
+            or getattr(self.request.user, 'tenant', None)
+            or get_current_tenant()
+        )
         serializer.save(tenant=tenant)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        from .models import Spot
+        spots_count = Spot.all_objects.filter(spot_type=instance).count()
+        if spots_count > 0:
+            return Response(
+                {
+                    "detail": f"Cannot delete spot type '{instance.name}' because it is currently used by {spots_count} spot(s) in room layouts. Please remove or reassign those spots first.",
+                    "code": "spot_type_in_use",
+                    "spots_count": spots_count
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        try:
+            instance.delete()
+        except models.ProtectedError:
+            spots_count = Spot.all_objects.filter(spot_type=instance).count()
+            return Response(
+                {
+                    "detail": f"Cannot delete spot type '{instance.name}' because it is in use by existing layouts.",
+                    "code": "spot_type_in_use",
+                    "spots_count": spots_count
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return Response(
+            {"detail": f"Spot type '{instance.name}' deleted successfully."},
+            status=status.HTTP_200_OK
+        )
 
 
 class RoomLayoutViewSet(viewsets.ModelViewSet):
