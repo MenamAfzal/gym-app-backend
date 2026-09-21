@@ -681,9 +681,9 @@ class AppointmentSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
     def validate(self, data):
-        start = data.get('start_at')
-        end = data.get('end_at')
-        if start >= end:
+        start = data.get('start_at') or (self.instance.start_at if self.instance else None)
+        end = data.get('end_at') or (self.instance.end_at if self.instance else None)
+        if start and end and start >= end:
             raise serializers.ValidationError("End time must be after start time.")
         return data
 

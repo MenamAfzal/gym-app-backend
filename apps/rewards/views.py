@@ -14,7 +14,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework import permissions
 from rest_framework.pagination import PageNumberPagination
-from django.db.models import Sum, Count, Q
+from django.db.models import Sum, Count, Q, Max
 from django.core.exceptions import ValidationError as DjangoValidationError
 
 from apps.rewards.models import (
@@ -589,15 +589,63 @@ class AdminRewardAnalyticsView(APIView):
         badges_awarded_count = UserBadge.all_objects.filter(tenant=tenant).count()
         pending_redemptions_count = RewardRedemption.all_objects.filter(tenant=tenant, status='PENDING').count()
 
-        top_members = list(RewardWallet.all_objects.filter(tenant=tenant).select_related('user').order_by('-lifetime_earned')[:5].values(
-            'user__email', 'balance', 'lifetime_earned'
-        ))
+        top_wallets = (
+            RewardWallet.all_objects.filter(tenant=tenant)
+            .select_related('user', 'user__profile')
+            .order_by('-lifetime_earned')[:5]
+        )
+        top_members = []
+        for w in top_wallets:
+            user = w.user
+            profile = getattr(user, 'profile', None) if user else None
+            
+            first_name = ""
+            last_name = ""
+            nickname = ""
+            if profile:
+                first_name = (profile.first_name or "").strip()
+                last_name = (profile.last_name or "").strip()
+                nickname = (profile.nickname or "").strip()
+            if not first_name and user:
+                first_name = (user.first_name or "").strip()
+            if not last_name and user:
+                last_name = (user.last_name or "").strip()
+            
+            full_name = f"{first_name} {last_name}".strip()
+            member_name = full_name or nickname or (user.email.split('@')[0] if user and user.email else "")
 
-        successful_rules = list(RewardTransaction.all_objects.filter(
-            tenant=tenant, result_status='SUCCESS'
-        ).values('rule__name', 'rule__program__name').annotate(
-            execution_count=Count('id')
-        ).order_by('-execution_count')[:5])
+            top_members.append({
+                'user__email': user.email if user else '',
+                'name': member_name,
+                'user__name': member_name,
+                'user__full_name': member_name,
+                'balance': w.balance,
+                'lifetime_earned': w.lifetime_earned,
+            })
+
+        successful_rules_qs = (
+            RewardTransaction.all_objects.filter(tenant=tenant, result_status='SUCCESS')
+            .values('rule__name', 'rule__program__name', 'rule__created_at')
+            .annotate(
+                execution_count=Count('id'),
+                last_issued_at=Max('created_at'),
+            )
+            .order_by('-execution_count')[:5]
+        )
+        successful_rules = []
+        for r in successful_rules_qs:
+            rule_created = r.get('rule__created_at')
+            last_issued = r.get('last_issued_at')
+            issued_date = rule_created or last_issued
+            successful_rules.append({
+                'rule__name': r['rule__name'],
+                'rule__program__name': r['rule__program__name'],
+                'execution_count': r['execution_count'],
+                'issued_date': issued_date,
+                'rule__created_at': rule_created,
+                'last_issued_date': last_issued,
+                'last_issued_at': last_issued,
+            })
 
         return Response({
             'total_active_points_liability': wallets_agg['total_active_points'] or 0,

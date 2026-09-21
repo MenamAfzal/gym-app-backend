@@ -2718,4 +2718,93 @@ class ClientReferralEngineComprehensiveTests(RewardsBaseTestCase):
         self.assertIn(b"fitverx://referral?", resp.content)
 
 
+class AdminRewardAnalyticsViewTests(RewardsBaseTestCase):
+    """
+    Tests for AdminRewardAnalyticsView (/api/v1/rewards/admin/analytics/):
+    - Verifies top_members array includes member name ('name', 'user__name', 'user__full_name')
+    - Verifies successful_rules array includes 'issued_date' alongside 'execution_count'
+    """
+    def test_analytics_top_members_and_successful_rules(self):
+        # 0. Create program and rule
+        program = RewardProgram.objects.create(
+            tenant=self.tenant1,
+            name="Loyalty Program",
+            program_type="loyalty",
+            status="active"
+        )
+        rule = RewardRule.objects.create(
+            tenant=self.tenant1,
+            program=program,
+            name="Attendance Reward",
+            event_type="booking.attended",
+            status="active",
+            actions=[{"type": "POINTS", "amount": 50, "description": "Attendance bonus"}]
+        )
+
+        # 1. Update member1 profile with first_name and last_name
+        if hasattr(self.member1, 'profile') and self.member1.profile:
+            self.member1.profile.first_name = "Baber"
+            self.member1.profile.last_name = "Azam"
+            self.member1.profile.save()
+        else:
+            from apps.users.models import UserProfile
+            UserProfile.objects.create(
+                user=self.member1,
+                first_name="Baber",
+                last_name="Azam"
+            )
+
+        # 2. Update wallet balance and lifetime_earned
+        self.member1_wallet.balance = 500
+        self.member1_wallet.lifetime_earned = 1000
+        self.member1_wallet.save()
+
+        # 3. Create a successful reward transaction for the rule
+        from apps.rewards.models import RewardTransaction, ProcessedRewardEvent, ExecutionStatus
+        event = ProcessedRewardEvent.objects.create(
+            tenant=self.tenant1,
+            user=self.member1,
+            event_type="booking.attended",
+            idempotency_key=f"test:analytics:{uuid.uuid4()}",
+            occurred_at=datetime.now(timezone.utc),
+            payload={}
+        )
+        RewardTransaction.objects.create(
+            tenant=self.tenant1,
+            user=self.member1,
+            rule=rule,
+            rule_version=1,
+            rule_config_snapshot={},
+            event_record=event,
+            action_type="points_award",
+            action_payload={"points": 50},
+            result_status=ExecutionStatus.SUCCESS,
+            result_data={"points_awarded": 50}
+        )
+
+        # 4. Query analytics endpoint as gym owner / admin
+        self.client.force_authenticate(user=self.owner1)
+        resp = self.client.get("/api/v1/rewards/admin/analytics/")
+        self.assertEqual(resp.status_code, 200)
+
+        # 5. Assert top_members contains member name
+        top_members = resp.data.get("top_members", [])
+        self.assertTrue(len(top_members) > 0)
+        member_data = top_members[0]
+        self.assertEqual(member_data["user__email"], self.member1.email)
+        self.assertEqual(member_data["name"], "Baber Azam")
+        self.assertEqual(member_data["user__full_name"], "Baber Azam")
+        self.assertEqual(member_data["user__name"], "Baber Azam")
+        self.assertEqual(member_data["balance"], 500)
+        self.assertEqual(member_data["lifetime_earned"], 1000)
+
+        # 6. Assert successful_rules contains issued_date
+        successful_rules = resp.data.get("successful_rules", [])
+        self.assertTrue(len(successful_rules) > 0)
+        rule_data = successful_rules[0]
+        self.assertEqual(rule_data["rule__name"], rule.name)
+        self.assertEqual(rule_data["rule__program__name"], program.name)
+        self.assertEqual(rule_data["execution_count"], 1)
+        self.assertIn("issued_date", rule_data)
+        self.assertIsNotNone(rule_data["issued_date"])
 
