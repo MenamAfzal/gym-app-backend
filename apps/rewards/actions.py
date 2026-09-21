@@ -95,6 +95,12 @@ class ActionHandlerRegistry:
         if next_tier and next_tier != wallet.current_tier:
             wallet.current_tier = next_tier
             tier_upgraded = True
+            if next_tier.badge:
+                UserBadge.objects.get_or_create(
+                    tenant_id=tenant_id,
+                    user=user,
+                    badge=next_tier.badge
+                )
 
         wallet.save()
  
@@ -335,6 +341,13 @@ class ActionHandlerRegistry:
         )
         wallet.current_tier = tier
         wallet.save()
+
+        if tier.badge:
+            UserBadge.objects.get_or_create(
+                tenant_id=tenant_id,
+                user=user,
+                badge=tier.badge
+            )
 
         return ActionExecutionResult(
             success=True,

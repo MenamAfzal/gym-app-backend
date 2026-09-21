@@ -42,9 +42,31 @@ class BadgeAdmin(admin.ModelAdmin):
 
 @admin.register(RewardTier)
 class RewardTierAdmin(admin.ModelAdmin):
-    list_display = ('name', 'tenant', 'program', 'threshold_points', 'multiplier')
+    list_display = ('name', 'tenant', 'program', 'threshold_points', 'multiplier', 'badge')
     list_filter = ('tenant', 'program')
+    search_fields = ('name', 'program__name', 'badge__name', 'tenant__name')
     list_select_related = ('tenant', 'program', 'badge')
+
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
+        if db_field.name == "badge":
+            tier_id = request.resolver_match.kwargs.get('object_id') if hasattr(request, 'resolver_match') and request.resolver_match else None
+            if tier_id:
+                try:
+                    tier = RewardTier.all_objects.filter(id=tier_id).first()
+                    if tier and tier.tenant:
+                        kwargs["queryset"] = Badge.all_objects.filter(tenant=tier.tenant)
+                except Exception:
+                    pass
+        elif db_field.name == "program":
+            tier_id = request.resolver_match.kwargs.get('object_id') if hasattr(request, 'resolver_match') and request.resolver_match else None
+            if tier_id:
+                try:
+                    tier = RewardTier.all_objects.filter(id=tier_id).first()
+                    if tier and tier.tenant:
+                        kwargs["queryset"] = RewardProgram.all_objects.filter(tenant=tier.tenant)
+                except Exception:
+                    pass
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
 
 @admin.register(RewardWallet)

@@ -283,7 +283,7 @@ class AdminRewardTierViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated, IsRewardAdminOrManager]
     pagination_class = RewardPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
-    search_fields = ['name', 'perks_description', 'program__name']
+    search_fields = ['name', 'perks_description', 'program__name', 'badge__name']
     ordering_fields = ['name', 'threshold_points', 'multiplier', 'created_at']
     ordering = ['threshold_points', 'name']
 
@@ -293,6 +293,9 @@ class AdminRewardTierViewSet(viewsets.ModelViewSet):
         program_id = self.request.query_params.get('program_id')
         if program_id:
             qs = qs.filter(program_id=program_id)
+        badge_id = self.request.query_params.get('badge_id')
+        if badge_id:
+            qs = qs.filter(badge_id=badge_id)
         return qs
 
     def perform_create(self, serializer):

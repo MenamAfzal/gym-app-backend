@@ -2808,3 +2808,196 @@ class AdminRewardAnalyticsViewTests(RewardsBaseTestCase):
         self.assertIn("issued_date", rule_data)
         self.assertIsNotNone(rule_data["issued_date"])
 
+
+class RewardTierBadgeAssociationTests(RewardsBaseTestCase):
+    """
+    Tests for Tier Badge Association in Gym Admin Portal:
+    - Create tier with badge reference ('badge' or 'badge_id')
+    - Create tier with empty dropdown string ("" or "null") normalized to None
+    - Edit tier to link/update/unlink badge
+    - Verify response payload includes 'badge', 'badge_id', 'badge_name', 'badge_details'
+    - Multi-tenant boundary validation (cannot associate badge from another tenant)
+    - Automatic badge award upon member reaching tier
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.program = RewardProgram.objects.create(
+            tenant=self.tenant1,
+            name="Alpha Loyalty",
+            program_type="loyalty",
+            status="active"
+        )
+        self.badge_gold = Badge.objects.create(
+            tenant=self.tenant1,
+            name="Gold Champion",
+            slug="gold-champion",
+            description="Achieved Gold Tier Status",
+            category="tier",
+            is_active=True
+        )
+        self.badge_silver = Badge.objects.create(
+            tenant=self.tenant1,
+            name="Silver Striker",
+            slug="silver-striker",
+            description="Achieved Silver Tier Status",
+            category="tier",
+            is_active=True
+        )
+        # Badge belonging to tenant 2 for isolation testing
+        self.badge_tenant2 = Badge.objects.create(
+            tenant=self.tenant2,
+            name="Beta Exclusive",
+            slug="beta-exclusive",
+            description="Tenant 2 Badge",
+            category="tier",
+            is_active=True
+        )
+
+    def test_create_tier_with_badge_field(self):
+        """Admin creates a tier providing 'badge' UUID from dropdown."""
+        self.client.force_authenticate(user=self.owner1)
+        payload = {
+            "program": str(self.program.id),
+            "name": "Gold Tier",
+            "threshold_points": 1000,
+            "multiplier": 1.25,
+            "perks_description": "25% points multiplier and VIP lounge access",
+            "badge": str(self.badge_gold.id)
+        }
+        resp = self.client.post("/api/v1/rewards/admin/tiers/", data=payload, format='json')
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertEqual(data["name"], "Gold Tier")
+        self.assertEqual(data["badge"], str(self.badge_gold.id))
+        self.assertEqual(data["badge_id"], str(self.badge_gold.id))
+        self.assertEqual(data["badge_name"], "Gold Champion")
+        self.assertIsNotNone(data["badge_details"])
+        self.assertEqual(data["badge_details"]["name"], "Gold Champion")
+        self.assertEqual(data["program_name"], "Alpha Loyalty")
+
+        tier = RewardTier.objects.get(id=data["id"])
+        self.assertEqual(tier.badge, self.badge_gold)
+
+    def test_create_tier_with_badge_id_field(self):
+        """Admin creates a tier providing 'badge_id' alias from frontend form."""
+        self.client.force_authenticate(user=self.owner1)
+        payload = {
+            "program": str(self.program.id),
+            "name": "Silver Tier",
+            "threshold_points": 500,
+            "multiplier": 1.10,
+            "badge_id": str(self.badge_silver.id)
+        }
+        resp = self.client.post("/api/v1/rewards/admin/tiers/", data=payload, format='json')
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertEqual(data["badge"], str(self.badge_silver.id))
+        self.assertEqual(data["badge_id"], str(self.badge_silver.id))
+        self.assertEqual(data["badge_name"], "Silver Striker")
+
+    def test_create_tier_with_empty_badge_dropdown(self):
+        """Admin creates a tier with empty string or null in badge dropdown (No Badge selected)."""
+        self.client.force_authenticate(user=self.owner1)
+        payload = {
+            "program": str(self.program.id),
+            "name": "Bronze Tier",
+            "threshold_points": 100,
+            "multiplier": 1.0,
+            "badge": ""
+        }
+        resp = self.client.post("/api/v1/rewards/admin/tiers/", data=payload, format='json')
+        self.assertEqual(resp.status_code, 201)
+        data = resp.json()
+        self.assertIsNone(data["badge"])
+        self.assertIsNone(data["badge_id"])
+        self.assertIsNone(data["badge_name"])
+        self.assertIsNone(data["badge_details"])
+
+    def test_edit_tier_badge_association(self):
+        """Admin updates an existing tier to associate or change a badge."""
+        self.client.force_authenticate(user=self.owner1)
+        tier = RewardTier.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Platinum Tier",
+            threshold_points=2500,
+            multiplier=1.50
+        )
+        self.assertIsNone(tier.badge)
+
+        # 1. Update with PATCH to link badge
+        patch_resp = self.client.patch(
+            f"/api/v1/rewards/admin/tiers/{tier.id}/",
+            data={"badge": str(self.badge_gold.id)},
+            format='json'
+        )
+        self.assertEqual(patch_resp.status_code, 200)
+        self.assertEqual(patch_resp.json()["badge"], str(self.badge_gold.id))
+        self.assertEqual(patch_resp.json()["badge_name"], "Gold Champion")
+
+        tier.refresh_from_db()
+        self.assertEqual(tier.badge, self.badge_gold)
+
+        # 2. Update with badge_id to switch badge
+        patch_resp2 = self.client.patch(
+            f"/api/v1/rewards/admin/tiers/{tier.id}/",
+            data={"badge_id": str(self.badge_silver.id)},
+            format='json'
+        )
+        self.assertEqual(patch_resp2.status_code, 200)
+        tier.refresh_from_db()
+        self.assertEqual(tier.badge, self.badge_silver)
+
+        # 3. Unlink badge by passing null
+        patch_resp3 = self.client.patch(
+            f"/api/v1/rewards/admin/tiers/{tier.id}/",
+            data={"badge": None},
+            format='json'
+        )
+        self.assertEqual(patch_resp3.status_code, 200)
+        tier.refresh_from_db()
+        self.assertIsNone(tier.badge)
+
+    def test_cross_tenant_badge_association_rejected(self):
+        """Prevent associating a badge belonging to a different tenant."""
+        self.client.force_authenticate(user=self.owner1)
+        payload = {
+            "program": str(self.program.id),
+            "name": "Malicious Tier",
+            "threshold_points": 500,
+            "multiplier": 1.10,
+            "badge": str(self.badge_tenant2.id)
+        }
+        resp = self.client.post("/api/v1/rewards/admin/tiers/", data=payload, format='json')
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("badge", resp.json())
+
+    def test_member_unlocking_tier_receives_associated_badge(self):
+        """When a member earns points and reaches a tier, they automatically receive the tier's badge."""
+        tier = RewardTier.objects.create(
+            tenant=self.tenant1,
+            program=self.program,
+            name="Champion Tier",
+            threshold_points=200,
+            multiplier=1.20,
+            badge=self.badge_gold
+        )
+
+        from apps.rewards.actions import ActionHandlerRegistry
+        wallet = self.member1_wallet
+        self.assertEqual(wallet.lifetime_earned, 0)
+        self.assertFalse(UserBadge.objects.filter(user=self.member1, badge=self.badge_gold).exists())
+
+        # Award 250 points, surpassing 200 pts threshold
+        res = ActionHandlerRegistry.execute_action(
+            action={"type": "POINTS", "amount": 250},
+            user=self.member1,
+            tenant_id=self.tenant1.id
+        )
+        self.assertTrue(res.success)
+        wallet.refresh_from_db()
+        self.assertEqual(wallet.current_tier, tier)
+        self.assertTrue(UserBadge.objects.filter(user=self.member1, badge=self.badge_gold).exists())
+
+

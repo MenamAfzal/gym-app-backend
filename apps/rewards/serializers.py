@@ -143,16 +143,80 @@ class BadgeSerializer(serializers.ModelSerializer):
 
 class RewardTierSerializer(serializers.ModelSerializer):
     program = serializers.PrimaryKeyRelatedField(queryset=RewardProgram.all_objects.all())
+    program_name = serializers.ReadOnlyField(source='program.name')
     badge = serializers.PrimaryKeyRelatedField(queryset=Badge.all_objects.all(), required=False, allow_null=True)
+    badge_name = serializers.ReadOnlyField(source='badge.name')
     badge_details = BadgeSerializer(source='badge', read_only=True)
 
     class Meta:
         model = RewardTier
         fields = [
-            'id', 'program', 'name', 'threshold_points', 'multiplier',
-            'perks_description', 'badge', 'badge_details', 'created_at'
+            'id', 'program', 'program_name', 'name', 'threshold_points', 'multiplier',
+            'perks_description', 'badge', 'badge_id', 'badge_name', 'badge_details',
+            'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'program_name', 'badge_name', 'badge_details']
+
+    def to_internal_value(self, data):
+        if hasattr(data, 'copy') and hasattr(data, 'get'):
+            data = data.copy()
+        elif isinstance(data, dict):
+            data = dict(data)
+ 
+        if 'badge_id' in data and not data.get('badge'):
+            data['badge'] = data.get('badge_id')
+        data.pop('badge_id', None)
+ 
+        if 'badge' in data and data['badge'] in ('', 'null', 'None', None):
+            data['badge'] = None
+
+        if 'program' in data and data['program'] in ('', 'null', 'None', None):
+            data['program'] = None
+
+        return super().to_internal_value(data)
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        badge_uuid = str(instance.badge_id) if instance.badge_id else None
+        ret['badge'] = badge_uuid
+        ret['badge_id'] = badge_uuid
+        ret['badge_name'] = instance.badge.name if instance.badge else None
+        ret['program_name'] = instance.program.name if instance.program else None
+        return ret
+
+    def validate(self, attrs):
+        request = self.context.get('request') or get_current_request()
+        tenant = None
+        if request:
+            try:
+                from apps.rewards.views import get_request_tenant
+                tenant = get_request_tenant(request)
+            except Exception:
+                tenant = getattr(request, 'tenant', None)
+        if not tenant and hasattr(self, 'instance') and self.instance:
+            tenant = getattr(self.instance, 'tenant', None)
+
+        program = attrs.get('program') or (getattr(self.instance, 'program', None) if hasattr(self, 'instance') else None)
+        if not tenant and program and hasattr(program, 'tenant'):
+            tenant = program.tenant
+
+        badge = attrs.get('badge')
+        if badge:
+            if tenant and hasattr(badge, 'tenant_id') and badge.tenant_id != tenant.id:
+                raise serializers.ValidationError({
+                    'badge': "Selected badge does not exist or belong to this gym."
+                })
+            if program and hasattr(badge, 'tenant_id') and hasattr(program, 'tenant_id') and badge.tenant_id != program.tenant_id:
+                raise serializers.ValidationError({
+                    'badge': "Selected badge does not exist or belong to this gym."
+                })
+
+        if program and tenant and hasattr(program, 'tenant_id') and program.tenant_id != tenant.id:
+            raise serializers.ValidationError({
+                'program': "Selected program does not exist or belong to this gym."
+            })
+
+        return super().validate(attrs)
 
 
 class RewardCatalogItemSerializer(serializers.ModelSerializer):
