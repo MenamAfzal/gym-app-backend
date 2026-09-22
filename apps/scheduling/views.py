@@ -19,7 +19,7 @@ from .models import (
     Location, Room, SpotType, RoomLayout, Spot, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
-    StaffClientAssignment
+    StaffClientAssignment, Event, EventSession, EventEnrollment
 )
 from .serializers import (
     LocationSerializer, RoomSerializer, SpotTypeSerializer, RoomLayoutSerializer,
@@ -29,9 +29,15 @@ from .serializers import (
     BookingEditSerializer, AppointmentSerializer, WaitlistSerializer,
     SubstituteRequestSerializer, PackageTypeSerializer, PackageSerializer,
     PaymentSerializer, CancellationPolicySerializer,
-    StaffAssignClientSerializer
+    StaffAssignClientSerializer,
+    EventListSerializer, EventDetailSerializer, EventCreateUpdateSerializer,
+    EventEnrollmentSerializer, EventEnrollRequestSerializer, EventRosterSerializer
 )
 from .services import create_layout, update_layout, change_booking_spot, SpotUnavailableError
+from .event_services import (
+    enroll_client, cancel_enrollment, check_in_attendee, cancel_event,
+    EventPaymentRequiredError, EventCapacityError, EventRegistrationError
+)
 from .permissions import (
     IsAuthenticated, IsOwnerOrManager, IsGymStaffOrOwner, IsFrontDeskOrAdmin,
     IsInstructor, IsClient, IsAssignedClient
@@ -2036,4 +2042,397 @@ class ClientBookingPreferenceView(APIView):
 
         status_code = status.HTTP_201_CREATED if (created and is_create) else status.HTTP_200_OK
         return Response(serializer.data, status=status_code)
+
+
+# ==============================================================================
+# MINDBODY-STYLE EVENTS & WORKSHOPS VIEWSETS
+# ==============================================================================
+
+class EventViewSet(viewsets.ModelViewSet):
+    """
+    Mindbody-style Events, Workshops, Seminars, and Series.
+    Supports free events and paid events requiring client pass credits.
+    """
+    queryset = Event.all_objects.all()
+    pagination_class = StandardResultsSetPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    search_fields = ['title', 'description', 'category']
+    ordering_fields = ['start_at', 'created_at', 'title', 'capacity']
+    ordering = ['start_at']
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        from apps.core.tenants.context import set_current_tenant, get_current_tenant
+        tenant = getattr(request, 'tenant', None)
+        if not tenant:
+            header_tenant_id = (
+                request.headers.get('X-Tenant-Id')
+                or request.headers.get('X-Tenant-ID')
+                or request.META.get('HTTP_X_TENANT_ID')
+            )
+            if header_tenant_id:
+                try:
+                    from apps.core.tenants.models import Tenant
+                    tenant = Tenant.objects.filter(id=header_tenant_id).first()
+                except Exception:
+                    pass
+        if not tenant and getattr(request.user, 'is_authenticated', False) and getattr(request.user, 'tenant', None):
+            tenant = request.user.tenant
+        if not tenant:
+            tenant = get_current_tenant()
+        if tenant:
+            request.tenant = tenant
+            set_current_tenant(tenant)
+
+    def get_permissions(self):
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'cancel_event']:
+            return [IsOwnerOrManager()]
+        elif self.action in ['roster', 'check_in']:
+            return [IsGymStaffOrOwner()]
+        return [IsAuthenticated()]
+
+    def get_serializer_class(self):
+        if self.action in ['create', 'update', 'partial_update']:
+            return EventCreateUpdateSerializer
+        elif self.action == 'retrieve':
+            return EventDetailSerializer
+        elif self.action == 'roster':
+            return EventRosterSerializer
+        elif self.action == 'enroll':
+            return EventEnrollRequestSerializer
+        return EventListSerializer
+
+    def get_queryset(self):
+        tenant = getattr(self.request, 'tenant', None) or getattr(self.request.user, 'tenant', None)
+        if tenant:
+            qs = Event.all_objects.filter(tenant=tenant)
+        else:
+            qs = Event.all_objects.all()
+
+        qs = qs.select_related(
+            'location', 'room', 'primary_instructor', 'primary_instructor__profile'
+        ).prefetch_related(
+            'assistant_instructors', 'assistant_instructors__profile', 'sessions', 'enrollments'
+        )
+
+        params = self.request.query_params
+
+        # Location filter
+        location = params.get('location') or params.get('location_id')
+        if location:
+            qs = qs.filter(location_id=location)
+
+        # Category filter (workshop, clinic, seminar, etc.)
+        category = params.get('category')
+        if category:
+            qs = qs.filter(category=category)
+
+        # Event type (single or series)
+        event_type = params.get('event_type')
+        if event_type:
+            qs = qs.filter(event_type=event_type)
+
+        # Free / Paid filter
+        is_free = params.get('is_free')
+        if is_free is not None:
+            if is_free.lower() in ['true', '1']:
+                qs = qs.filter(is_free=True)
+            elif is_free.lower() in ['false', '0']:
+                qs = qs.filter(is_free=False)
+
+        # Status filter (default: non-cancelled for regular clients unless requested)
+        status_param = params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param)
+        elif getattr(self.request.user, 'role', None) == UserRole.CLIENT:
+            qs = qs.exclude(status='cancelled')
+
+        # Date range filtering
+        start_date = params.get('start_date')
+        if start_date:
+            parsed_start = parse_date(start_date)
+            if parsed_start:
+                qs = qs.filter(start_at__date__gte=parsed_start)
+
+        end_date = params.get('end_date')
+        if end_date:
+            parsed_end = parse_date(end_date)
+            if parsed_end:
+                qs = qs.filter(start_at__date__lte=parsed_end)
+
+        instructor_id = params.get('instructor') or params.get('instructor_id')
+        if instructor_id:
+            qs = qs.filter(
+                Q(primary_instructor_id=instructor_id) | Q(assistant_instructors__id=instructor_id)
+            ).distinct()
+
+        return qs
+
+    @action(detail=True, methods=['post'], url_path='enroll')
+    def enroll(self, request, pk=None):
+        """
+        Enroll a client in the event/workshop.
+        - Free event: enlists client without pass requirement.
+        - Paid event: deducts credits_required from client's active Package.
+        - Waitlist: placed on waitlist if full (credits not deducted until promoted).
+        """
+        event = self.get_object()
+        serializer = EventEnrollRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        target_client = request.user
+        target_client_id = data.get('client_id')
+        is_complimentary = data.get('is_complimentary', False)
+
+        # If staff is enrolling on behalf of a client
+        if target_client_id:
+            user_role = getattr(request.user, 'role', None)
+            if user_role not in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
+                return Response(
+                    {"detail": "Only gym staff can enroll another client."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            target_client = get_object_or_404(User, id=target_client_id)
+
+        # Complimentary check: only staff can grant complimentary entry
+        if is_complimentary:
+            user_role = getattr(request.user, 'role', None)
+            if user_role not in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
+                is_complimentary = False
+
+        tenant = getattr(request, 'tenant', None) or event.tenant
+
+        try:
+            enrollment, action_taken = enroll_client(
+                tenant=tenant,
+                event_id=event.id,
+                client=target_client,
+                is_complimentary=is_complimentary,
+                notes=data.get('notes', '')
+            )
+        except EventPaymentRequiredError as e:
+            return Response(
+                {
+                    "error": "payment_required",
+                    "detail": str(e),
+                    "credits_required": event.credits_required,
+                    "is_free": event.is_free,
+                },
+                status=status.HTTP_402_PAYMENT_REQUIRED
+            )
+        except EventCapacityError as e:
+            return Response(
+                {
+                    "error": "capacity_full",
+                    "detail": str(e),
+                    "enrolled_count": event.enrolled_count,
+                    "capacity": event.capacity,
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+        except (DjangoValidationError, ValidationError) as e:
+            msg = e.messages[0] if hasattr(e, 'messages') else str(e)
+            return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
+
+        response_data = EventEnrollmentSerializer(enrollment, context={'request': request}).data
+        status_code = status.HTTP_201_CREATED if action_taken == 'registered' else status.HTTP_200_OK
+        return Response(
+            {
+                "message": f"Successfully {action_taken} for {event.title}.",
+                "action": action_taken,
+                "enrollment": response_data
+            },
+            status=status_code
+        )
+
+    @action(detail=True, methods=['get'], url_path='roster')
+    def roster(self, request, pk=None):
+        """
+        Retrieve attendee roster for staff / instructors.
+        """
+        event = self.get_object()
+        enrollments = EventEnrollment.all_objects.filter(event=event).select_related('client', 'client__profile').prefetch_related('attended_sessions')
+        serializer = EventRosterSerializer(enrollments, many=True, context={'request': request})
+        return Response({
+            "event_id": str(event.id),
+            "title": event.title,
+            "capacity": event.capacity,
+            "enrolled_count": event.enrolled_count,
+            "waitlist_count": event.waitlist_count,
+            "spots_remaining": event.spots_remaining,
+            "roster": serializer.data
+        })
+
+    @action(detail=True, methods=['post'], url_path='cancel_event')
+    def cancel_event(self, request, pk=None):
+        """
+        Host / Admin cancellation of entire event with automatic client credit refunds.
+        """
+        event = self.get_object()
+        reason = request.data.get('reason', '')
+        cancelled_event = cancel_event(event_id=event.id, reason=reason)
+        return Response({
+            "message": f"Event '{cancelled_event.title}' has been cancelled. All attendee credits have been refunded.",
+            "event": EventDetailSerializer(cancelled_event, context={'request': request}).data
+        })
+
+    @action(detail=True, methods=['post'], url_path='check_in')
+    def check_in(self, request, pk=None):
+        """
+        Staff / Instructor check-in for an attendee.
+        Accepts enrollment_id or client_id, and optional session_id.
+        """
+        event = self.get_object()
+        enrollment_id = request.data.get('enrollment_id')
+        client_id = request.data.get('client_id')
+        session_id = request.data.get('session_id')
+
+        if not enrollment_id and not client_id:
+            return Response(
+                {"detail": "Please provide either 'enrollment_id' or 'client_id'."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not enrollment_id and client_id:
+            enr = EventEnrollment.all_objects.filter(event=event, client_id=client_id).first()
+            if not enr:
+                return Response(
+                    {"detail": "No enrollment found for this client on this event."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            enrollment_id = enr.id
+
+        try:
+            updated_enrollment = check_in_attendee(
+                enrollment_id=enrollment_id,
+                event_session_id=session_id
+            )
+        except (DjangoValidationError, ValidationError) as e:
+            msg = e.messages[0] if hasattr(e, 'messages') else str(e)
+            return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            "message": f"Successfully checked in {updated_enrollment.client.email}.",
+            "enrollment": EventEnrollmentSerializer(updated_enrollment, context={'request': request}).data
+        })
+
+    @action(detail=False, methods=['get'], url_path='upcoming')
+    def upcoming(self, request):
+        """
+        Convenience endpoint returning upcoming published events.
+        """
+        now = timezone.now()
+        qs = self.get_queryset().filter(status='published', start_at__gte=now).order_by('start_at')
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='my_enrollments')
+    def my_enrollments(self, request):
+        """
+        Retrieve all event enrollments for the currently logged-in user.
+        """
+        enrollments = EventEnrollment.all_objects.filter(
+            client=request.user
+        ).select_related('event', 'event__location', 'credit_source', 'credit_source__package_type').order_by('-event__start_at')
+
+        page = self.paginate_queryset(enrollments)
+        if page is not None:
+            serializer = EventEnrollmentSerializer(page, many=True, context={'request': request})
+            return self.get_paginated_response(serializer.data)
+
+        serializer = EventEnrollmentSerializer(enrollments, many=True, context={'request': request})
+        return Response(serializer.data)
+
+
+class EventEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Manage and inspect individual Event Enrollments.
+    Allows clients to view and cancel their enrollments with automatic pass refunds.
+    """
+    queryset = EventEnrollment.all_objects.all()
+    serializer_class = EventEnrollmentSerializer
+    pagination_class = StandardResultsSetPagination
+    permission_classes = [IsAuthenticated]
+
+    def initial(self, request, *args, **kwargs):
+        super().initial(request, *args, **kwargs)
+        from apps.core.tenants.context import set_current_tenant, get_current_tenant
+        tenant = getattr(request, 'tenant', None)
+        if not tenant:
+            header_tenant_id = (
+                request.headers.get('X-Tenant-Id')
+                or request.headers.get('X-Tenant-ID')
+                or request.META.get('HTTP_X_TENANT_ID')
+            )
+            if header_tenant_id:
+                try:
+                    from apps.core.tenants.models import Tenant
+                    tenant = Tenant.objects.filter(id=header_tenant_id).first()
+                except Exception:
+                    pass
+        if not tenant and getattr(request.user, 'is_authenticated', False) and getattr(request.user, 'tenant', None):
+            tenant = request.user.tenant
+        if not tenant:
+            tenant = get_current_tenant()
+        if tenant:
+            request.tenant = tenant
+            set_current_tenant(tenant)
+
+    def get_queryset(self):
+        user = self.request.user
+        tenant = getattr(self.request, 'tenant', None) or getattr(user, 'tenant', None)
+        if tenant:
+            qs = EventEnrollment.all_objects.filter(tenant=tenant)
+        else:
+            qs = EventEnrollment.all_objects.all()
+
+        qs = qs.select_related(
+            'event', 'event__location', 'client', 'client__profile', 'credit_source', 'credit_source__package_type'
+        )
+        if getattr(user, 'role', None) in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
+            # Staff can filter by event_id or client_id
+            event_id = self.request.query_params.get('event') or self.request.query_params.get('event_id')
+            if event_id:
+                qs = qs.filter(event_id=event_id)
+            client_id = self.request.query_params.get('client') or self.request.query_params.get('client_id')
+            if client_id:
+                qs = qs.filter(client_id=client_id)
+            return qs
+        # Clients only see their own enrollments
+        return qs.filter(client=user)
+
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, pk=None):
+        """
+        Cancel an enrollment.
+        If cancelled before cancellation_cutoff_hours, automatically refunds pass credits.
+        Promotes next waitlisted attendee if available.
+        """
+        enrollment = self.get_object()
+        user = request.user
+        is_staff = getattr(user, 'role', None) in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]
+
+        if not is_staff and enrollment.client != user:
+            return Response(
+                {"detail": "You do not have permission to cancel this enrollment."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        reason = request.data.get('reason', '')
+        try:
+            cancelled = cancel_enrollment(enrollment_id=enrollment.id, user=user, reason=reason)
+        except (DjangoValidationError, ValidationError) as e:
+            msg = e.messages[0] if hasattr(e, 'messages') else str(e)
+            return Response({"detail": msg}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            "message": "Enrollment successfully cancelled.",
+            "enrollment": EventEnrollmentSerializer(cancelled, context={'request': request}).data
+        })
+
 

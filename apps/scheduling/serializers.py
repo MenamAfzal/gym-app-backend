@@ -7,7 +7,8 @@ from .models import (
     Location, Room, SpotType, RoomLayout, Spot, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, PackageGrantSource, Payment, CancellationPolicy,
-    StaffClientAssignment, FacilityAccessLog, ClientBookingPreference
+    StaffClientAssignment, FacilityAccessLog, ClientBookingPreference,
+    Event, EventSession, EventEnrollment
 )
 from apps.users.models import User, UserRole
 
@@ -918,3 +919,243 @@ class ClientBookingPreferenceSerializer(serializers.ModelSerializer):
             normalized['music_preference'] = 'standard' if normalized['music_preference'] else ''
 
         return super().to_internal_value(normalized)
+
+
+# ==============================================================================
+# MINDBODY-STYLE EVENTS & WORKSHOPS SERIALIZERS
+# ==============================================================================
+
+def _format_user_name(user):
+    if not user:
+        return ""
+    profile = getattr(user, 'profile', None)
+    if profile:
+        name = getattr(profile, 'nickname', '') or f"{getattr(profile, 'first_name', '')} {getattr(profile, 'last_name', '')}".strip()
+        if name:
+            return name
+    return user.email
+
+
+class EventSessionSerializer(serializers.ModelSerializer):
+    room_name = serializers.CharField(source='room.name', read_only=True, default='')
+    instructor_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EventSession
+        fields = [
+            'id', 'event', 'session_number', 'title', 'start_at', 'end_at',
+            'room', 'room_name', 'instructor', 'instructor_name', 'status', 'created_at'
+        ]
+        read_only_fields = ['id', 'room_name', 'instructor_name', 'created_at']
+
+    def get_instructor_name(self, obj):
+        return _format_user_name(obj.instructor)
+
+
+class EventListSerializer(serializers.ModelSerializer):
+    category_display = serializers.CharField(source='get_category_display', read_only=True)
+    location_name = serializers.CharField(source='location.name', read_only=True)
+    room_name = serializers.CharField(source='room.name', read_only=True, default='')
+    primary_instructor_name = serializers.SerializerMethodField()
+    my_enrollment = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Event
+        fields = [
+            'id', 'title', 'category', 'category_display', 'description', 'image',
+            'location', 'location_name', 'room', 'room_name',
+            'primary_instructor', 'primary_instructor_name',
+            'event_type', 'enrollment_type', 'start_at', 'end_at',
+            'registration_opens_at', 'registration_closes_at',
+            'capacity', 'waitlist_capacity', 'is_free', 'credits_required',
+            'status', 'cancellation_cutoff_hours',
+            'is_registration_open', 'enrolled_count', 'waitlist_count',
+            'spots_remaining', 'is_full', 'is_waitlist_full',
+            'my_enrollment', 'created_at'
+        ]
+        read_only_fields = [
+            'id', 'category_display', 'location_name', 'room_name',
+            'primary_instructor_name', 'is_registration_open', 'enrolled_count',
+            'waitlist_count', 'spots_remaining', 'is_full', 'is_waitlist_full',
+            'my_enrollment', 'created_at'
+        ]
+
+    def get_primary_instructor_name(self, obj):
+        return _format_user_name(obj.primary_instructor)
+
+    def get_my_enrollment(self, obj):
+        request = self.context.get('request')
+        if not request or not request.user or not request.user.is_authenticated:
+            return None
+        enrollment = obj.enrollments.filter(client=request.user).first()
+        if not enrollment:
+            return None
+        return {
+            "id": str(enrollment.id),
+            "status": enrollment.status,
+            "pricing_type": enrollment.pricing_type,
+            "credits_deducted": enrollment.credits_deducted,
+            "checked_in_at": enrollment.checked_in_at,
+        }
+
+
+class EventDetailSerializer(EventListSerializer):
+    sessions = EventSessionSerializer(many=True, read_only=True)
+    assistant_instructors_details = serializers.SerializerMethodField()
+
+    class Meta(EventListSerializer.Meta):
+        fields = EventListSerializer.Meta.fields + [
+            'terms_and_conditions', 'assistant_instructors',
+            'assistant_instructors_details', 'sessions'
+        ]
+
+    def get_assistant_instructors_details(self, obj):
+        instructors = []
+        for user in obj.assistant_instructors.all():
+            instructors.append({
+                "id": str(user.id),
+                "name": _format_user_name(user),
+                "email": user.email,
+            })
+        return instructors
+
+
+class EventCreateUpdateSerializer(serializers.ModelSerializer):
+    location = serializers.PrimaryKeyRelatedField(queryset=Location.all_objects.all())
+    room = serializers.PrimaryKeyRelatedField(queryset=Room.all_objects.all(), required=False, allow_null=True)
+    primary_instructor = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), required=False, allow_null=True)
+    assistant_instructors = serializers.PrimaryKeyRelatedField(many=True, queryset=User.objects.all(), required=False)
+
+    sessions = serializers.ListField(
+        child=serializers.DictField(),
+        required=False,
+        write_only=True
+    )
+
+    class Meta:
+        model = Event
+        fields = [
+            'id', 'title', 'category', 'description', 'image',
+            'location', 'room', 'primary_instructor', 'assistant_instructors',
+            'event_type', 'enrollment_type', 'start_at', 'end_at',
+            'registration_opens_at', 'registration_closes_at',
+            'capacity', 'waitlist_capacity', 'is_free', 'credits_required',
+            'status', 'cancellation_cutoff_hours', 'terms_and_conditions',
+            'sessions'
+        ]
+        read_only_fields = ['id']
+
+    def validate(self, data):
+        start_at = data.get('start_at', getattr(self.instance, 'start_at', None))
+        end_at = data.get('end_at', getattr(self.instance, 'end_at', None))
+        if start_at and end_at and end_at <= start_at:
+            raise serializers.ValidationError({"end_at": "Event end time must be after start time."})
+
+        reg_opens = data.get('registration_opens_at', getattr(self.instance, 'registration_opens_at', None))
+        reg_closes = data.get('registration_closes_at', getattr(self.instance, 'registration_closes_at', None))
+        if reg_opens and reg_closes and reg_closes <= reg_opens:
+            raise serializers.ValidationError({"registration_closes_at": "Registration close time must be after open time."})
+
+        is_free = data.get('is_free', getattr(self.instance, 'is_free', False))
+        credits_required = data.get('credits_required', getattr(self.instance, 'credits_required', 1))
+        if not is_free and credits_required < 1:
+            raise serializers.ValidationError({"credits_required": "Paid events require at least 1 client pass credit."})
+
+        capacity = data.get('capacity', getattr(self.instance, 'capacity', None))
+        if capacity is not None and capacity <= 0:
+            raise serializers.ValidationError({"capacity": "Capacity must be greater than zero."})
+
+        return data
+
+    def create(self, validated_data):
+        from .event_services import create_event
+        sessions_data = validated_data.pop('sessions', None)
+        request = self.context.get('request')
+        tenant = request.tenant if request and hasattr(request, 'tenant') else validated_data['location'].tenant
+        return create_event(tenant=tenant, validated_data=validated_data, sessions_data=sessions_data)
+
+    def update(self, instance, validated_data):
+        assistant_instructors = validated_data.pop('assistant_instructors', None)
+        sessions_data = validated_data.pop('sessions', None)
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        if assistant_instructors is not None:
+            instance.assistant_instructors.set(assistant_instructors)
+
+        if sessions_data is not None:
+            instance.sessions.all().delete()
+            request = self.context.get('request')
+            tenant = request.tenant if request and hasattr(request, 'tenant') else instance.tenant
+            for idx, s in enumerate(sessions_data, start=1):
+                EventSession.objects.create(
+                    tenant=tenant,
+                    event=instance,
+                    session_number=s.get('session_number', idx),
+                    title=s.get('title', f"Session {idx}"),
+                    start_at=s['start_at'],
+                    end_at=s['end_at'],
+                    room_id=s.get('room_id') or s.get('room'),
+                    instructor_id=s.get('instructor_id') or s.get('instructor'),
+                    status='scheduled'
+                )
+        return instance
+
+
+class EventEnrollmentSerializer(serializers.ModelSerializer):
+    event_title = serializers.CharField(source='event.title', read_only=True)
+    event_category = serializers.CharField(source='event.category', read_only=True)
+    event_start_at = serializers.DateTimeField(source='event.start_at', read_only=True)
+    event_end_at = serializers.DateTimeField(source='event.end_at', read_only=True)
+    location_name = serializers.CharField(source='event.location.name', read_only=True)
+    client_name = serializers.SerializerMethodField()
+    client_email = serializers.CharField(source='client.email', read_only=True)
+    package_name = serializers.CharField(source='credit_source.package_type.name', read_only=True, default='')
+
+    class Meta:
+        model = EventEnrollment
+        fields = [
+            'id', 'event', 'event_title', 'event_category', 'event_start_at', 'event_end_at',
+            'location_name', 'client', 'client_name', 'client_email',
+            'status', 'pricing_type', 'credit_source', 'package_name',
+            'credits_deducted', 'checked_in_at', 'cancelled_at',
+            'cancellation_reason', 'notes', 'created_at'
+        ]
+        read_only_fields = [
+            'id', 'event_title', 'event_category', 'event_start_at', 'event_end_at',
+            'location_name', 'client_name', 'client_email', 'package_name',
+            'pricing_type', 'credits_deducted', 'checked_in_at', 'cancelled_at',
+            'created_at'
+        ]
+
+    def get_client_name(self, obj):
+        return _format_user_name(obj.client)
+
+
+class EventEnrollRequestSerializer(serializers.Serializer):
+    client_id = serializers.UUIDField(required=False, help_text="Optional target client ID if staff is enrolling member")
+    is_complimentary = serializers.BooleanField(default=False, help_text="Allow staff to grant complimentary entry")
+    notes = serializers.CharField(required=False, allow_blank=True, default="")
+
+
+class EventRosterSerializer(serializers.ModelSerializer):
+    client_id = serializers.UUIDField(source='client.id', read_only=True)
+    client_name = serializers.SerializerMethodField()
+    client_email = serializers.CharField(source='client.email', read_only=True)
+    attended_sessions_ids = serializers.PrimaryKeyRelatedField(
+        source='attended_sessions', many=True, read_only=True
+    )
+
+    class Meta:
+        model = EventEnrollment
+        fields = [
+            'id', 'client_id', 'client_name', 'client_email',
+            'status', 'pricing_type', 'credits_deducted',
+            'checked_in_at', 'attended_sessions_ids', 'notes', 'created_at'
+        ]
+
+    def get_client_name(self, obj):
+        return _format_user_name(obj.client)
+        

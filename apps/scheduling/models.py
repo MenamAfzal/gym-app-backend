@@ -702,3 +702,197 @@ class ClientBookingPreference(UUIDMixin, TimestampMixin, TenantMixin):
         super().save(*args, **kwargs)
 
 
+class Event(UUIDMixin, TimestampMixin, TenantMixin, SoftDeleteModel):
+    """
+    Mindbody-style Event / Workshop / Enrollment.
+    Special scheduled offering (single-session workshop or multi-session bootcamp series),
+    distinguished from ongoing recurring classes and personal appointments.
+    Can be free or paid (requires client pass / package credits).
+    """
+    CATEGORY_CHOICES = [
+        ('workshop', 'Workshop'),
+        ('bootcamp', 'Bootcamp'),
+        ('seminar', 'Seminar'),
+        ('retreat', 'Retreat'),
+        ('certification', 'Certification'),
+        ('masterclass', 'Masterclass'),
+        ('community', 'Community Event'),
+    ]
+    EVENT_TYPE_CHOICES = [
+        ('single', 'Single Session'),
+        ('series', 'Multi-Session Series'),
+    ]
+    ENROLLMENT_TYPE_CHOICES = [
+        ('entire_series', 'Entire Series Only'),
+        ('drop_in_allowed', 'Drop-in Allowed'),
+    ]
+    STATUS_CHOICES = [
+        ('draft', 'Draft'),
+        ('published', 'Published'),
+        ('in_progress', 'In Progress'),
+        ('completed', 'Completed'),
+        ('cancelled', 'Cancelled'),
+    ]
+
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True)
+    category = models.CharField(max_length=50, choices=CATEGORY_CHOICES, default='workshop')
+    image = models.ImageField(upload_to='events/', blank=True, null=True)
+
+    location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='events')
+    room = models.ForeignKey(Room, on_delete=models.SET_NULL, null=True, blank=True, related_name='events')
+    primary_instructor = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='led_events',
+        limit_choices_to={'role__in': ['trainer', 'gym_owner', 'gym_manager']}
+    )
+    assistant_instructors = models.ManyToManyField(
+        User, blank=True, related_name='assisted_events',
+        limit_choices_to={'role__in': ['trainer', 'gym_owner', 'gym_manager']}
+    )
+
+    event_type = models.CharField(max_length=20, choices=EVENT_TYPE_CHOICES, default='single')
+    enrollment_type = models.CharField(max_length=20, choices=ENROLLMENT_TYPE_CHOICES, default='entire_series')
+
+    start_at = models.DateTimeField(db_index=True)
+    end_at = models.DateTimeField()
+
+    registration_opens_at = models.DateTimeField(null=True, blank=True)
+    registration_closes_at = models.DateTimeField(null=True, blank=True)
+
+    capacity = models.PositiveIntegerField(help_text="Maximum number of attendees")
+    waitlist_capacity = models.PositiveIntegerField(default=0, help_text="Maximum waitlist size")
+
+    is_free = models.BooleanField(default=False, help_text="True if free event; False if requires active client pass")
+    credits_required = models.PositiveIntegerField(default=1, help_text="Number of pass credits required if paid")
+
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='published')
+    cancellation_cutoff_hours = models.PositiveIntegerField(default=24, help_text="Hours before start eligible for pass credit refund")
+    terms_and_conditions = models.TextField(blank=True)
+
+    objects = TenantSoftDeleteManager()
+    all_objects = models.Manager()
+
+    class Meta:
+        ordering = ['start_at']
+        indexes = [
+            models.Index(fields=['location', 'status', 'start_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.title} ({self.get_category_display()}) - {self.location.name}"
+
+    @property
+    def is_registration_open(self):
+        now = timezone.now()
+        if self.status not in ['published', 'in_progress']:
+            return False
+        if self.registration_opens_at and now < self.registration_opens_at:
+            return False
+        if self.registration_closes_at and now > self.registration_closes_at:
+            return False
+        if not self.registration_closes_at and now > self.start_at:
+            return False
+        return True
+
+    @property
+    def enrolled_count(self):
+        return self.enrollments.filter(status__in=['registered', 'attended']).count()
+
+    @property
+    def waitlist_count(self):
+        return self.enrollments.filter(status='waitlisted').count()
+
+    @property
+    def spots_remaining(self):
+        return max(0, self.capacity - self.enrolled_count)
+
+    @property
+    def is_full(self):
+        return self.enrolled_count >= self.capacity
+
+    @property
+    def is_waitlist_full(self):
+        if self.waitlist_capacity <= 0:
+            return True
+        return self.waitlist_count >= self.waitlist_capacity
+
+
+class EventSession(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    An individual date/time session belonging to a multi-session Event series.
+    """
+    STATUS_CHOICES = [
+        ('scheduled', 'Scheduled'),
+        ('in_progress', 'In Progress'),
+        ('completed', 'Completed'),
+        ('cancelled', 'Cancelled'),
+    ]
+
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='sessions')
+    session_number = models.PositiveIntegerField(default=1)
+    title = models.CharField(max_length=150, blank=True)
+    start_at = models.DateTimeField()
+    end_at = models.DateTimeField()
+    room = models.ForeignKey(Room, on_delete=models.SET_NULL, null=True, blank=True, related_name='event_sessions')
+    instructor = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, related_name='event_sessions',
+        limit_choices_to={'role__in': ['trainer', 'gym_owner', 'gym_manager']}
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
+
+    class Meta:
+        ordering = ['session_number', 'start_at']
+
+    def __str__(self):
+        return f"{self.event.title} - Session {self.session_number}: {self.title or self.start_at}"
+
+
+class EventEnrollment(UUIDMixin, TimestampMixin, TenantMixin):
+    """
+    An individual Client's registration for an Event/Workshop.
+    Tracks pass credit deductions, waitlist status, check-in, and multi-session attendance.
+    """
+    STATUS_CHOICES = [
+        ('registered', 'Registered'),
+        ('waitlisted', 'Waitlisted'),
+        ('attended', 'Attended'),
+        ('cancelled', 'Cancelled'),
+        ('no_show', 'No Show'),
+    ]
+    PRICING_TYPE_CHOICES = [
+        ('free', 'Free Event'),
+        ('pass', 'Client Pass Credit'),
+        ('complimentary', 'Staff Complimentary'),
+    ]
+
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='enrollments')
+    client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='event_enrollments')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='registered')
+    pricing_type = models.CharField(max_length=20, choices=PRICING_TYPE_CHOICES, default='pass')
+
+    credit_source = models.ForeignKey(
+        'Package', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='event_enrollments',
+        help_text="The client pass instance from which credit was deducted (if paid)"
+    )
+    credits_deducted = models.PositiveIntegerField(default=0)
+
+    attended_sessions = models.ManyToManyField(
+        EventSession, blank=True, related_name='attended_enrollments',
+        help_text="Track session-by-session attendance for multi-day workshops"
+    )
+
+    checked_in_at = models.DateTimeField(null=True, blank=True)
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancellation_reason = models.TextField(blank=True)
+    notes = models.TextField(blank=True, help_text="Special instructions, dietary restrictions, emergency contact")
+
+    class Meta:
+        ordering = ['-created_at']
+        unique_together = ['event', 'client']
+
+    def __str__(self):
+        return f"{self.client.email} enrolled in {self.event.title} ({self.status})"
+
+

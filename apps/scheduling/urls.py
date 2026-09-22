@@ -7,7 +7,7 @@ from .views import (
     AppointmentViewSet, WaitlistViewSet, SubstituteRequestViewSet, PackageTypeViewSet,
     PackageViewSet, ReportsView, StaffAssignmentViewSet, ViewAllClientsAPIView,
     FacilityAccessViewSet, UpdateBookingAttributesAPIView,
-    ClientBookingPreferenceView
+    ClientBookingPreferenceView, EventViewSet, EventEnrollmentViewSet
 )
 
 router = DefaultRouter()
@@ -21,6 +21,9 @@ router.register(r'class-templates', ClassTemplateViewSet, basename='class-templa
 router.register(r'recurrence-rules', RecurrenceRuleViewSet, basename='recurrence-rule')
 router.register(r'sessions', ClassSessionViewSet, basename='session')
 router.register(r'events', ClassSessionViewSet, basename='event')
+router.register(r'workshops', EventViewSet, basename='workshop')
+router.register(r'mindbody-events', EventViewSet, basename='mindbody-event')
+router.register(r'event-enrollments', EventEnrollmentViewSet, basename='event-enrollment')
 router.register(r'bookings', BookingViewSet, basename='booking')
 router.register(r'appointments', AppointmentViewSet, basename='appointment')
 router.register(r'waitlist', WaitlistViewSet, basename='waitlist')
