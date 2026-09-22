@@ -3,6 +3,7 @@ from unittest.mock import patch
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
 from apps.core.tenants.models import Tenant
 from apps.users.models import User, UserRole
 from apps.core.tenants.context import set_current_tenant
@@ -81,6 +82,35 @@ class MindbodyEventsTestCase(APITestCase):
         self.client.force_authenticate(user=self.client1)
         res2 = self.client.post('/api/v1/scheduling/workshops/', payload, format='json')
         self.assertEqual(res2.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_owner_can_create_event_with_image_multipart(self):
+        """Owner can upload image file and create event via multipart/form-data."""
+        self.client.force_authenticate(user=self.owner)
+        dummy_image = SimpleUploadedFile(
+            name="test_banner.jpg",
+            content=b"\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x80\x00\x00\x05\x04\x04\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b",
+            content_type="image/jpeg"
+        )
+        payload = {
+            "title": "Yoga Retreat Banner Event",
+            "category": "retreat",
+            "location": str(self.location.id),
+            "room": str(self.room.id),
+            "primary_instructor": str(self.trainer.id),
+            "event_type": "single",
+            "start_at": (timezone.now() + timedelta(days=10)).isoformat(),
+            "end_at": (timezone.now() + timedelta(days=10, hours=4)).isoformat(),
+            "capacity": "25",
+            "waitlist_capacity": "10",
+            "is_free": "true",
+            "credits_required": "0",
+            "image": dummy_image
+        }
+        res = self.client.post('/api/v1/scheduling/workshops/', payload, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertIsNotNone(res.data.get('image'))
+        self.assertTrue(res.data['is_free'])
+        self.assertEqual(res.data['capacity'], 25)
 
     def test_free_event_enrollment(self):
         """Client with NO passes can enroll in a free event."""

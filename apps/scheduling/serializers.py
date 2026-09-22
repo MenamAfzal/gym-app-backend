@@ -1045,6 +1045,25 @@ class EventCreateUpdateSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id']
 
+    def to_internal_value(self, data):
+        import json
+        normalized = data.copy() if hasattr(data, 'copy') else dict(data)
+
+        # Handle stringified JSON in multipart/form-data
+        if 'sessions' in normalized and isinstance(normalized['sessions'], str):
+            try:
+                normalized['sessions'] = json.loads(normalized['sessions'])
+            except Exception:
+                pass
+
+        if 'assistant_instructors' in normalized and isinstance(normalized['assistant_instructors'], str):
+            try:
+                normalized['assistant_instructors'] = json.loads(normalized['assistant_instructors'])
+            except Exception:
+                pass
+
+        return super().to_internal_value(normalized)
+
     def validate(self, data):
         start_at = data.get('start_at', getattr(self.instance, 'start_at', None))
         end_at = data.get('end_at', getattr(self.instance, 'end_at', None))

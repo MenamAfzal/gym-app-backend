@@ -5,7 +5,7 @@ from django.utils import timezone
 from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.exceptions import ValidationError
 from django.utils.dateparse import parse_date, parse_datetime
-from rest_framework import viewsets, status, permissions, serializers, filters
+from rest_framework import viewsets, status, permissions, serializers, filters, parsers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -2054,6 +2054,7 @@ class EventViewSet(viewsets.ModelViewSet):
     Supports free events and paid events requiring client pass credits.
     """
     queryset = Event.all_objects.all()
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['title', 'description', 'category']
