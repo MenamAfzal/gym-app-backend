@@ -1,7 +1,9 @@
+import uuid
 from django.db import models
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from core_models.mixins.uuid_mixin import UUIDMixin
 from core_models.mixins.timestamps import TimestampMixin
 from core_models.mixins.tenant_mixin import TenantMixin
@@ -424,6 +426,7 @@ class Booking(UUIDMixin, TimestampMixin, TenantMixin):
     is_guest = models.BooleanField(default=False)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='booked')
     credit_source = models.ForeignKey(Package, on_delete=models.PROTECT, related_name='bookings', null=True, blank=True)
+    credits_used = models.PositiveIntegerField(default=1)
     checked_in_at = models.DateTimeField(null=True, blank=True)
     checked_out_at = models.DateTimeField(null=True, blank=True)
      
@@ -464,6 +467,7 @@ class Appointment(UUIDMixin, TimestampMixin, TenantMixin):
     end_at = models.DateTimeField()
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='scheduled')
     credit_source = models.ForeignKey(Package, on_delete=models.SET_NULL, null=True, blank=True, related_name='appointments')
+    credits_used = models.PositiveIntegerField(default=1)
 
     def __str__(self):
         return f"1-on-1: {self.client.email} with {self.provider.email} at {self.start_at}"
@@ -894,5 +898,37 @@ class EventEnrollment(UUIDMixin, TimestampMixin, TenantMixin):
 
     def __str__(self):
         return f"{self.client.email} enrolled in {self.event.title} ({self.status})"
+
+
+class TenantBookingSettings(UUIDMixin, TimestampMixin):
+    tenant = models.OneToOneField(
+        'tenants.Tenant',
+        on_delete=models.CASCADE,
+        related_name='booking_settings'
+    )
+    session_late_cancellation_hours = models.PositiveIntegerField(default=12, validators=[MinValueValidator(0)])
+    session_booking_credits = models.PositiveIntegerField(default=1, validators=[MinValueValidator(1)])
+    appointment_late_cancellation_hours = models.PositiveIntegerField(default=12, validators=[MinValueValidator(0)])
+    appointment_booking_credits = models.PositiveIntegerField(default=1, validators=[MinValueValidator(1)])
+
+    class Meta:
+        verbose_name = 'Tenant Booking Settings'
+        verbose_name_plural = 'Tenant Booking Settings'
+
+    def __str__(self):
+        return f"Booking Settings for {self.tenant_id}"
+
+    @classmethod
+    def get_or_create_for_tenant(cls, tenant):
+        if not tenant:
+            return cls(session_late_cancellation_hours=12, session_booking_credits=1, appointment_late_cancellation_hours=12, appointment_booking_credits=1)
+        if isinstance(tenant, (str, uuid.UUID)):
+            from apps.core.tenants.models import Tenant
+            tenant = Tenant.objects.filter(id=tenant).first()
+            if not tenant:
+                return cls(session_late_cancellation_hours=12, session_booking_credits=1, appointment_late_cancellation_hours=12, appointment_booking_credits=1)
+        settings_obj, _ = cls.objects.get_or_create(tenant=tenant)
+        return settings_obj
+
 
 

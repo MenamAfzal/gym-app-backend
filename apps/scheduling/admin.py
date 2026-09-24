@@ -3,7 +3,7 @@ from .models import (
     Location, Room, SpotType, RoomLayout, Spot, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
-    StaffClientAssignment
+    StaffClientAssignment, TenantBookingSettings
 )
 
 class TenantAdminMixin:
@@ -131,3 +131,9 @@ class CancellationPolicyAdmin(TenantAdminMixin, admin.ModelAdmin):
 class StaffClientAssignmentAdmin(TenantAdminMixin, admin.ModelAdmin):
     list_display = ('staff', 'client', 'tenant')
     search_fields = ('staff__email', 'client__email')
+
+
+@admin.register(TenantBookingSettings)
+class TenantBookingSettingsAdmin(admin.ModelAdmin):
+    list_display = ('tenant', 'session_late_cancellation_hours', 'session_booking_credits', 'appointment_late_cancellation_hours', 'appointment_booking_credits')
+    search_fields = ('tenant__name',)

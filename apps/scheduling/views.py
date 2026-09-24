@@ -19,7 +19,8 @@ from .models import (
     Location, Room, SpotType, RoomLayout, Spot, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
-    StaffClientAssignment, Event, EventSession, EventEnrollment
+    StaffClientAssignment, Event, EventSession, EventEnrollment,
+    TenantBookingSettings
 )
 from .serializers import (
     LocationSerializer, RoomSerializer, SpotTypeSerializer, RoomLayoutSerializer,
@@ -31,7 +32,8 @@ from .serializers import (
     PaymentSerializer, CancellationPolicySerializer,
     StaffAssignClientSerializer,
     EventListSerializer, EventDetailSerializer, EventCreateUpdateSerializer,
-    EventEnrollmentSerializer, EventEnrollRequestSerializer, EventRosterSerializer
+    EventEnrollmentSerializer, EventEnrollRequestSerializer, EventRosterSerializer,
+    TenantBookingSettingsSerializer
 )
 from .services import create_layout, update_layout, change_booking_spot, SpotUnavailableError
 from .event_services import (
@@ -994,9 +996,18 @@ class BookingViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_409_CONFLICT
                 )
 
+        booking_tenant = (
+            session.tenant
+            or getattr(request, 'tenant', None)
+            or getattr(target_client, 'tenant', None)
+            or get_current_tenant()
+        )
+        tenant_settings = TenantBookingSettings.get_or_create_for_tenant(booking_tenant)
+        required_credits = tenant_settings.session_booking_credits if tenant_settings else 1
+
         package = Package.all_objects.select_for_update().filter(
             client=target_client,
-            credits_remaining__gt=0,
+            credits_remaining__gte=required_credits,
             expires_at__gt=timezone.now(),
             package_type__location=session.template.location
         ).first()
@@ -1004,7 +1015,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         if not package:
             has_other_packages = Package.all_objects.filter(
                 client=target_client,
-                credits_remaining__gt=0,
+                credits_remaining__gte=required_credits,
                 expires_at__gt=timezone.now()
             ).exists()
             if has_other_packages:
@@ -1013,17 +1024,15 @@ class BookingViewSet(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST
                 )
             return Response(
-                {"detail": "No active credits or packages found for booking."},
+                {"detail": f"Insufficient credits or no active package found. Booking a session requires {required_credits} credit(s)."},
                 status=status.HTTP_402_PAYMENT_REQUIRED
             )
 
-        # Deduct Credit
-        package.credits_remaining -= 1
+        package.credits_remaining -= required_credits
         package.save()
 
         is_guest = serializer.validated_data.get('is_guest', False)
 
-        # Determine fallback preferences from ClientBookingPreference
         client_pref = getattr(target_client, 'booking_preferences', None)
         default_join_mode = getattr(client_pref, 'join_mode', 'physical') if client_pref else 'physical'
         default_music = getattr(client_pref, 'music_preference', '') if client_pref else ''
@@ -1031,17 +1040,10 @@ class BookingViewSet(viewsets.ModelViewSet):
         final_join_mode = serializer.validated_data.get('join_mode') or default_join_mode
         final_music_preference = serializer.validated_data.get('music_preference') or default_music
 
-        booking_tenant = (
-            session.tenant
-            or getattr(request, 'tenant', None)
-            or getattr(target_client, 'tenant', None)
-            or get_current_tenant()
-        )
-
         if existing_booking:
-            # Reactivate existing booking row to satisfy unique_together constraint
             existing_booking.status = 'booked'
             existing_booking.credit_source = package
+            existing_booking.credits_used = required_credits
             existing_booking.spot = spot
             existing_booking.is_guest = is_guest
             existing_booking.join_mode = final_join_mode
@@ -1051,7 +1053,6 @@ class BookingViewSet(viewsets.ModelViewSet):
             existing_booking.save()
             booking = existing_booking
         else:
-            # Create Booking
             booking = Booking.all_objects.create(
                 tenant=booking_tenant,
                 client=target_client,
@@ -1059,6 +1060,7 @@ class BookingViewSet(viewsets.ModelViewSet):
                 spot=spot,
                 is_guest=is_guest,
                 credit_source=package,
+                credits_used=required_credits,
                 status='booked',
                 join_mode=final_join_mode,
                 music_preference=final_music_preference
@@ -1119,12 +1121,16 @@ class BookingViewSet(viewsets.ModelViewSet):
         session = booking.session
         now = timezone.now()
 
-        # Resolve cancellation policy (most specific first: template > global)
-        policy = CancellationPolicy.objects.filter(template=session.template).first()
-        if not policy:
-            policy = CancellationPolicy.objects.filter(scope_type='global').first()
+        booking_tenant = (
+            booking.tenant
+            or session.tenant
+            or getattr(request, 'tenant', None)
+            or get_current_tenant()
+        )
+        tenant_settings = TenantBookingSettings.get_or_create_for_tenant(booking_tenant)
 
-        cutoff_hours = policy.cutoff_hours if policy else 12
+        policy = CancellationPolicy.objects.filter(template=session.template).first()
+        cutoff_hours = policy.cutoff_hours if policy else (tenant_settings.session_late_cancellation_hours if tenant_settings else 12)
         cutoff_time = session.start_at - timedelta(hours=cutoff_hours)
 
         is_early_cancel = now <= cutoff_time
@@ -1133,16 +1139,12 @@ class BookingViewSet(viewsets.ModelViewSet):
         booking.save()
 
         if is_early_cancel:
-            # Refund Credit
             if booking.credit_source:
-                pkg = Package.objects.select_for_update().get(id=booking.credit_source.id)
-                pkg.credits_remaining += 1
-                pkg.save()
-        else:
-            # Late cancellation: Forfeit credit (we keep the booking status as 'cancelled' but do not refund package credit)
-            pass
+                pkg = Package.objects.select_for_update().filter(id=booking.credit_source.id).first()
+                if pkg:
+                    pkg.credits_remaining += booking.credits_used
+                    pkg.save()
 
-        # Trigger WaitlistPromotionJob
         from .tasks import process_waitlist_promotion_job
         process_waitlist_promotion_job.delay(str(session.id))
 
@@ -1468,21 +1470,32 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Check credits
+        appt_tenant = (
+            getattr(request, 'tenant', None)
+            or getattr(target_client, 'tenant', None)
+            or getattr(provider, 'tenant', None)
+            or get_current_tenant()
+        )
+        tenant_settings = TenantBookingSettings.get_or_create_for_tenant(appt_tenant)
+        required_credits = tenant_settings.appointment_booking_credits if tenant_settings else 1
+
         package = Package.objects.select_for_update().filter(
             client=target_client,
-            credits_remaining__gt=0,
+            credits_remaining__gte=required_credits,
             expires_at__gt=timezone.now()
         ).first()
 
         if not package:
-            return Response({"detail": "No active credits/packages found to book appointment."}, status=status.HTTP_402_PAYMENT_REQUIRED)
+            return Response(
+                {"detail": f"Insufficient credits or no active package found. Booking an appointment requires {required_credits} credit(s)."},
+                status=status.HTTP_402_PAYMENT_REQUIRED
+            )
 
-        package.credits_remaining -= 1
+        package.credits_remaining -= required_credits
         package.save()
 
         appointment = Appointment.objects.create(
-            tenant=request.tenant,
+            tenant=appt_tenant,
             client=target_client,
             provider=provider,
             location=data['location'],
@@ -1490,10 +1503,47 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             start_at=start_at,
             end_at=end_at,
             credit_source=package,
+            credits_used=required_credits,
             status='scheduled'
         )
 
         return Response(AppointmentSerializer(appointment).data, status=status.HTTP_201_CREATED)
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        appointment = self.get_object()
+        if appointment.status == 'cancelled':
+            return Response({"detail": "Appointment is already cancelled."}, status=status.HTTP_400_BAD_REQUEST)
+
+        now = timezone.now()
+        appt_tenant = (
+            appointment.tenant
+            or getattr(request, 'tenant', None)
+            or get_current_tenant()
+        )
+        tenant_settings = TenantBookingSettings.get_or_create_for_tenant(appt_tenant)
+        cutoff_hours = tenant_settings.appointment_late_cancellation_hours if tenant_settings else 12
+        cutoff_time = appointment.start_at - timedelta(hours=cutoff_hours)
+        is_early_cancel = now <= cutoff_time
+
+        appointment.status = 'cancelled'
+        appointment.save()
+
+        if is_early_cancel and appointment.credit_source:
+            pkg = Package.objects.select_for_update().filter(id=appointment.credit_source.id).first()
+            if pkg:
+                pkg.credits_remaining += appointment.credits_used
+                pkg.save()
+
+        return Response({
+            "status": "cancelled",
+            "refunded": is_early_cancel,
+            "detail": "Appointment cancelled."
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, pk=None):
+        return self.destroy(request, pk=pk)
 
 
 class SubstituteRequestViewSet(viewsets.ModelViewSet):
@@ -2046,6 +2096,74 @@ class ClientBookingPreferenceView(APIView):
 
         status_code = status.HTTP_201_CREATED if (created and is_create) else status.HTTP_200_OK
         return Response(serializer.data, status=status_code)
+
+
+class TenantBookingSettingsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _get_tenant(self, request):
+        target_tenant_id = None
+        if hasattr(request, 'data') and isinstance(request.data, dict):
+            target_tenant_id = request.data.get('tenant')
+        if not target_tenant_id:
+            target_tenant_id = request.query_params.get('tenant')
+        if target_tenant_id and (request.user.is_staff or request.user.is_superuser or request.user.role == UserRole.PLATFORM_ADMIN):
+            from apps.core.tenants.models import Tenant
+            found_tenant = Tenant.objects.filter(id=target_tenant_id).first()
+            if found_tenant:
+                return found_tenant
+        return (
+            getattr(request, 'tenant', None)
+            or getattr(request.user, 'tenant', None)
+            or get_current_tenant()
+        )
+
+    def _check_admin_permission(self, request):
+        user = request.user
+        if user.is_staff or user.is_superuser:
+            return True
+        if user.role in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
+            return True
+        if user.role == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if PermissionService.has_permission(user, 'scheduling', 'booking_settings', 'edit'):
+                return True
+            if PermissionService.has_permission(user, 'scheduling', 'classes', 'edit'):
+                return True
+        return False
+
+    def get(self, request):
+        tenant = self._get_tenant(request)
+        settings_obj = TenantBookingSettings.get_or_create_for_tenant(tenant)
+        serializer = TenantBookingSettingsSerializer(settings_obj)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def put(self, request):
+        return self._update_settings(request, partial=False)
+
+    def patch(self, request):
+        return self._update_settings(request, partial=True)
+
+    def post(self, request):
+        return self._update_settings(request, partial=True)
+
+    def _update_settings(self, request, partial=True):
+        if not self._check_admin_permission(request):
+            return Response(
+                {"detail": "You do not have permission to configure booking settings."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+        tenant = self._get_tenant(request)
+        if not tenant:
+            return Response(
+                {"detail": "Tenant context is required to update booking settings."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        settings_obj = TenantBookingSettings.get_or_create_for_tenant(tenant)
+        serializer = TenantBookingSettingsSerializer(settings_obj, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 # ==============================================================================

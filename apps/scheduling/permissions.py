@@ -23,6 +23,8 @@ SCHEDULING_RESOURCE_MAP = {
     'booking': 'bookings',
     'waitlist': 'waitlist',
     'staff-availability': 'staff_availability',
+    'booking-settings': 'booking_settings',
+    'settings': 'booking_settings',
 }
 
 SCHEDULING_ACTION_MAP = {

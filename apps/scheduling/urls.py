@@ -7,7 +7,8 @@ from .views import (
     AppointmentViewSet, WaitlistViewSet, SubstituteRequestViewSet, PackageTypeViewSet,
     PackageViewSet, ReportsView, StaffAssignmentViewSet, ViewAllClientsAPIView,
     FacilityAccessViewSet, UpdateBookingAttributesAPIView,
-    ClientBookingPreferenceView, EventViewSet, EventEnrollmentViewSet
+    ClientBookingPreferenceView, EventViewSet, EventEnrollmentViewSet,
+    TenantBookingSettingsView
 )
 
 router = DefaultRouter()
@@ -44,6 +45,8 @@ urlpatterns = [
 
     path('api/view-all-clients/', ViewAllClientsAPIView.as_view(), name='view-all-clients'),
     path('update-booking-attributes/', UpdateBookingAttributesAPIView.as_view(), name='update-booking-attributes'),
+    path('booking-settings/', TenantBookingSettingsView.as_view(), name='tenant-booking-settings'),
+    path('settings/', TenantBookingSettingsView.as_view(), name='scheduling-settings'),
     path('booking-preferences/', ClientBookingPreferenceView.as_view(), name='client-booking-preferences'),
     path('client/booking-preferences/', ClientBookingPreferenceView.as_view(), name='client-booking-preferences-alt'),
     path('preferences/', ClientBookingPreferenceView.as_view(), name='client-preferences'),

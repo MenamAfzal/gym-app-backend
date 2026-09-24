@@ -8,7 +8,7 @@ from .models import (
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, PackageGrantSource, Payment, CancellationPolicy,
     StaffClientAssignment, FacilityAccessLog, ClientBookingPreference,
-    Event, EventSession, EventEnrollment
+    Event, EventSession, EventEnrollment, TenantBookingSettings
 )
 from apps.users.models import User, UserRole
 
@@ -682,7 +682,7 @@ class BookingReadSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'client', 'client_email', 'client_name', 'client_first_name', 'client_last_name',
             'session', 'session_name', 'staff_name', 'spot', 'spot_label',
-            'spot_number', 'is_guest', 'status', 'credit_source', 'checked_in_at',
+            'spot_number', 'is_guest', 'status', 'credit_source', 'credits_used', 'checked_in_at',
             'checked_out_at', 'join_mode', 'music_preference', 'created_at', 'updated_at'
         ]
 
@@ -745,9 +745,9 @@ class AppointmentSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'client', 'client_email', 'provider', 'provider_name', 
             'location', 'location_name', 'room', 'room_name', 
-            'start_at', 'end_at', 'status', 'credit_source', 'created_at'
+            'start_at', 'end_at', 'status', 'credit_source', 'credits_used', 'created_at'
         ]
-        read_only_fields = ['id', 'client_email', 'provider_name', 'location_name', 'room_name', 'created_at']
+        read_only_fields = ['id', 'client_email', 'provider_name', 'location_name', 'room_name', 'credits_used', 'created_at']
 
     def to_representation(self, instance):
         now = timezone.now()
@@ -1177,4 +1177,53 @@ class EventRosterSerializer(serializers.ModelSerializer):
 
     def get_client_name(self, obj):
         return _format_user_name(obj.client)
+
+
+class TenantBookingSettingsSerializer(serializers.ModelSerializer):
+    session_late_cancellation = serializers.IntegerField(source='session_late_cancellation_hours', required=False, min_value=0)
+    appointment_late_cancellation = serializers.IntegerField(source='appointment_late_cancellation_hours', required=False, min_value=0)
+
+    class Meta:
+        model = TenantBookingSettings
+        fields = [
+            'id', 'tenant',
+            'session_late_cancellation_hours', 'session_booking_credits',
+            'appointment_late_cancellation_hours', 'appointment_booking_credits',
+            'session_late_cancellation', 'appointment_late_cancellation',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'tenant', 'created_at', 'updated_at']
+
+    def to_internal_value(self, data):
+        data = data.copy() if hasattr(data, 'copy') else dict(data)
+        if 'session_late_cancellation' in data and 'session_late_cancellation_hours' not in data:
+            data['session_late_cancellation_hours'] = data['session_late_cancellation']
+        if 'appointment_late_cancellation' in data and 'appointment_late_cancellation_hours' not in data:
+            data['appointment_late_cancellation_hours'] = data['appointment_late_cancellation']
+        if 'session_credits' in data and 'session_booking_credits' not in data:
+            data['session_booking_credits'] = data['session_credits']
+        if 'appointment_credits' in data and 'appointment_booking_credits' not in data:
+            data['appointment_booking_credits'] = data['appointment_credits']
+        return super().to_internal_value(data)
+
+    def validate_session_booking_credits(self, value):
+        if value < 1:
+            raise serializers.ValidationError("Session booking credits must be at least 1.")
+        return value
+
+    def validate_appointment_booking_credits(self, value):
+        if value < 1:
+            raise serializers.ValidationError("Appointment booking credits must be at least 1.")
+        return value
+
+    def validate_session_late_cancellation_hours(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Session late cancellation period cannot be negative.")
+        return value
+
+    def validate_appointment_late_cancellation_hours(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Appointment late cancellation period cannot be negative.")
+        return value
+
         

@@ -37,6 +37,10 @@ PERMISSION_CATALOG = {
             'staff_availability': {
                 'label': 'Staff Availability',
                 'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'booking_settings': {
+                'label': 'Booking Settings',
+                'actions': ['view', 'edit']
             }
         }
     },
