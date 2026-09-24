@@ -9,16 +9,61 @@ class IsAuthenticated(permissions.BasePermission):
         return request.user and request.user.is_authenticated
 
 
+SCHEDULING_RESOURCE_MAP = {
+    'class-template': 'classes',
+    'recurrence-rule': 'classes',
+    'session': 'sessions',
+    'workshop': 'events',
+    'mindbody-event': 'events',
+    'room': 'rooms',
+    'layout': 'rooms',
+    'spot-type': 'spot_types',
+    'package-type': 'packages',
+    'package': 'packages',
+    'booking': 'bookings',
+    'waitlist': 'waitlist',
+    'staff-availability': 'staff_availability',
+}
+
+SCHEDULING_ACTION_MAP = {
+    'list': 'view',
+    'retrieve': 'view',
+    'create': 'create',
+    'update': 'edit',
+    'partial_update': 'edit',
+    'destroy': 'delete',
+    'cancel_event': 'cancel_event',
+    'cancel_session': 'cancel_session',
+    'check_in': 'check_in',
+    'roster': 'roster',
+}
+
+
 class IsOwnerOrManager(permissions.BasePermission):
-    """
-    Strictly for admin duties (creating class templates, recurrence rules, rooms, spot types).
-    """
     def has_permission(self, request, view):
-        if not request.user or not request.user.is_authenticated:
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
             return False
-        if request.user.is_staff or request.user.is_superuser:
+        if user.is_staff or user.is_superuser:
             return True
-        return request.user.role in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.PLATFORM_ADMIN]
+        if getattr(user, 'role', None) in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
+            return True
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            app = getattr(view, 'permission_app', None)
+            resource = getattr(view, 'permission_resource', None)
+            basename = getattr(view, 'basename', '')
+            if not app:
+                if basename in ['user', 'staff', 'users']:
+                    app = 'staff_users'
+                    resource = resource or 'staff'
+                else:
+                    app = 'scheduling'
+                    resource = resource or SCHEDULING_RESOURCE_MAP.get(basename, 'classes')
+            action = getattr(view, 'action', None)
+            resolved_action = SCHEDULING_ACTION_MAP.get(action, action or 'edit')
+            return PermissionService.has_permission(user, app, resource, resolved_action)
+        return False
 
 
 class IsGymStaffOrOwner(permissions.BasePermission):

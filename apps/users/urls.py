@@ -38,8 +38,10 @@ urlpatterns = [
     
     # Booking Preferences Alias
     path('booking-preferences/', ClientBookingPreferenceView.as_view(), name='user-booking-preferences'),
-
-    # ViewSets
+    path('permissions/catalog/', UserViewSet.as_view({'get': 'permissions_catalog'}), name='permissions-catalog'),
+    path('managers/my-permissions/', UserViewSet.as_view({'get': 'my_permissions'}), name='my-permissions'),
+    path('managers/<uuid:pk>/permissions/', UserViewSet.as_view({'get': 'manager_permissions', 'put': 'manager_permissions', 'patch': 'manager_permissions'}), name='manager-permissions-detail'),
+    path('<uuid:pk>/manager-permissions/', UserViewSet.as_view({'get': 'manager_permissions', 'put': 'manager_permissions', 'patch': 'manager_permissions'}), name='user-manager-permissions'),
     path('', include(router.urls)),
 ]
 

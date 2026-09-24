@@ -2,7 +2,7 @@
 User Serializers
 """
 from rest_framework import serializers
-from apps.users.models import User, UserProfile, UserRole, OTPPurpose, GenderChoices
+from apps.users.models import User, UserProfile, UserRole, OTPPurpose, GenderChoices, ManagerPermissionPolicy
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from apps.core.tenants.models import Tenant
 from apps.users.services import UserService
@@ -934,3 +934,16 @@ class ClientDetailedReflectionSerializer(serializers.ModelSerializer):
             "flow_intensity": l.flow_intensity,
             "symptoms": [s.name for s in getattr(l, 'prefetched_symptoms', list(l.symptoms.all()))]
         } for l in logs]
+
+
+class ManagerPermissionPolicySerializer(serializers.ModelSerializer):
+    manager_email = serializers.EmailField(source='manager.email', read_only=True)
+
+    class Meta:
+        model = ManagerPermissionPolicy
+        fields = ['id', 'manager', 'manager_email', 'has_full_access', 'permissions', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'manager_email', 'created_at', 'updated_at']
+
+    def validate_permissions(self, value):
+        from apps.core.permissions_catalog import sanitize_permissions
+        return sanitize_permissions(value)

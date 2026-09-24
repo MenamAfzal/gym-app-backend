@@ -7,6 +7,9 @@ from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from django.core.exceptions import ValidationError
 from apps.scheduling.permissions import IsOwnerOrManager, IsGymStaffOrOwner
+from apps.core.permissions import IsGymOwnerOnly
+from apps.core.permissions_catalog import get_permission_catalog
+from apps.users.permission_service import PermissionService
 
 from apps.users.serializers import (
     ChangePasswordSerializer,
@@ -19,7 +22,8 @@ from apps.users.serializers import (
     ClientDetailedSchedulingSerializer,
     StaffDetailedSchedulingSerializer,
     ClientDetailedNutritionSerializer,
-    ClientDetailedReflectionSerializer
+    ClientDetailedReflectionSerializer,
+    ManagerPermissionPolicySerializer
 )
 from apps.users.services import AuthService, UserService
 from apps.users.models import OTPPurpose, UserRole
@@ -128,6 +132,44 @@ class UserViewSet(viewsets.ModelViewSet):
             return Response(status=status.HTTP_204_NO_CONTENT)
         except ValidationError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['get'], url_path='permissions/catalog')
+    def permissions_catalog(self, request):
+        return Response(get_permission_catalog(), status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['get'], url_path='managers/my-permissions')
+    def my_permissions(self, request):
+        result = PermissionService.get_user_permissions(request.user)
+        return Response(result, status=status.HTTP_200_OK)
+
+    def get_permissions(self):
+        if self.action == 'manager_permissions':
+            return [IsGymOwnerOnly()]
+        return super().get_permissions()
+
+    @action(detail=True, methods=['get', 'put', 'patch'], url_path='manager-permissions', permission_classes=[IsGymOwnerOnly])
+    def manager_permissions(self, request, pk=None):
+        if request.user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN] and not (request.user.is_superuser or request.user.is_staff):
+            return Response({'detail': 'Only gym owners can manage permissions.'}, status=status.HTTP_403_FORBIDDEN)
+
+        target_user = self.get_object()
+        if getattr(target_user, 'role', None) != UserRole.GYM_MANAGER:
+            return Response({'detail': 'Permissions can only be configured for users with the gym_manager role.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if getattr(request.user, 'role', None) == UserRole.GYM_OWNER and target_user.tenant_id != request.user.tenant_id:
+            return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        tenant = getattr(request, 'tenant', None) or target_user.tenant
+        if request.method == 'GET':
+            policy = PermissionService.get_or_create_policy(target_user, tenant)
+            serializer = ManagerPermissionPolicySerializer(policy)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+
+        has_full_access = request.data.get('has_full_access', False)
+        perms_data = request.data.get('permissions', {})
+        policy = PermissionService.update_policy(target_user, tenant, perms_data, has_full_access)
+        serializer = ManagerPermissionPolicySerializer(policy)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'], url_path='clients-detailed-scheduling', permission_classes=[IsGymStaffOrOwner])
     def clients_detailed_scheduling(self, request):

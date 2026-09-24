@@ -7,17 +7,40 @@ from rest_framework import permissions
 from apps.users.models import UserRole
 
 
+NOTIFICATIONS_RESOURCE_MAP = {
+    'notification-campaign': 'campaigns',
+    'notification-template': 'templates',
+    'notification-group': 'automations',
+    'notification-automation': 'automations',
+}
+
+NOTIFICATIONS_ACTION_MAP = {
+    'list': 'view',
+    'retrieve': 'view',
+    'create': 'create',
+    'update': 'edit',
+    'partial_update': 'edit',
+    'destroy': 'delete',
+    'send': 'send_campaign',
+}
+
+
 class IsOwnerOrManager(permissions.BasePermission):
-    """
-    Allows access to Gym Owners and Gym Managers.
-    Used for: campaigns, templates, groups.
-    """
     def has_permission(self, request, view):
-        if not request.user or not request.user.is_authenticated:
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
             return False
-        return getattr(request.user, 'role', None) in [
-            UserRole.GYM_OWNER, UserRole.GYM_MANAGER
-        ]
+        if user.is_staff or user.is_superuser:
+            return True
+        if getattr(user, 'role', None) in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
+            return True
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            resource = getattr(view, 'permission_resource', None) or NOTIFICATIONS_RESOURCE_MAP.get(getattr(view, 'basename', ''), 'campaigns')
+            action = getattr(view, 'action', None)
+            resolved_action = NOTIFICATIONS_ACTION_MAP.get(action, 'edit')
+            return PermissionService.has_permission(user, 'notifications', resource, resolved_action)
+        return False
 
 
 class IsGymOwnerOnly(permissions.BasePermission):

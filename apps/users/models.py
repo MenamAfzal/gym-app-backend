@@ -9,6 +9,7 @@ from django.utils.translation import gettext_lazy as _
 from apps.core.tenants.models import Tenant
 from core_models.mixins.uuid_mixin import UUIDMixin
 from core_models.mixins.timestamps import TimestampMixin
+from core_models.mixins.tenant_mixin import TenantMixin
 
 class UserRole(models.TextChoices):
     """
@@ -281,4 +282,35 @@ class PendingRegistration(models.Model):
 
     def __str__(self):
         return f"Pending: {self.email} for {self.tenant.subdomain}"
+
+
+class ManagerPermissionPolicy(UUIDMixin, TimestampMixin, TenantMixin):
+    manager = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name='permission_policy',
+        limit_choices_to={'role': UserRole.GYM_MANAGER}
+    )
+    permissions = models.JSONField(default=dict)
+    has_full_access = models.BooleanField(default=False)
+
+    class Meta:
+        unique_together = ['tenant', 'manager']
+
+    def __str__(self):
+        return f"Permissions for {self.manager.email}"
+
+    def has_permission(self, app: str, resource: str, action: str) -> bool:
+        if self.has_full_access:
+            return True
+        app_perms = self.permissions.get(app, {})
+        resource_perms = app_perms.get(resource, [])
+        return '*' in resource_perms or action in resource_perms
+
+    def has_any_app_permission(self, app: str) -> bool:
+        if self.has_full_access:
+            return True
+        app_perms = self.permissions.get(app, {})
+        return bool(app_perms)
+
     

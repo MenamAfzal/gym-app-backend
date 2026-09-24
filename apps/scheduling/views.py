@@ -362,6 +362,10 @@ class ClassTemplateViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return ClassTemplate.objects.select_related('location')
 
+    def perform_create(self, serializer):
+        tenant = getattr(self.request, 'tenant', None) or getattr(self.request.user, 'tenant', None)
+        serializer.save(tenant=tenant)
+
 
 class RecurrenceRuleViewSet(viewsets.ModelViewSet):
     queryset = RecurrenceRule.all_objects.all()
