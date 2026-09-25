@@ -1743,6 +1743,83 @@ class SpotTypeEditAndDeleteTests(GymSchedulingSystemTestCase):
         self.assertEqual(res_detail.data.get('client_rx_level'), "RX2")
         self.assertIn('staff_image', res_detail.data)
 
+    def test_appointment_booking_validations(self):
+        other_loc = Location.objects.create(
+            tenant=self.tenant, name="Other Studio", address="456 Other St", timezone="UTC"
+        )
+        other_pkg_type = PackageType.objects.create(
+            tenant=self.tenant, location=other_loc, name="Other Pack", credit_count=10, price=100.00, validity_days=30
+        )
+        Package.objects.filter(client=self.client1).delete()
+
+        start_time = timezone.now() + timedelta(days=2)
+        end_time = start_time + timedelta(hours=1)
+        payload = {
+            "provider": str(self.trainer.id),
+            "location": str(self.location.id),
+            "start_at": start_time.isoformat(),
+            "end_at": end_time.isoformat()
+        }
+
+        self.client.force_authenticate(user=self.client1)
+        res_no_pkg = self.client.post('/api/v1/scheduling/appointments/', payload, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res_no_pkg.status_code, 402)
+
+        pkg_wrong_loc = Package.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            package_type=other_pkg_type,
+            status='active',
+            credits_remaining=5,
+            expires_at=timezone.now() + timedelta(days=30)
+        )
+        res_wrong_loc = self.client.post('/api/v1/scheduling/appointments/', payload, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res_wrong_loc.status_code, 400)
+        self.assertEqual(res_wrong_loc.data.get('detail'), "Your purchased package is not valid for this location.")
+
+        pkg_wrong_loc.delete()
+        pkg_canceled = Package.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            package_type=self.package_type,
+            status='canceled',
+            credits_remaining=5,
+            expires_at=timezone.now() + timedelta(days=30)
+        )
+        res_canceled = self.client.post('/api/v1/scheduling/appointments/', payload, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res_canceled.status_code, 402)
+
+        pkg_canceled.delete()
+        pkg_expired = Package.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            package_type=self.package_type,
+            status='active',
+            credits_remaining=5,
+            expires_at=timezone.now() - timedelta(days=1)
+        )
+        res_expired = self.client.post('/api/v1/scheduling/appointments/', payload, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res_expired.status_code, 402)
+
+        pkg_expired.delete()
+        pkg_insufficient = Package.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            package_type=self.package_type,
+            status='active',
+            credits_remaining=0,
+            expires_at=timezone.now() + timedelta(days=30)
+        )
+        res_insufficient = self.client.post('/api/v1/scheduling/appointments/', payload, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res_insufficient.status_code, 402)
+
+        pkg_insufficient.credits_remaining = 5
+        pkg_insufficient.save()
+        res_success = self.client.post('/api/v1/scheduling/appointments/', payload, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res_success.status_code, 201)
+        pkg_insufficient.refresh_from_db()
+        self.assertEqual(pkg_insufficient.credits_remaining, 4)
+
 
 
 

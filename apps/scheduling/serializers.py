@@ -860,6 +860,10 @@ class AppointmentSerializer(serializers.ModelSerializer):
         end = data.get('end_at') or (self.instance.end_at if self.instance else None)
         if start and end and start >= end:
             raise serializers.ValidationError("End time must be after start time.")
+        location = data.get('location') or (self.instance.location if self.instance else None)
+        room = data.get('room') or (self.instance.room if self.instance else None)
+        if location and room and room.location_id != location.id:
+            raise serializers.ValidationError({"room": "Selected room does not belong to the selected location."})
         return data
 
 

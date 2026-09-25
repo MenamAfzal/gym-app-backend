@@ -1007,6 +1007,7 @@ class BookingViewSet(viewsets.ModelViewSet):
 
         package = Package.all_objects.select_for_update().filter(
             client=target_client,
+            status='active',
             credits_remaining__gte=required_credits,
             expires_at__gt=timezone.now(),
             package_type__location=session.template.location
@@ -1015,6 +1016,7 @@ class BookingViewSet(viewsets.ModelViewSet):
         if not package:
             has_other_packages = Package.all_objects.filter(
                 client=target_client,
+                status='active',
                 credits_remaining__gte=required_credits,
                 expires_at__gt=timezone.now()
             ).exists()
@@ -1470,22 +1472,41 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        location = data['location']
+        room = data.get('room')
+        if room and room.location_id != location.id:
+            return Response({"detail": "Selected room does not belong to the selected location."}, status=status.HTTP_400_BAD_REQUEST)
+
         appt_tenant = (
             getattr(request, 'tenant', None)
             or getattr(target_client, 'tenant', None)
             or getattr(provider, 'tenant', None)
+            or getattr(location, 'tenant', None)
             or get_current_tenant()
         )
         tenant_settings = TenantBookingSettings.get_or_create_for_tenant(appt_tenant)
         required_credits = tenant_settings.appointment_booking_credits if tenant_settings else 1
 
-        package = Package.objects.select_for_update().filter(
+        package = Package.all_objects.select_for_update().filter(
             client=target_client,
+            status='active',
             credits_remaining__gte=required_credits,
-            expires_at__gt=timezone.now()
+            expires_at__gt=timezone.now(),
+            package_type__location=location
         ).first()
 
         if not package:
+            has_other_packages = Package.all_objects.filter(
+                client=target_client,
+                status='active',
+                credits_remaining__gte=required_credits,
+                expires_at__gt=timezone.now()
+            ).exists()
+            if has_other_packages:
+                return Response(
+                    {"detail": "Your purchased package is not valid for this location."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
             return Response(
                 {"detail": f"Insufficient credits or no active package found. Booking an appointment requires {required_credits} credit(s)."},
                 status=status.HTTP_402_PAYMENT_REQUIRED
@@ -1498,8 +1519,8 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             tenant=appt_tenant,
             client=target_client,
             provider=provider,
-            location=data['location'],
-            room=data.get('room'),
+            location=location,
+            room=room,
             start_at=start_at,
             end_at=end_at,
             credit_source=package,
@@ -1530,7 +1551,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         appointment.save()
 
         if is_early_cancel and appointment.credit_source:
-            pkg = Package.objects.select_for_update().filter(id=appointment.credit_source.id).first()
+            pkg = Package.all_objects.select_for_update().filter(id=appointment.credit_source.id).first()
             if pkg:
                 pkg.credits_remaining += appointment.credits_used
                 pkg.save()
