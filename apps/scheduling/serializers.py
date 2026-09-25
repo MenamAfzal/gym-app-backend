@@ -736,18 +736,101 @@ class AppointmentSerializer(serializers.ModelSerializer):
         allow_null=True
     )
     client_email = serializers.CharField(source='client.email', read_only=True)
-    provider_name = serializers.CharField(source='provider.profile.nickname', read_only=True)
+    client_name = serializers.SerializerMethodField()
+    client_image = serializers.SerializerMethodField()
+    client_rx_level = serializers.SerializerMethodField()
+    client_level = serializers.SerializerMethodField()
+    provider_name = serializers.SerializerMethodField()
+    staff_name = serializers.SerializerMethodField()
+    staff_image = serializers.SerializerMethodField()
+    provider_image = serializers.SerializerMethodField()
     location_name = serializers.CharField(source='location.name', read_only=True)
     room_name = serializers.CharField(source='room.name', read_only=True)
 
     class Meta:
         model = Appointment
         fields = [
-            'id', 'client', 'client_email', 'provider', 'provider_name', 
-            'location', 'location_name', 'room', 'room_name', 
+            'id', 'client', 'client_email', 'client_name', 'client_image',
+            'client_rx_level', 'client_level', 'provider', 'provider_name',
+            'staff_name', 'staff_image', 'provider_image',
+            'location', 'location_name', 'room', 'room_name',
             'start_at', 'end_at', 'status', 'credit_source', 'credits_used', 'created_at'
         ]
-        read_only_fields = ['id', 'client_email', 'provider_name', 'location_name', 'room_name', 'credits_used', 'created_at']
+        read_only_fields = [
+            'id', 'client_email', 'client_name', 'client_image',
+            'client_rx_level', 'client_level', 'provider_name', 'staff_name',
+            'staff_image', 'provider_image', 'location_name', 'room_name',
+            'credits_used', 'created_at'
+        ]
+
+    def get_client_name(self, obj):
+        if not obj.client:
+            return ""
+        profile = getattr(obj.client, 'profile', None)
+        if profile:
+            full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip()
+            if full_name:
+                return full_name
+            if profile.nickname:
+                return profile.nickname
+        user_name = f"{obj.client.first_name or ''} {obj.client.last_name or ''}".strip()
+        if user_name:
+            return user_name
+        return obj.client.email.split('@')[0] if obj.client.email else ""
+
+    def get_client_image(self, obj):
+        if not obj.client:
+            return None
+        profile = getattr(obj.client, 'profile', None)
+        if profile and getattr(profile, 'profile_image', None) and hasattr(profile.profile_image, 'url'):
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(profile.profile_image.url)
+            return profile.profile_image.url
+        return None
+
+    def get_client_rx_level(self, obj):
+        if not obj.client:
+            return "RX1"
+        profile = getattr(obj.client, 'profile', None)
+        if profile and getattr(profile, 'level', None):
+            return profile.level
+        return "RX1"
+
+    def get_client_level(self, obj):
+        return self.get_client_rx_level(obj)
+
+    def get_provider_name(self, obj):
+        staff = getattr(obj, 'provider', None) or getattr(obj, 'staff', None)
+        if not staff:
+            return ""
+        profile = getattr(staff, 'profile', None)
+        if profile:
+            nickname = getattr(profile, 'nickname', None)
+            if nickname:
+                return nickname
+            full_name = f"{getattr(profile, 'first_name', '')} {getattr(profile, 'last_name', '')}".strip()
+            if full_name:
+                return full_name
+        return staff.email if staff else ""
+
+    def get_staff_name(self, obj):
+        return self.get_provider_name(obj)
+
+    def get_staff_image(self, obj):
+        staff = getattr(obj, 'provider', None) or getattr(obj, 'staff', None)
+        if not staff:
+            return None
+        profile = getattr(staff, 'profile', None)
+        if profile and getattr(profile, 'profile_image', None) and hasattr(profile.profile_image, 'url'):
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(profile.profile_image.url)
+            return profile.profile_image.url
+        return None
+
+    def get_provider_image(self, obj):
+        return self.get_staff_image(obj)
 
     def to_representation(self, instance):
         now = timezone.now()

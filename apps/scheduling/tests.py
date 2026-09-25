@@ -4,7 +4,7 @@ from datetime import timedelta, datetime, time
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
-from apps.users.models import User, UserRole
+from apps.users.models import User, UserRole, UserProfile
 from apps.core.tenants.models import Tenant
 from apps.core.tenants.context import set_current_tenant
 from apps.scheduling.models import (
@@ -1694,6 +1694,55 @@ class SpotTypeEditAndDeleteTests(GymSchedulingSystemTestCase):
         # Attempt delete
         res_del = self.client.delete(f"/api/v1/scheduling/spot-types/{self.bike_type.id}/")
         self.assertEqual(res_del.status_code, 403)
+
+    def test_get_appointments_includes_client_and_staff_metadata(self):
+        self.client1.first_name = "Jane"
+        self.client1.last_name = "Doe"
+        self.client1.save()
+        UserProfile.objects.create(
+            user=self.client1,
+            first_name="Jane",
+            last_name="Doe",
+            level="RX2"
+        )
+
+        UserProfile.objects.create(
+            user=self.trainer,
+            first_name="Coach",
+            last_name="Mike",
+            nickname="Coach Mike"
+        )
+
+        appt = Appointment.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            provider=self.trainer,
+            location=self.location,
+            room=self.room,
+            start_at=timezone.now() + timedelta(days=1),
+            end_at=timezone.now() + timedelta(days=1, hours=1),
+            status='scheduled'
+        )
+
+        self.client.force_authenticate(user=self.owner)
+        res = self.client.get('/api/v1/scheduling/appointments/', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res.status_code, 200)
+
+        results = res.data.get('results', res.data) if isinstance(res.data, dict) else res.data
+        appt_data = next((item for item in results if item['id'] == str(appt.id)), None)
+        self.assertIsNotNone(appt_data)
+        self.assertEqual(appt_data.get('client_name'), "Jane Doe")
+        self.assertIn('client_image', appt_data)
+        self.assertEqual(appt_data.get('client_rx_level'), "RX2")
+        self.assertIn('staff_image', appt_data)
+
+        res_detail = self.client.get(f'/api/v1/scheduling/appointments/{appt.id}/', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res_detail.status_code, 200)
+        self.assertEqual(res_detail.data.get('client_name'), "Jane Doe")
+        self.assertIn('client_image', res_detail.data)
+        self.assertEqual(res_detail.data.get('client_rx_level'), "RX2")
+        self.assertIn('staff_image', res_detail.data)
+
 
 
 
