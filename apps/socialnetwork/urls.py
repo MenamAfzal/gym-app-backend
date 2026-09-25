@@ -7,6 +7,7 @@ from apps.socialnetwork.views import (
     MultiMediaUploadAPIView,
     PollAPIView,
     PollCreateAPIView,
+    PostViewSet,
     UnifiedFeedAPIView,
     UnifiedMediaUploadAPIView,
 )
@@ -15,6 +16,7 @@ router = DefaultRouter()
 router.register(r'polls', PollAPIView, basename='poll')
 router.register(r'media', MediaViewSet, basename='media')
 router.register(r'comments', CommentViewSet, basename='comment_reactions')
+router.register(r'posts', PostViewSet, basename='post')
 
 
 client_urlpatterns= [

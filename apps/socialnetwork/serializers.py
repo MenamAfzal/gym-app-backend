@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from apps.socialnetwork.models import (
-    Photo, Video, Poll, PollOption, Vote, Comment, Like
+    Photo, Video, Poll, PollOption, Vote, Comment, Like, SocialPost, PostMedia
 )
 
 User = get_user_model()
@@ -542,15 +542,11 @@ class MediaListSerializer(serializers.Serializer):
             return VideoSerializer(instance).data
         return super().to_representation(instance)
 
-# Add new serializer for unified multiple media uploads
 class UnifiedMediaUploadSerializer(serializers.Serializer):
-    """
-    Serializer for handling multiple media files via a single field.
-    This allows for cleaner API design using a single 'files' parameter for uploads.
-    """
     files = serializers.ListField(
         child=serializers.FileField(max_length=None, allow_empty_file=False),
-        required=True
+        required=False,
+        default=list
     )
     caption = serializers.CharField(required=False, allow_blank=True, default="")
     location = serializers.CharField(required=False, allow_blank=True, default="")
@@ -558,3 +554,112 @@ class UnifiedMediaUploadSerializer(serializers.Serializer):
     internal_deep_link = serializers.CharField(required=False, allow_blank=True, default="")
     visible_to_staff = serializers.BooleanField(default=True)
     visible_to_clients = serializers.BooleanField(default=True)
+    comments_enabled = serializers.BooleanField(default=True)
+
+
+class PostMediaSerializer(serializers.ModelSerializer):
+    url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PostMedia
+        fields = ['id', 'url', 'media_type', 'order', 'duration', 'created_at']
+
+    def get_url(self, obj):
+        if obj.file:
+            request = self.context.get('request')
+            if request is not None:
+                return request.build_absolute_uri(obj.file.url)
+            return obj.file.url
+        return None
+
+
+class SocialPostSerializer(serializers.ModelSerializer):
+    user = UserMinimalSerializer(read_only=True)
+    media = PostMediaSerializer(source='media_items', many=True, read_only=True)
+    media_items = PostMediaSerializer(many=True, read_only=True)
+    media_type = serializers.SerializerMethodField()
+    image = serializers.SerializerMethodField()
+    video_file = serializers.SerializerMethodField()
+    has_liked = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SocialPost
+        fields = [
+            'id', 'caption', 'user', 'media_type', 'media', 'media_items',
+            'image', 'video_file', 'created_at', 'updated_at',
+            'likes_count', 'comments_count', 'has_liked', 'comments_enabled',
+            'location', 'external_link', 'internal_deep_link',
+            'visible_to_staff', 'visible_to_clients'
+        ]
+        read_only_fields = ['id', 'user', 'created_at', 'updated_at', 'likes_count', 'comments_count']
+
+    def get_media_type(self, obj):
+        items = list(obj.media_items.all())
+        if not items:
+            return 'text'
+        types = {item.media_type for item in items}
+        if types == {'image'}:
+            return 'photo'
+        elif types == {'video'}:
+            return 'video'
+        return 'mixed'
+
+    def get_image(self, obj):
+        request = self.context.get('request')
+        first_img = next((m for m in obj.media_items.all() if m.media_type == 'image'), None)
+        if first_img and first_img.file:
+            if request is not None:
+                return request.build_absolute_uri(first_img.file.url)
+            return first_img.file.url
+        return None
+
+    def get_video_file(self, obj):
+        request = self.context.get('request')
+        first_vid = next((m for m in obj.media_items.all() if m.media_type == 'video'), None)
+        if first_vid and first_vid.file:
+            if request is not None:
+                return request.build_absolute_uri(first_vid.file.url)
+            return first_vid.file.url
+        return None
+
+    def get_has_liked(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            content_type = ContentType.objects.get_for_model(SocialPost)
+            return Like.objects.filter(
+                user=request.user,
+                content_type=content_type,
+                object_id=obj.id
+            ).exists()
+        return False
+
+
+class SocialPostDetailSerializer(SocialPostSerializer):
+    comments = serializers.SerializerMethodField()
+    liked_by = serializers.SerializerMethodField()
+
+    class Meta(SocialPostSerializer.Meta):
+        fields = SocialPostSerializer.Meta.fields + ['comments', 'liked_by']
+
+    def get_comments(self, obj):
+        content_type = ContentType.objects.get_for_model(SocialPost)
+        comments = Comment.objects.filter(
+            content_type=content_type,
+            object_id=obj.id,
+            parent=None
+        ).order_by('-created_at')
+        return CommentSerializer(comments, many=True, context=self.context).data
+
+    def get_liked_by(self, obj):
+        content_type = ContentType.objects.get_for_model(SocialPost)
+        likes = Like.objects.filter(content_type=content_type, object_id=obj.id).select_related('user__profile')[:10]
+        return [
+            {
+                'id': str(like.user.id),
+                'username': like.user.username,
+                'email': like.user.email,
+                'first_name': getattr(like.user, 'first_name', ''),
+                'last_name': getattr(like.user, 'last_name', '')
+            }
+            for like in likes
+        ]

@@ -982,7 +982,7 @@ from .serializers import PollDetailSerializer, UserMinimalSerializer
 from .models import CommentReaction
 from .permissions import is_admin_user, IsOwnerOrAdmin
 from apps.socialnetwork.helper_functions import handle_file_response
-from apps.socialnetwork.models import Comment, Like, Photo, Poll, PollOption, Video, Vote, Post
+from apps.socialnetwork.models import Comment, Like, Photo, Poll, PollOption, Video, Vote, Post, SocialPost, PostMedia
 from apps.socialnetwork.serializers import (
     CommentSerializer,
     MediaListSerializer,
@@ -996,6 +996,9 @@ from apps.socialnetwork.serializers import (
     PhotoUploadSerializer,
     VideoUploadSerializer,
     UnifiedMediaUploadSerializer,
+    SocialPostSerializer,
+    SocialPostDetailSerializer,
+    PostMediaSerializer,
 )
 
 import logging
@@ -1066,6 +1069,112 @@ def handle_poll_upload(request, user):
                                      status_code=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def _parse_bool(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    val_str = str(value).strip().lower()
+    if val_str in ['true', '1', 'yes']:
+        return True
+    if val_str in ['false', '0', 'no']:
+        return False
+    return default
+
+
+def create_social_post(request, user):
+    caption = (
+        request.data.get('caption')
+        or request.data.get('content')
+        or request.data.get('text')
+        or request.data.get('description')
+        or ''
+    )
+    if isinstance(caption, str):
+        caption = caption.strip()
+    else:
+        caption = str(caption)
+
+    files_to_process = []
+    for key in ['files', 'media', 'images', 'videos', 'image', 'video_file', 'file']:
+        if key in request.FILES:
+            for f in request.FILES.getlist(key):
+                files_to_process.append(f)
+    for key, f_list in request.FILES.lists():
+        if key not in ['files', 'media', 'images', 'videos', 'image', 'video_file', 'file']:
+            for f in f_list:
+                files_to_process.append(f)
+
+    if not caption and not files_to_process:
+        return format_error_response('Post must contain text or at least one media file')
+
+    tenant = getattr(user, 'tenant', None)
+    if not tenant:
+        from apps.core.tenants.context import get_current_tenant
+        tenant = get_current_tenant()
+
+    post_kwargs = {
+        'user': user,
+        'caption': caption,
+        'location': request.data.get('location') or None,
+        'external_link': request.data.get('external_link') or None,
+        'internal_deep_link': request.data.get('internal_deep_link') or None,
+        'visible_to_staff': _parse_bool(request.data.get('visible_to_staff'), True),
+        'visible_to_clients': _parse_bool(request.data.get('visible_to_clients'), True),
+        'comments_enabled': _parse_bool(request.data.get('comments_enabled'), True),
+    }
+    if tenant:
+        post_kwargs['tenant'] = tenant
+
+    post = SocialPost.objects.create(**post_kwargs)
+
+    for idx, file_obj in enumerate(files_to_process):
+        file_type = handle_file_response(file_obj)
+        if file_type == 'Image':
+            m_type = 'image'
+        elif file_type == 'Video':
+            m_type = 'video'
+        else:
+            ct = getattr(file_obj, 'content_type', '') or ''
+            if ct.startswith('video/'):
+                m_type = 'video'
+            else:
+                m_type = 'image'
+
+        media_kwargs = {
+            'post': post,
+            'file': file_obj,
+            'media_type': m_type,
+            'order': idx,
+        }
+        if tenant:
+            media_kwargs['tenant'] = tenant
+        PostMedia.objects.create(**media_kwargs)
+
+    try:
+        from apps.rewards.events import RewardEvent
+        from apps.rewards.services import RewardEngineService
+        tenant_id = getattr(user, 'tenant_id', None)
+        if tenant_id:
+            RewardEngineService.handle_event(RewardEvent.create_social_post_created(
+                tenant_id=tenant_id,
+                user_id=user.id,
+                post_id=post.id
+            ))
+    except Exception:
+        pass
+
+    serializer = SocialPostSerializer(post, context={'request': request})
+    post_data = serializer.data
+    response_data = {
+        'message': 'Successfully created post',
+        'post': post_data,
+        'media': post_data.get('media', []),
+        **post_data
+    }
+    return Response(response_data, status=status.HTTP_201_CREATED)
+
+
 # Signals for updating likes and comments counts
 @receiver(post_save, sender=Like)
 def update_likes_count_on_create(sender, instance, created, **kwargs):
@@ -1115,14 +1224,18 @@ class MultiMediaUploadAPIView(APIView):
         if media_type == 'poll':
             return self._handle_poll_upload(request)
 
-        files = request.FILES
-        if not files:
-            return format_error_response('No files uploaded')
-
         user = self._get_authenticated_user(request)
         if isinstance(user, Response):
             return user
 
+        if media_type == 'photo' and 'image' in request.FILES:
+            return self._handle_legacy_photo_upload(request, user)
+        if media_type == 'video' and 'video_file' in request.FILES:
+            return self._handle_legacy_video_upload(request, user)
+
+        return create_social_post(request, user)
+
+    def _handle_legacy_photo_upload(self, request, user):
         metadata = {
             'caption': request.data.get('caption', ''),
             'location': request.data.get('location', ''),
@@ -1131,59 +1244,65 @@ class MultiMediaUploadAPIView(APIView):
             'visible_to_staff': self._parse_boolean(request.data.get('visible_to_staff', 'true')),
             'visible_to_clients': self._parse_boolean(request.data.get('visible_to_clients', 'true'))
         }
-
         successful_uploads = []
         failed_uploads = []
-
-        for field_name, file_obj in files.items():
-            file_type = handle_file_response(file_obj)
-
+        for field_name, file_obj in request.FILES.items():
             try:
-                if file_type == "Image":
-                    serializer = PhotoUploadSerializer(data={'image': file_obj, **metadata})
-                    media_type = 'photo'
-                elif file_type == "Video":
-                    serializer = VideoUploadSerializer(data={'video_file': file_obj, **metadata})
-                    media_type = 'video'
-                else:
-                    failed_uploads.append({
-                        'file': field_name,
-                        'error': f"Unsupported file type: {file_type}"
-                    })
-                    continue
-
+                serializer = PhotoUploadSerializer(data={'image': file_obj, **metadata})
                 if serializer.is_valid():
                     media = serializer.save(user=user)
-                    response_serializer = PhotoSerializer(media, context={
-                        'request': request}) if media_type == 'photo' else VideoSerializer(media,
-                                                                                           context={'request': request})
+                    response_serializer = PhotoSerializer(media, context={'request': request})
                     upload_data = response_serializer.data
-                    upload_data['media_type'] = media_type
+                    upload_data['media_type'] = 'photo'
                     successful_uploads.append(upload_data)
                 else:
-                    failed_uploads.append({
-                        'file': field_name,
-                        'errors': serializer.errors
-                    })
+                    failed_uploads.append({'file': field_name, 'errors': serializer.errors})
             except Exception as e:
-                logger.error(f"Error uploading file {field_name}: {str(e)}", exc_info=True)
-                failed_uploads.append({
-                    'file': field_name,
-                    'error': str(e)
-                })
-
+                failed_uploads.append({'file': field_name, 'error': str(e)})
         if not successful_uploads:
             return format_error_response('No files were successfully uploaded', failed_uploads)
-
         response_data = {
             'message': f'Successfully uploaded {len(successful_uploads)} files',
             'media': successful_uploads,
         }
-
         if failed_uploads:
             response_data['errors'] = failed_uploads
             return Response(response_data, status=status.HTTP_207_MULTI_STATUS)
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
+    def _handle_legacy_video_upload(self, request, user):
+        metadata = {
+            'caption': request.data.get('caption', ''),
+            'location': request.data.get('location', ''),
+            'external_link': request.data.get('external_link', ''),
+            'internal_deep_link': request.data.get('internal_deep_link', ''),
+            'visible_to_staff': self._parse_boolean(request.data.get('visible_to_staff', 'true')),
+            'visible_to_clients': self._parse_boolean(request.data.get('visible_to_clients', 'true'))
+        }
+        successful_uploads = []
+        failed_uploads = []
+        for field_name, file_obj in request.FILES.items():
+            try:
+                serializer = VideoUploadSerializer(data={'video_file': file_obj, **metadata})
+                if serializer.is_valid():
+                    media = serializer.save(user=user)
+                    response_serializer = VideoSerializer(media, context={'request': request})
+                    upload_data = response_serializer.data
+                    upload_data['media_type'] = 'video'
+                    successful_uploads.append(upload_data)
+                else:
+                    failed_uploads.append({'file': field_name, 'errors': serializer.errors})
+            except Exception as e:
+                failed_uploads.append({'file': field_name, 'error': str(e)})
+        if not successful_uploads:
+            return format_error_response('No files were successfully uploaded', failed_uploads)
+        response_data = {
+            'message': f'Successfully uploaded {len(successful_uploads)} files',
+            'media': successful_uploads,
+        }
+        if failed_uploads:
+            response_data['errors'] = failed_uploads
+            return Response(response_data, status=status.HTTP_207_MULTI_STATUS)
         return Response(response_data, status=status.HTTP_201_CREATED)
 
     def _parse_boolean(self, value):
@@ -1360,10 +1479,9 @@ class MediaViewSet(viewsets.ModelViewSet):
         'photo': {'model': Photo, 'serializer': PhotoSerializer, 'detail_serializer': PhotoDetailSerializer},
         'video': {'model': Video, 'serializer': VideoSerializer, 'detail_serializer': VideoDetailSerializer},
         'poll': {'model': Poll, 'serializer': PollSerializer, 'detail_serializer': PollDetailSerializer},
+        'post': {'model': SocialPost, 'serializer': SocialPostSerializer, 'detail_serializer': SocialPostDetailSerializer},
+        'socialpost': {'model': SocialPost, 'serializer': SocialPostSerializer, 'detail_serializer': SocialPostDetailSerializer},
     }
-
-
-        
 
     def get_queryset(self):
         media_type = self.request.query_params.get('type') or self.request.data.get('media_type')
@@ -1405,11 +1523,13 @@ class MediaViewSet(viewsets.ModelViewSet):
             media_obj = self.media_types[media_type]['model'].objects.get(pk=pk)
             serializer = self.get_serializer(media_obj)
             return Response(serializer.data)
-        except (Photo.DoesNotExist, Video.DoesNotExist):
+        except self.media_types[media_type]['model'].DoesNotExist:
             return format_error_response(f"Couldn't find that {media_type}", status_code=status.HTTP_404_NOT_FOUND)
 
     def create(self, request):
         media_type = request.data.get('media_type')
+        if media_type in ['post', 'socialpost']:
+            return create_social_post(request, request.user)
         if not media_type or media_type not in self.media_types:
             return format_error_response('Missing or invalid media_type')
 
@@ -1520,7 +1640,7 @@ class MediaViewSet(viewsets.ModelViewSet):
 
         try:
             media = self.media_types[media_type]['model'].objects.get(pk=pk)
-        except (Photo.DoesNotExist, Video.DoesNotExist):
+        except self.media_types[media_type]['model'].DoesNotExist:
             return format_error_response(f"{media_type} not found", status_code=status.HTTP_404_NOT_FOUND)
 
         content_type = ContentType.objects.get_for_model(media.__class__)
@@ -1589,7 +1709,7 @@ class MediaViewSet(viewsets.ModelViewSet):
 
         try:
             media = self.media_types[media_type]['model'].objects.get(pk=pk)
-        except (Photo.DoesNotExist, Video.DoesNotExist):
+        except self.media_types[media_type]['model'].DoesNotExist:
             return format_error_response(f"{media_type} not found", status_code=status.HTTP_404_NOT_FOUND)
 
         content_type = ContentType.objects.get_for_model(media.__class__)
@@ -1612,7 +1732,7 @@ class MediaViewSet(viewsets.ModelViewSet):
 
         try:
             media = self.media_types[media_type]['model'].objects.get(pk=pk)
-        except (Photo.DoesNotExist, Video.DoesNotExist):
+        except self.media_types[media_type]['model'].DoesNotExist:
             return format_error_response(f"couldn't find that {media_type}", status_code=status.HTTP_404_NOT_FOUND)
 
         serializer = CommentSerializer(data=request.data)
@@ -1869,17 +1989,31 @@ class UnifiedFeedAPIView(APIView):
 
         add_items(poll_qs, PollSerializer, media_type='poll')
 
-        # 2) Sort everything by created_at descending
-        items.sort(key=lambda x: x.get('created_at'), reverse=True)
+        post_qs = SocialPost.objects.select_related('user__profile').prefetch_related('media_items')
+        if request.user.is_authenticated and (request.user.is_staff or is_admin_user(request.user) or request.user.role != UserRole.CLIENT):
+            pass
+        elif request.user.is_authenticated:
+            post_qs = post_qs.filter(models.Q(visible_to_clients=True) | models.Q(user=request.user))
+        else:
+            post_qs = post_qs.filter(visible_to_clients=True)
 
-        # 3) Return the full feed
+        for obj in post_qs.order_by('-created_at'):
+            user = obj.user
+            if user.id not in user_cache:
+                user_cache[user.id] = UserMinimalSerializer(
+                    user, context={'request': request}
+                ).data
+            data = SocialPostSerializer(obj, context={'request': request}).data
+            data.update({
+                'user': user_cache[user.id],
+            })
+            items.append(data)
+
+        items.sort(key=lambda x: x.get('created_at'), reverse=True)
         return Response(items, status=status.HTTP_200_OK)
 
 
 class UnifiedMediaUploadAPIView(APIView):
-    """
-    A simplified API for uploading multiple media files with a single 'files' parameter.
-    """
     parser_classes = (MultiPartParser, FormParser, JSONParser)
     permission_classes = [permissions.IsAuthenticated]
 
@@ -1889,95 +2023,15 @@ class UnifiedMediaUploadAPIView(APIView):
         if media_type == 'poll':
             return self._handle_poll_upload(request)
 
-        serializer = UnifiedMediaUploadSerializer(data=request.data)
-        if not serializer.is_valid():
-            return format_error_response('Invalid data', serializer.errors)
-
-        files = request.FILES.getlist('files')
-        if not files:
-            return format_error_response('No files uploaded')
-
         user = self._get_authenticated_user(request)
         if isinstance(user, Response):
             return user
 
-        metadata = {
-            'caption': request.data.get('caption', ''),
-            'location': request.data.get('location', ''),
-            'external_link': request.data.get('external_link', ''),
-            'internal_deep_link': request.data.get('internal_deep_link', ''),
-            'visible_to_staff': self._parse_boolean(request.data.get('visible_to_staff', 'true')),
-            'visible_to_clients': self._parse_boolean(request.data.get('visible_to_clients', 'true'))
-        }
+        serializer = UnifiedMediaUploadSerializer(data=request.data)
+        if not serializer.is_valid():
+            return format_error_response('Invalid data', serializer.errors)
 
-        successful_uploads = []
-        failed_uploads = []
-
-        for file_obj in files:
-            file_type = handle_file_response(file_obj)
-
-            try:
-                if file_type == "Image":
-                    serializer = PhotoUploadSerializer(data={'image': file_obj, **metadata})
-                    media_type = 'photo'
-                elif file_type == "Video":
-                    serializer = VideoUploadSerializer(data={'video_file': file_obj, **metadata})
-                    media_type = 'video'
-                else:
-                    failed_uploads.append({
-                        'file': file_obj.name,
-                        'error': f"Unsupported file type: {file_type}"
-                    })
-                    continue
-
-                if serializer.is_valid():
-                    media = serializer.save(user=user)
-
-                    # Emit Rewards Event
-                    try:
-                        from apps.rewards.events import RewardEvent
-                        from apps.rewards.services import RewardEngineService
-                        tenant_id = getattr(user, 'tenant_id', None)
-                        if tenant_id:
-                            RewardEngineService.handle_event(RewardEvent.create_social_post_created(
-                                tenant_id=tenant_id,
-                                user_id=user.id,
-                                post_id=media.id
-                            ))
-                    except Exception:
-                        pass
-
-                    response_serializer = PhotoSerializer(media, context={
-                        'request': request}) if media_type == 'photo' else VideoSerializer(media,
-                                                                                           context={'request': request})
-                    upload_data = response_serializer.data
-                    upload_data['media_type'] = media_type
-                    successful_uploads.append(upload_data)
-                else:
-                    failed_uploads.append({
-                        'file': file_obj.name,
-                        'errors': serializer.errors
-                    })
-            except Exception as e:
-                logger.error(f"Error uploading file {file_obj.name}: {str(e)}", exc_info=True)
-                failed_uploads.append({
-                    'file': file_obj.name,
-                    'error': str(e)
-                })
-
-        if not successful_uploads:
-            return format_error_response('No files were successfully uploaded', failed_uploads)
-
-        response_data = {
-            'message': f'Successfully uploaded {len(successful_uploads)} files',
-            'media': successful_uploads,
-        }
-
-        if failed_uploads:
-            response_data['errors'] = failed_uploads
-            return Response(response_data, status=status.HTTP_207_MULTI_STATUS)
-
-        return Response(response_data, status=status.HTTP_201_CREATED)
+        return create_social_post(request, user)
 
     def _parse_boolean(self, value):
         if isinstance(value, bool):
@@ -1998,6 +2052,143 @@ class UnifiedMediaUploadAPIView(APIView):
         if isinstance(user, Response):
             return user
         return handle_poll_upload(request, user)
+
+
+class PostViewSet(viewsets.ModelViewSet):
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = SocialPost.objects.select_related('user__profile').prefetch_related('media_items')
+        from apps.users.models import UserRole
+        if user.is_authenticated and (user.is_staff or is_admin_user(user) or user.role != UserRole.CLIENT):
+            return qs.order_by('-created_at')
+        if user.is_authenticated:
+            return qs.filter(Q(visible_to_clients=True) | Q(user=user)).order_by('-created_at')
+        return qs.filter(visible_to_clients=True).order_by('-created_at')
+
+    def get_serializer_class(self):
+        if self.action == 'retrieve':
+            return SocialPostDetailSerializer
+        return SocialPostSerializer
+
+    def create(self, request, *args, **kwargs):
+        return create_social_post(request, request.user)
+
+    def update(self, request, *args, **kwargs):
+        post = self.get_object()
+        if post.user_id != request.user.id and not is_admin_user(request.user):
+            return format_error_response('You do not have permission to edit this post.', status_code=status.HTTP_403_FORBIDDEN)
+        serializer = self.get_serializer(post, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return format_error_response('Invalid update data', serializer.errors)
+
+    def destroy(self, request, *args, **kwargs):
+        post = self.get_object()
+        if post.user_id != request.user.id and not is_admin_user(request.user):
+            return format_error_response('You do not have permission to delete this post.', status_code=status.HTTP_403_FORBIDDEN)
+        post.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=['post'])
+    def like(self, request, pk=None):
+        post = self.get_object()
+        content_type = ContentType.objects.get_for_model(SocialPost)
+        like, created = Like.objects.get_or_create(
+            user=request.user,
+            content_type=content_type,
+            object_id=post.id
+        )
+        if created:
+            try:
+                from apps.rewards.events import RewardEvent
+                from apps.rewards.services import RewardEngineService
+                tenant_id = getattr(request.user, 'tenant_id', None)
+                if tenant_id:
+                    RewardEngineService.handle_event(RewardEvent.create_social_like_created(
+                        tenant_id=tenant_id,
+                        user_id=request.user.id,
+                        like_id=like.id,
+                        media_id=post.id
+                    ))
+            except Exception:
+                pass
+            return Response({'status': 'liked!'}, status=status.HTTP_201_CREATED)
+        return Response({'status': 'already liked'}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def unlike(self, request, pk=None):
+        post = self.get_object()
+        content_type = ContentType.objects.get_for_model(SocialPost)
+        like = Like.objects.filter(
+            user=request.user,
+            content_type=content_type,
+            object_id=post.id
+        ).first()
+        if like:
+            like.delete()
+            return Response({'status': 'unliked'}, status=status.HTTP_200_OK)
+        return format_error_response("You haven't liked this post yet")
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def comment(self, request, pk=None):
+        post = self.get_object()
+        if not post.comments_enabled:
+            return format_error_response('Comments are disabled for this post', status_code=status.HTTP_403_FORBIDDEN)
+        serializer = CommentSerializer(data=request.data)
+        if not serializer.is_valid():
+            return format_error_response('Invalid comment data', serializer.errors)
+        content_type = ContentType.objects.get_for_model(SocialPost)
+        parent = None
+        parent_id = request.data.get('parent_id')
+        if parent_id:
+            try:
+                parent = Comment.objects.get(id=parent_id)
+                if parent.object_id != post.id or parent.content_type_id != content_type.id:
+                    return format_error_response("Parent comment isn't on this post")
+            except Comment.DoesNotExist:
+                return format_error_response('Parent comment not found')
+        comment = Comment.objects.create(
+            user=request.user,
+            content=serializer.validated_data['content'],
+            content_type=content_type,
+            object_id=post.id,
+            parent=parent
+        )
+        try:
+            from apps.rewards.events import RewardEvent
+            from apps.rewards.services import RewardEngineService
+            tenant_id = getattr(request.user, 'tenant_id', None)
+            if tenant_id:
+                RewardEngineService.handle_event(RewardEvent.create_social_comment_created(
+                    tenant_id=tenant_id,
+                    user_id=request.user.id,
+                    comment_id=comment.id,
+                    media_id=post.id
+                ))
+        except Exception:
+            pass
+        return Response(CommentSerializer(comment, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'], permission_classes=[AllowAny])
+    def comments(self, request, pk=None):
+        post = self.get_object()
+        content_type = ContentType.objects.get_for_model(SocialPost)
+        top_comments = Comment.objects.filter(
+            content_type=content_type,
+            object_id=post.id,
+            parent=None
+        ).select_related('user__profile').prefetch_related('replies__user__profile')
+        results = []
+        for c in top_comments:
+            results.append({
+                'comment': CommentSerializer(c, context={'request': request}).data,
+                'user': UserMinimalSerializer(c.user, context={'request': request}).data
+            })
+        return Response(results)
     
 class CommentViewSet(mixins.DestroyModelMixin, viewsets.GenericViewSet):
     queryset = Comment.all_objects.all()

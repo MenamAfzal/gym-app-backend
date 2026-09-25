@@ -45,6 +45,34 @@ class Video(Post):
         return f"Video: {self.caption} by {self.user.email}"
 
 
+class SocialPost(Post):
+    comments_enabled = models.BooleanField(default=True, null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Post: {self.caption[:30] if self.caption else 'No text'} by {self.user.email}"
+
+
+class PostMedia(TenantAwareModel):
+    MEDIA_TYPE_CHOICES = [
+        ('image', 'Image'),
+        ('video', 'Video'),
+    ]
+    post = models.ForeignKey(SocialPost, on_delete=models.CASCADE, related_name='media_items')
+    file = models.FileField(upload_to='posts/')
+    media_type = models.CharField(max_length=10, choices=MEDIA_TYPE_CHOICES)
+    order = models.PositiveIntegerField(default=0)
+    duration = models.DurationField(blank=True, null=True)
+
+    class Meta:
+        ordering = ['order', 'created_at']
+
+    def __str__(self):
+        return f"{self.media_type} for Post {self.post_id}"
+
+
 class PollOption(models.Model):
     text = models.CharField(max_length=255, null=True)
     votes_count = models.IntegerField(default=0)
