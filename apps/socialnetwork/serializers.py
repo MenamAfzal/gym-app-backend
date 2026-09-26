@@ -123,18 +123,14 @@ class PhotoSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at', 'likes_count', 'comments_count']
     
     def get_image(self, obj):
-        # Debug print to help diagnose issues
         try:
             if obj.image:
-                print(f"Image URL: {obj.image.url}")
                 request = self.context.get('request')
                 if request is not None:
                     return request.build_absolute_uri(obj.image.url)
                 return obj.image.url
-            else:
-                print("Image is None")
-        except Exception as e:
-            print(f"Error getting image URL: {str(e)}")
+        except Exception:
+            pass
         return None
     
     def get_has_liked(self, obj):
@@ -159,17 +155,10 @@ class PhotoUploadSerializer(serializers.ModelSerializer):
         fields = ['image', 'caption', 'location', 'external_link', 'internal_deep_link', 'visible_to_staff', 'visible_to_clients']
         
     def validate_image(self, value):
-        # Check if file is provided
         if not value:
             raise serializers.ValidationError("Image file is required.")
-            
-        # Debug information
-        print(f"Validating image: {type(value)}, name: {getattr(value, 'name', 'unknown')}")
-        
-        # Check file size
-        if value.size > 10 * 1024 * 1024:  # 10MB limit
+        if value.size > 10 * 1024 * 1024:
             raise serializers.ValidationError("Image file too large. Maximum size is 10MB.")
-            
         return value
 
 
@@ -226,18 +215,14 @@ class VideoSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at', 'likes_count', 'comments_count']
     
     def get_video_file(self, obj):
-        # Debug print to help diagnose issues
         try:
             if obj.video_file:
-                print(f"Video URL: {obj.video_file.url}")
                 request = self.context.get('request')
                 if request is not None:
                     return request.build_absolute_uri(obj.video_file.url)
                 return obj.video_file.url
-            else:
-                print("Video file is None")
-        except Exception as e:
-            print(f"Error getting video URL: {str(e)}")
+        except Exception:
+            pass
         return None
     
     def get_has_liked(self, obj):

@@ -53,12 +53,8 @@ class TenantMiddleware(MiddlewareMixin):
                         except Tenant.DoesNotExist:
                             pass # Token refers to deleted tenant? Ignore.
                             
-                except jwt.ExpiredSignatureError as e:
-                    print("TenantMiddleware: JWT ExpiredSignatureError:", e)
-                except jwt.DecodeError as e:
-                    print("TenantMiddleware: JWT DecodeError:", e)
-                except Exception as e:
-                    print("TenantMiddleware: General exception:", e)
+                except Exception:
+                    pass
 
         # ------------------------------------------------------------------
         # STRATEGY 2: Subdomain Resolution (Fallback for Web/Public/Public APIs)
@@ -94,8 +90,6 @@ class TenantMiddleware(MiddlewareMixin):
             from apps.core.tenants.context import _bypass_isolation
             request._bypass_isolation_token = _bypass_isolation.set(True)
 
-        print(f"TenantMiddleware: Path={request.path} | Resolved Tenant={tenant} (ID={getattr(tenant, 'id', None)})")
-        
         return None
 
     def process_response(self, request, response):

@@ -241,7 +241,7 @@ LOGGING = {
             'propagate': False,
         },
         'apps.request_logger': {
-            'handlers': ['console', 'file_api_requests'],
+            'handlers': ['file_api_requests'],
             'level': 'INFO',
             'propagate': False,
         },

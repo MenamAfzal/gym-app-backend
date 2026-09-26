@@ -81,22 +81,10 @@ class RequestResponseLoggingMiddleware(MiddlewareMixin):
             duration = f" | Duration: {time.time() - request._start_time:.3f}s"
             
         status_code = response.status_code
-        content_type = response.get('Content-Type', '')
-        
-        body_log = ""
-        # Safely parse and sanitize JSON response bodies
-        if 'application/json' in content_type and response.content:
-            try:
-                body_data = json.loads(response.content)
-                sanitized_body = sanitize_data(body_data)
-                body_log = f" | Response: {json.dumps(sanitized_body)}"
-            except Exception:
-                pass
-                
         user_email = request.user.email if hasattr(request, 'user') and request.user.is_authenticated else 'Anonymous'
         tenant_name = request.tenant.name if hasattr(request, 'tenant') and request.tenant else 'None'
 
         logger.info(
-            f"API Response: {request.method} {request.path} | Status: {status_code}{duration} | User: {user_email} | Tenant: {tenant_name}{body_log}"
+            f"API Response: {request.method} {request.path} | Status: {status_code}{duration} | User: {user_email} | Tenant: {tenant_name}"
         )
         return response

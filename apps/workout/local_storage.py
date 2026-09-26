@@ -62,17 +62,15 @@ def delete_local_file(file_url_or_path):
 
         if default_storage.exists(relative_path):
             default_storage.delete(relative_path)
-            print(f"Deleted local file: {relative_path}")
             return True
 
         abs_path = Path(settings.MEDIA_ROOT) / relative_path
         if abs_path.exists():
             abs_path.unlink()
-            print(f"Deleted local file from disk: {abs_path}")
             return True
 
-    except Exception as e:
-        print(f"Failed to delete local file ({file_url_or_path}): {e}")
+    except Exception:
+        pass
     return False
 
 def delete_local_file_threaded(file_url_or_path):
@@ -87,11 +85,9 @@ def upload_video_local_threaded(file_obj, exercise, expected_s3_key=None):
             exercise.video_file = rel_path
             exercise.upload_status = "uploaded"
             exercise.save(update_fields=["video_url", "video_file", "upload_status"])
-            print(f"Local video stored successfully: {file_url}")
-        except Exception as e:
+        except Exception:
             exercise.upload_status = "failed"
             exercise.save(update_fields=["upload_status"])
-            print(f"Local video save failed: {e}")
 
     thread = threading.Thread(target=_upload, daemon=True)
     thread.start()
@@ -108,8 +104,7 @@ def upload_image_to_s3(file_obj, beverage_instance, async_upload=True):
                 beverage_instance.image = file_url
                 beverage_instance.save(update_fields=["image"])
             return file_url
-        except Exception as e:
-            print(f"Local image save failed: {e}")
+        except Exception:
             return None
 
     if async_upload:

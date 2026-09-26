@@ -212,7 +212,6 @@ class TodayWorkoutAPIView(APIView):
                 if candidate.workout_exercises.exists():
                     workout = candidate
                     break
-            print("Workout selected for session type", session_type, ":", workout)
             booking = next((b for b in bookings if b.session and b.session.name == session_type), None)
             if workout and booking:
                 session = booking.session
@@ -1024,10 +1023,6 @@ class BulkExerciseVideoUploadView(APIView):
             name = name.replace(digit, word)
         return re.sub(r'[^a-z]', '', name)
     def process_bulk_uploads_background(self, tasks):
-        """
-        This runs in a separate thread.
-        """
-        print(f"\n[THREAD START] Background Worker started. Queue size: {len(tasks)}")
         success_count = 0
         fail_count = 0
         for i, task in enumerate(tasks):
@@ -1036,45 +1031,31 @@ class BulkExerciseVideoUploadView(APIView):
             filename = task['filename']
             content_type = task['content_type']
             exercise_name = task['exercise_name']
-            print(f"\n--- [Task {i+1}/{len(tasks)}] Processing: {filename} ---")
-            print(f"   -> Matched Exercise: {exercise_name} (ID: {exercise_id})")
-            print(f"   -> Reading from temp path: {file_path}")
             try:
                 if not os.path.exists(file_path):
-                    print(f"   -> [ERROR] File not found at path: {file_path}")
                     fail_count += 1
                     continue
                 rel_path, video_url = save_file_locally(file_path, folder="videos", filename=filename)
-                print(f"   -> Updating Database for Exercise ID {exercise_id}...")
                 rows_updated = Exercise.objects.filter(id=exercise_id).update(
                     video_url=video_url,
                     video_file=rel_path,
                     upload_status='uploaded'
                 )
                 if rows_updated:
-                    print(f"   -> [SUCCESS] Database updated successfully.")
                     success_count += 1
-                else:
-                    print(f"   -> [WARNING] Exercise ID {exercise_id} not found during update.")
-            except Exception as e:
-                print(f"   -> [CRITICAL ERROR] Failed to process {filename}: {e}")
+            except Exception:
                 fail_count += 1
                 Exercise.objects.filter(id=exercise_id).update(upload_status='failed')
             finally:
                 if os.path.exists(file_path):
                     try:
                         os.remove(file_path)
-                        print(f"   -> Temp file cleaned up.")
-                    except OSError as e:
-                        print(f"   -> [cleanup error] Could not delete temp file: {e}")
-        print(f"\n[THREAD END] Job Finished. Success: {success_count}, Failed: {fail_count}\n")
+                    except OSError:
+                        pass
     def post(self, request):
-        print("\n[API REQUEST] Bulk Upload Request Received.")
         files = request.FILES.getlist('videos')
         if not files:
-            print("[API ERROR] No files found in request.")
             return Response({"detail": "No video files provided."}, status=status.HTTP_400_BAD_REQUEST)
-        print(f"[API INFO] Received {len(files)} files to process.")
         all_exercises = Exercise.objects.only('id', 'name')
         exercise_map = {}
         for ex in all_exercises:
@@ -1106,11 +1087,10 @@ class BulkExerciseVideoUploadView(APIView):
                         'filename': original_filename,
                         'content_type': getattr(file, 'content_type', 'application/octet-stream')
                     })
-                except Exception as e:
-                    print(f"[API ERROR] Failed to stage file {original_filename}: {e}")
+                except Exception:
+                    pass
             else:
                 unmatched_files.append(original_filename)
-        print(f"[API INFO] Matched: {len(matched_tasks)}, Unmatched: {len(unmatched_files)}")
         if matched_tasks:
             worker_thread = threading.Thread(
                 target=self.process_bulk_uploads_background,
@@ -1118,7 +1098,6 @@ class BulkExerciseVideoUploadView(APIView):
                 daemon=True
             )
             worker_thread.start()
-            print("[API INFO] Background thread launched.")
         return Response(
             {
                 "message": "Upload started in background.",
