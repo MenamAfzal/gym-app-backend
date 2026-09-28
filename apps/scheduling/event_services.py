@@ -142,33 +142,30 @@ def enroll_client(*, tenant, event_id, client, is_complimentary=False, notes="")
     elif event.is_free:
         pricing_type = 'free'
     else:
-        # Paid Event - Requires active Package (Client Pass)
         pricing_type = 'pass'
         credits_to_deduct = event.credits_required
 
-        # Select client's active package for this location with available credits
         package_to_charge = Package.all_objects.select_for_update().filter(
             client=client,
+            status='active',
             credits_remaining__gte=credits_to_deduct,
             expires_at__gt=timezone.now(),
             package_type__location=event.location
         ).order_by('expires_at').first()
 
         if not package_to_charge:
-            # Check if user has package for different location or expired
             has_other = Package.all_objects.filter(
                 client=client,
-                credits_remaining__gt=0,
+                status='active',
+                credits_remaining__gte=credits_to_deduct,
                 expires_at__gt=timezone.now()
             ).exists()
             if has_other:
-                raise ValidationError("Your active client pass is not valid for this gym location.")
+                raise ValidationError("Your purchased package is not valid for this location.")
             raise EventPaymentRequiredError(
-                f"No active client pass found with at least {credits_to_deduct} credits. "
-                "Please purchase a client pass to enroll in this workshop."
+                f"Insufficient credits or no active package found. Enrolling in this event requires {credits_to_deduct} credit(s)."
             )
 
-        # Deduct credits from pass
         package_to_charge.credits_remaining -= credits_to_deduct
         package_to_charge.save(update_fields=['credits_remaining'])
 
@@ -270,9 +267,9 @@ def promote_next_waitlist_attendee(event: Event) -> EventEnrollment | None:
         logger.info("Promoted waitlisted client %s to registered for free event %s", waitlisted.client_id, event.id)
         return waitlisted
 
-    # Paid event - Check if client has active pass with credits
     pkg = Package.all_objects.select_for_update().filter(
         client=waitlisted.client,
+        status='active',
         credits_remaining__gte=event.credits_required,
         expires_at__gt=timezone.now(),
         package_type__location=event.location

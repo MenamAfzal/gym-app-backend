@@ -1026,17 +1026,39 @@ def _format_user_name(user):
 class EventSessionSerializer(serializers.ModelSerializer):
     room_name = serializers.CharField(source='room.name', read_only=True, default='')
     instructor_name = serializers.SerializerMethodField()
+    instructor_image = serializers.SerializerMethodField()
+    staff_name = serializers.SerializerMethodField()
+    staff_image = serializers.SerializerMethodField()
 
     class Meta:
         model = EventSession
         fields = [
             'id', 'event', 'session_number', 'title', 'start_at', 'end_at',
-            'room', 'room_name', 'instructor', 'instructor_name', 'status', 'created_at'
+            'room', 'room_name', 'instructor', 'instructor_name', 'instructor_image',
+            'staff_name', 'staff_image', 'status', 'created_at'
         ]
-        read_only_fields = ['id', 'room_name', 'instructor_name', 'created_at']
+        read_only_fields = ['id', 'room_name', 'instructor_name', 'instructor_image', 'staff_name', 'staff_image', 'created_at']
 
     def get_instructor_name(self, obj):
         return _format_user_name(obj.instructor)
+
+    def get_instructor_image(self, obj):
+        staff = obj.instructor
+        if not staff:
+            return None
+        profile = getattr(staff, 'profile', None)
+        if profile and getattr(profile, 'profile_image', None) and hasattr(profile.profile_image, 'url'):
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(profile.profile_image.url)
+            return profile.profile_image.url
+        return None
+
+    def get_staff_name(self, obj):
+        return self.get_instructor_name(obj)
+
+    def get_staff_image(self, obj):
+        return self.get_instructor_image(obj)
 
 
 class EventListSerializer(serializers.ModelSerializer):
@@ -1044,6 +1066,11 @@ class EventListSerializer(serializers.ModelSerializer):
     location_name = serializers.CharField(source='location.name', read_only=True)
     room_name = serializers.CharField(source='room.name', read_only=True, default='')
     primary_instructor_name = serializers.SerializerMethodField()
+    primary_instructor_image = serializers.SerializerMethodField()
+    staff_name = serializers.SerializerMethodField()
+    staff_image = serializers.SerializerMethodField()
+    provider_name = serializers.SerializerMethodField()
+    provider_image = serializers.SerializerMethodField()
     my_enrollment = serializers.SerializerMethodField()
 
     class Meta:
@@ -1051,7 +1078,8 @@ class EventListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'category', 'category_display', 'description', 'image',
             'location', 'location_name', 'room', 'room_name',
-            'primary_instructor', 'primary_instructor_name',
+            'primary_instructor', 'primary_instructor_name', 'primary_instructor_image',
+            'staff_name', 'staff_image', 'provider_name', 'provider_image',
             'event_type', 'enrollment_type', 'start_at', 'end_at',
             'registration_opens_at', 'registration_closes_at',
             'capacity', 'waitlist_capacity', 'is_free', 'credits_required',
@@ -1062,7 +1090,9 @@ class EventListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id', 'category_display', 'location_name', 'room_name',
-            'primary_instructor_name', 'is_registration_open', 'enrolled_count',
+            'primary_instructor_name', 'primary_instructor_image',
+            'staff_name', 'staff_image', 'provider_name', 'provider_image',
+            'is_registration_open', 'enrolled_count',
             'waitlist_count', 'spots_remaining', 'is_full', 'is_waitlist_full',
             'my_enrollment', 'created_at'
         ]
@@ -1070,11 +1100,38 @@ class EventListSerializer(serializers.ModelSerializer):
     def get_primary_instructor_name(self, obj):
         return _format_user_name(obj.primary_instructor)
 
+    def get_primary_instructor_image(self, obj):
+        staff = obj.primary_instructor
+        if not staff:
+            return None
+        profile = getattr(staff, 'profile', None)
+        if profile and getattr(profile, 'profile_image', None) and hasattr(profile.profile_image, 'url'):
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(profile.profile_image.url)
+            return profile.profile_image.url
+        return None
+
+    def get_staff_name(self, obj):
+        return self.get_primary_instructor_name(obj)
+
+    def get_staff_image(self, obj):
+        return self.get_primary_instructor_image(obj)
+
+    def get_provider_name(self, obj):
+        return self.get_primary_instructor_name(obj)
+
+    def get_provider_image(self, obj):
+        return self.get_primary_instructor_image(obj)
+
     def get_my_enrollment(self, obj):
         request = self.context.get('request')
         if not request or not request.user or not request.user.is_authenticated:
             return None
-        enrollment = obj.enrollments.filter(client=request.user).first()
+        if hasattr(obj, 'my_enrollments_list'):
+            enrollment = obj.my_enrollments_list[0] if obj.my_enrollments_list else None
+        else:
+            enrollment = obj.enrollments.filter(client=request.user).first()
         if not enrollment:
             return None
         return {
@@ -1099,10 +1156,17 @@ class EventDetailSerializer(EventListSerializer):
     def get_assistant_instructors_details(self, obj):
         instructors = []
         for user in obj.assistant_instructors.all():
+            image_url = None
+            profile = getattr(user, 'profile', None)
+            if profile and getattr(profile, 'profile_image', None) and hasattr(profile.profile_image, 'url'):
+                request = self.context.get('request')
+                image_url = request.build_absolute_uri(profile.profile_image.url) if request else profile.profile_image.url
             instructors.append({
                 "id": str(user.id),
                 "name": _format_user_name(user),
                 "email": user.email,
+                "image": image_url,
+                "staff_image": image_url,
             })
         return instructors
 
@@ -1136,7 +1200,6 @@ class EventCreateUpdateSerializer(serializers.ModelSerializer):
         import json
         normalized = data.copy() if hasattr(data, 'copy') else dict(data)
 
-        # Handle stringified JSON in multipart/form-data
         if 'sessions' in normalized and isinstance(normalized['sessions'], str):
             try:
                 normalized['sessions'] = json.loads(normalized['sessions'])
@@ -1170,6 +1233,11 @@ class EventCreateUpdateSerializer(serializers.ModelSerializer):
         capacity = data.get('capacity', getattr(self.instance, 'capacity', None))
         if capacity is not None and capacity <= 0:
             raise serializers.ValidationError({"capacity": "Capacity must be greater than zero."})
+
+        location = data.get('location') or getattr(self.instance, 'location', None)
+        room = data.get('room') or getattr(self.instance, 'room', None)
+        if location and room and room.location_id != location.id:
+            raise serializers.ValidationError({"room": "Selected room does not belong to the selected location."})
 
         return data
 
@@ -1211,33 +1279,132 @@ class EventCreateUpdateSerializer(serializers.ModelSerializer):
 
 
 class EventEnrollmentSerializer(serializers.ModelSerializer):
+    client = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.all(),
+        required=False,
+        allow_null=True
+    )
+    client_name = serializers.SerializerMethodField()
+    client_email = serializers.CharField(source='client.email', read_only=True)
+    client_image = serializers.SerializerMethodField()
+    client_rx_level = serializers.SerializerMethodField()
+    client_level = serializers.SerializerMethodField()
+    provider = serializers.UUIDField(source='event.primary_instructor.id', read_only=True, allow_null=True)
+    provider_name = serializers.SerializerMethodField()
+    staff_name = serializers.SerializerMethodField()
+    staff_image = serializers.SerializerMethodField()
+    provider_image = serializers.SerializerMethodField()
+    primary_instructor_name = serializers.SerializerMethodField()
+    primary_instructor_image = serializers.SerializerMethodField()
+    location = serializers.UUIDField(source='event.location.id', read_only=True)
+    location_name = serializers.CharField(source='event.location.name', read_only=True)
+    room = serializers.UUIDField(source='event.room.id', read_only=True, allow_null=True)
+    room_name = serializers.CharField(source='event.room.name', read_only=True, default='')
     event_title = serializers.CharField(source='event.title', read_only=True)
     event_category = serializers.CharField(source='event.category', read_only=True)
     event_start_at = serializers.DateTimeField(source='event.start_at', read_only=True)
     event_end_at = serializers.DateTimeField(source='event.end_at', read_only=True)
-    location_name = serializers.CharField(source='event.location.name', read_only=True)
-    client_name = serializers.SerializerMethodField()
-    client_email = serializers.CharField(source='client.email', read_only=True)
     package_name = serializers.CharField(source='credit_source.package_type.name', read_only=True, default='')
 
     class Meta:
         model = EventEnrollment
         fields = [
             'id', 'event', 'event_title', 'event_category', 'event_start_at', 'event_end_at',
-            'location_name', 'client', 'client_name', 'client_email',
+            'location', 'location_name', 'room', 'room_name',
+            'client', 'client_name', 'client_email', 'client_image',
+            'client_rx_level', 'client_level',
+            'provider', 'provider_name', 'staff_name', 'staff_image', 'provider_image',
+            'primary_instructor_name', 'primary_instructor_image',
             'status', 'pricing_type', 'credit_source', 'package_name',
             'credits_deducted', 'checked_in_at', 'cancelled_at',
             'cancellation_reason', 'notes', 'created_at'
         ]
         read_only_fields = [
             'id', 'event_title', 'event_category', 'event_start_at', 'event_end_at',
-            'location_name', 'client_name', 'client_email', 'package_name',
-            'pricing_type', 'credits_deducted', 'checked_in_at', 'cancelled_at',
-            'created_at'
+            'location', 'location_name', 'room', 'room_name',
+            'client_name', 'client_email', 'client_image', 'client_rx_level', 'client_level',
+            'provider', 'provider_name', 'staff_name', 'staff_image', 'provider_image',
+            'primary_instructor_name', 'primary_instructor_image',
+            'package_name', 'pricing_type', 'credits_deducted', 'checked_in_at',
+            'cancelled_at', 'created_at'
         ]
 
     def get_client_name(self, obj):
-        return _format_user_name(obj.client)
+        if not obj.client:
+            return ""
+        profile = getattr(obj.client, 'profile', None)
+        if profile:
+            full_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip()
+            if full_name:
+                return full_name
+            if profile.nickname:
+                return profile.nickname
+        user_name = f"{obj.client.first_name or ''} {obj.client.last_name or ''}".strip()
+        if user_name:
+            return user_name
+        return obj.client.email.split('@')[0] if obj.client.email else ""
+
+    def get_client_image(self, obj):
+        if not obj.client:
+            return None
+        profile = getattr(obj.client, 'profile', None)
+        if profile and getattr(profile, 'profile_image', None) and hasattr(profile.profile_image, 'url'):
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(profile.profile_image.url)
+            return profile.profile_image.url
+        return None
+
+    def get_client_rx_level(self, obj):
+        if not obj.client:
+            return "RX1"
+        profile = getattr(obj.client, 'profile', None)
+        if profile and getattr(profile, 'level', None):
+            return profile.level
+        return "RX1"
+
+    def get_client_level(self, obj):
+        return self.get_client_rx_level(obj)
+
+    def get_primary_instructor_name(self, obj):
+        event = getattr(obj, 'event', None)
+        staff = getattr(event, 'primary_instructor', None) if event else None
+        if not staff:
+            return ""
+        profile = getattr(staff, 'profile', None)
+        if profile:
+            nickname = getattr(profile, 'nickname', None)
+            if nickname:
+                return nickname
+            full_name = f"{getattr(profile, 'first_name', '')} {getattr(profile, 'last_name', '')}".strip()
+            if full_name:
+                return full_name
+        return staff.email if staff else ""
+
+    def get_staff_name(self, obj):
+        return self.get_primary_instructor_name(obj)
+
+    def get_provider_name(self, obj):
+        return self.get_primary_instructor_name(obj)
+
+    def get_primary_instructor_image(self, obj):
+        event = getattr(obj, 'event', None)
+        staff = getattr(event, 'primary_instructor', None) if event else None
+        if not staff:
+            return None
+        profile = getattr(staff, 'profile', None)
+        if profile and getattr(profile, 'profile_image', None) and hasattr(profile.profile_image, 'url'):
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(profile.profile_image.url)
+            return profile.profile_image.url
+        return None
+
+    def get_staff_image(self, obj):
+        return self.get_primary_instructor_image(obj)
+
+    def get_provider_image(self, obj):
+        return self.get_primary_instructor_image(obj)
 
 
 class EventEnrollRequestSerializer(serializers.Serializer):
@@ -1250,6 +1417,9 @@ class EventRosterSerializer(serializers.ModelSerializer):
     client_id = serializers.UUIDField(source='client.id', read_only=True)
     client_name = serializers.SerializerMethodField()
     client_email = serializers.CharField(source='client.email', read_only=True)
+    client_image = serializers.SerializerMethodField()
+    client_rx_level = serializers.SerializerMethodField()
+    client_level = serializers.SerializerMethodField()
     attended_sessions_ids = serializers.PrimaryKeyRelatedField(
         source='attended_sessions', many=True, read_only=True
     )
@@ -1258,12 +1428,35 @@ class EventRosterSerializer(serializers.ModelSerializer):
         model = EventEnrollment
         fields = [
             'id', 'client_id', 'client_name', 'client_email',
+            'client_image', 'client_rx_level', 'client_level',
             'status', 'pricing_type', 'credits_deducted',
             'checked_in_at', 'attended_sessions_ids', 'notes', 'created_at'
         ]
 
     def get_client_name(self, obj):
         return _format_user_name(obj.client)
+
+    def get_client_image(self, obj):
+        if not obj.client:
+            return None
+        profile = getattr(obj.client, 'profile', None)
+        if profile and getattr(profile, 'profile_image', None) and hasattr(profile.profile_image, 'url'):
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(profile.profile_image.url)
+            return profile.profile_image.url
+        return None
+
+    def get_client_rx_level(self, obj):
+        if not obj.client:
+            return "RX1"
+        profile = getattr(obj.client, 'profile', None)
+        if profile and getattr(profile, 'level', None):
+            return profile.level
+        return "RX1"
+
+    def get_client_level(self, obj):
+        return self.get_client_rx_level(obj)
 
 
 class TenantBookingSettingsSerializer(serializers.ModelSerializer):

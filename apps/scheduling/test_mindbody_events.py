@@ -409,3 +409,171 @@ class MindbodyEventsTestCase(APITestCase):
 
         self.pkg2.refresh_from_db()
         self.assertEqual(self.pkg2.credits_remaining, 5)
+
+    def test_event_booking_validations(self):
+        other_loc = Location.objects.create(
+            tenant=self.tenant, name="Other Studio", address="456 Other St", timezone="UTC"
+        )
+        other_room = Room.objects.create(
+            tenant=self.tenant, location=other_loc, name="Other Room", capacity=20
+        )
+        other_pkg_type = PackageType.objects.create(
+            tenant=self.tenant, location=other_loc, name="Other Pack", credit_count=10, price=100.00, validity_days=30
+        )
+        Package.objects.filter(client=self.client1).delete()
+
+        event = Event.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            room=self.room,
+            primary_instructor=self.trainer,
+            title="Validation Test Event",
+            category="workshop",
+            start_at=timezone.now() + timedelta(days=5),
+            end_at=timezone.now() + timedelta(days=5, hours=2),
+            capacity=10,
+            waitlist_capacity=5,
+            is_free=False,
+            credits_required=1,
+            status='published'
+        )
+
+        self.client.force_authenticate(user=self.client1)
+        res_no_pkg = self.client.post(f'/api/v1/scheduling/workshops/{event.id}/enroll/', {}, format='json')
+        self.assertEqual(res_no_pkg.status_code, 402)
+
+        pkg_wrong_loc = Package.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            package_type=other_pkg_type,
+            status='active',
+            credits_remaining=5,
+            expires_at=timezone.now() + timedelta(days=30)
+        )
+        res_wrong_loc = self.client.post(f'/api/v1/scheduling/workshops/{event.id}/enroll/', {}, format='json')
+        self.assertEqual(res_wrong_loc.status_code, 400)
+        self.assertEqual(res_wrong_loc.data.get('detail'), "Your purchased package is not valid for this location.")
+
+        pkg_wrong_loc.delete()
+        pkg_canceled = Package.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            package_type=self.package_type,
+            status='canceled',
+            credits_remaining=5,
+            expires_at=timezone.now() + timedelta(days=30)
+        )
+        res_canceled = self.client.post(f'/api/v1/scheduling/workshops/{event.id}/enroll/', {}, format='json')
+        self.assertEqual(res_canceled.status_code, 402)
+
+        pkg_canceled.delete()
+        pkg_expired = Package.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            package_type=self.package_type,
+            status='active',
+            credits_remaining=5,
+            expires_at=timezone.now() - timedelta(days=1)
+        )
+        res_expired = self.client.post(f'/api/v1/scheduling/workshops/{event.id}/enroll/', {}, format='json')
+        self.assertEqual(res_expired.status_code, 402)
+
+        pkg_expired.delete()
+        pkg_insufficient = Package.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            package_type=self.package_type,
+            status='active',
+            credits_remaining=0,
+            expires_at=timezone.now() + timedelta(days=30)
+        )
+        res_insufficient = self.client.post(f'/api/v1/scheduling/workshops/{event.id}/enroll/', {}, format='json')
+        self.assertEqual(res_insufficient.status_code, 402)
+
+        pkg_insufficient.credits_remaining = 5
+        pkg_insufficient.save()
+        res_success = self.client.post(f'/api/v1/scheduling/workshops/{event.id}/enroll/', {}, format='json')
+        self.assertEqual(res_success.status_code, 201)
+        pkg_insufficient.refresh_from_db()
+        self.assertEqual(pkg_insufficient.credits_remaining, 4)
+
+        self.client.force_authenticate(user=self.owner)
+        payload_mismatched_room = {
+            "title": "Mismatched Room Event",
+            "category": "workshop",
+            "location": str(self.location.id),
+            "room": str(other_room.id),
+            "primary_instructor": str(self.trainer.id),
+            "event_type": "single",
+            "start_at": (timezone.now() + timedelta(days=6)).isoformat(),
+            "end_at": (timezone.now() + timedelta(days=6, hours=2)).isoformat(),
+            "capacity": 10,
+            "is_free": True
+        }
+        res_room_mismatch = self.client.post('/api/v1/scheduling/workshops/', payload_mismatched_room, format='json')
+        self.assertEqual(res_room_mismatch.status_code, 400)
+        self.assertIn("room", res_room_mismatch.data)
+
+    def test_event_enrollment_metadata_fields(self):
+        from apps.users.models import UserProfile
+        profile, _ = UserProfile.objects.get_or_create(user=self.client1)
+        profile.first_name = "Jane"
+        profile.last_name = "Doe"
+        profile.level = "RX3"
+        profile.save()
+
+        trainer_profile, _ = UserProfile.objects.get_or_create(user=self.trainer)
+        trainer_profile.first_name = "Coach"
+        trainer_profile.last_name = "Smith"
+        trainer_profile.save()
+
+        event = Event.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            room=self.room,
+            primary_instructor=self.trainer,
+            title="Metadata Test Event",
+            category="workshop",
+            start_at=timezone.now() + timedelta(days=4),
+            end_at=timezone.now() + timedelta(days=4, hours=2),
+            capacity=10,
+            is_free=True,
+            status='published'
+        )
+
+        enrollment = EventEnrollment.objects.create(
+            tenant=self.tenant,
+            event=event,
+            client=self.client1,
+            status='registered',
+            pricing_type='free'
+        )
+
+        self.client.force_authenticate(user=self.client1)
+        res_list = self.client.get('/api/v1/scheduling/event-enrollments/', format='json')
+        self.assertEqual(res_list.status_code, 200)
+        item = res_list.data['results'][0] if 'results' in res_list.data else res_list.data[0]
+        self.assertEqual(item.get('client_name'), "Jane Doe")
+        self.assertEqual(item.get('client_rx_level'), "RX3")
+        self.assertEqual(item.get('client_level'), "RX3")
+        self.assertIn('client_image', item)
+        self.assertEqual(item.get('staff_name'), "Coach Smith")
+        self.assertEqual(item.get('provider_name'), "Coach Smith")
+        self.assertIn('staff_image', item)
+        self.assertIn('provider_image', item)
+        self.assertEqual(item.get('location_name'), "Downtown Center")
+        self.assertEqual(item.get('room_name'), "Workshop Hall")
+
+        self.client.force_authenticate(user=self.trainer)
+        res_roster = self.client.get(f'/api/v1/scheduling/workshops/{event.id}/roster/', format='json')
+        self.assertEqual(res_roster.status_code, 200)
+        roster_item = res_roster.data['roster'][0]
+        self.assertEqual(roster_item.get('client_name'), "Jane Doe")
+        self.assertEqual(roster_item.get('client_rx_level'), "RX3")
+        self.assertIn('client_image', roster_item)
+
+        res_events = self.client.get('/api/v1/scheduling/workshops/', format='json')
+        self.assertEqual(res_events.status_code, 200)
+        ev_item = res_events.data['results'][0] if 'results' in res_events.data else res_events.data[0]
+        self.assertIn('primary_instructor_name', ev_item)
+        self.assertIn('staff_image', ev_item)

@@ -2253,11 +2253,30 @@ class EventViewSet(viewsets.ModelViewSet):
         else:
             qs = Event.all_objects.all()
 
+        user = getattr(self.request, 'user', None)
+        prefetch_list = [
+            'assistant_instructors',
+            'assistant_instructors__profile',
+            'sessions',
+            'sessions__room',
+            'sessions__instructor',
+            'sessions__instructor__profile'
+        ]
+        if user and getattr(user, 'is_authenticated', False):
+            from django.db.models import Prefetch
+            prefetch_list.append(
+                Prefetch(
+                    'enrollments',
+                    queryset=EventEnrollment.all_objects.filter(client=user),
+                    to_attr='my_enrollments_list'
+                )
+            )
+        else:
+            prefetch_list.append('enrollments')
+
         qs = qs.select_related(
             'location', 'room', 'primary_instructor', 'primary_instructor__profile'
-        ).prefetch_related(
-            'assistant_instructors', 'assistant_instructors__profile', 'sessions', 'enrollments'
-        )
+        ).prefetch_related(*prefetch_list)
 
         params = self.request.query_params
 
@@ -2358,8 +2377,8 @@ class EventViewSet(viewsets.ModelViewSet):
         except EventPaymentRequiredError as e:
             return Response(
                 {
-                    "error": "payment_required",
                     "detail": str(e),
+                    "error": "payment_required",
                     "credits_required": event.credits_required,
                     "is_free": event.is_free,
                 },
@@ -2536,7 +2555,15 @@ class EventEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
             qs = EventEnrollment.all_objects.all()
 
         qs = qs.select_related(
-            'event', 'event__location', 'client', 'client__profile', 'credit_source', 'credit_source__package_type'
+            'event',
+            'event__location',
+            'event__room',
+            'event__primary_instructor',
+            'event__primary_instructor__profile',
+            'client',
+            'client__profile',
+            'credit_source',
+            'credit_source__package_type'
         )
         if getattr(user, 'role', None) in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
             # Staff can filter by event_id or client_id

@@ -1481,7 +1481,38 @@ class MediaViewSet(viewsets.ModelViewSet):
         'poll': {'model': Poll, 'serializer': PollSerializer, 'detail_serializer': PollDetailSerializer},
         'post': {'model': SocialPost, 'serializer': SocialPostSerializer, 'detail_serializer': SocialPostDetailSerializer},
         'socialpost': {'model': SocialPost, 'serializer': SocialPostSerializer, 'detail_serializer': SocialPostDetailSerializer},
+        'text': {'model': SocialPost, 'serializer': SocialPostSerializer, 'detail_serializer': SocialPostDetailSerializer},
+        'mixed': {'model': SocialPost, 'serializer': SocialPostSerializer, 'detail_serializer': SocialPostDetailSerializer},
     }
+
+    def _find_media_object(self, pk, media_type=None):
+        if media_type and media_type in self.media_types:
+            model = self.media_types[media_type]['model']
+            obj = model.objects.filter(pk=pk).first()
+            if obj:
+                return obj, media_type
+
+        social_post = SocialPost.objects.filter(pk=pk).first()
+        if social_post:
+            return social_post, 'post'
+
+        photo = Photo.objects.filter(pk=pk).first()
+        if photo:
+            return photo, 'photo'
+
+        video = Video.objects.filter(pk=pk).first()
+        if video:
+            return video, 'video'
+
+        poll = Poll.objects.filter(pk=pk).first()
+        if poll:
+            return poll, 'poll'
+
+        post_media = PostMedia.objects.filter(pk=pk).select_related('post').first()
+        if post_media and post_media.post:
+            return post_media.post, 'post'
+
+        return None, None
 
     def get_queryset(self):
         media_type = self.request.query_params.get('type') or self.request.data.get('media_type')
@@ -1502,9 +1533,13 @@ class MediaViewSet(viewsets.ModelViewSet):
         media_type = request.query_params.get('type')
 
         all_media = []
+        seen_models = set()
         for m_type, config in self.media_types.items():
             if media_type and m_type != media_type:
                 continue
+            if not media_type and config['model'] in seen_models:
+                continue
+            seen_models.add(config['model'])
             qs = config['model'].objects.all()
             if user_id:
                 qs = qs.filter(user_id=user_id)
@@ -1515,20 +1550,31 @@ class MediaViewSet(viewsets.ModelViewSet):
         return Response(all_media)
 
     def retrieve(self, request, pk=None):
-        media_type = request.query_params.get('type')
-        if not media_type or media_type not in self.media_types:
-            return format_error_response('Missing or invalid type parameter')
+        media_type = request.query_params.get('type') or request.data.get('media_type')
+        media_obj, resolved_type = self._find_media_object(pk, media_type)
+        if not media_obj:
+            return format_error_response(f"Couldn't find that {media_type or 'media'}", status_code=status.HTTP_404_NOT_FOUND)
 
-        try:
-            media_obj = self.media_types[media_type]['model'].objects.get(pk=pk)
-            serializer = self.get_serializer(media_obj)
-            return Response(serializer.data)
-        except self.media_types[media_type]['model'].DoesNotExist:
-            return format_error_response(f"Couldn't find that {media_type}", status_code=status.HTTP_404_NOT_FOUND)
+        config = self.media_types.get(resolved_type)
+        serializer_class = config['detail_serializer'] if config else None
+        if not serializer_class:
+            if isinstance(media_obj, SocialPost):
+                serializer_class = SocialPostDetailSerializer
+            elif isinstance(media_obj, Photo):
+                serializer_class = PhotoDetailSerializer
+            elif isinstance(media_obj, Video):
+                serializer_class = VideoDetailSerializer
+            elif isinstance(media_obj, Poll):
+                serializer_class = PollDetailSerializer
+            else:
+                serializer_class = MediaListSerializer
+
+        serializer = serializer_class(media_obj, context={'request': request})
+        return Response(serializer.data)
 
     def create(self, request):
         media_type = request.data.get('media_type')
-        if media_type in ['post', 'socialpost']:
+        if media_type in ['post', 'socialpost', 'text', 'mixed']:
             return create_social_post(request, request.user)
         if not media_type or media_type not in self.media_types:
             return format_error_response('Missing or invalid media_type')
@@ -1569,57 +1615,58 @@ class MediaViewSet(viewsets.ModelViewSet):
         return Response(responses, status=status.HTTP_201_CREATED)
 
     def update(self, request, pk=None):
-        media_type = request.data.get('media_type')
-        if not media_type or media_type not in self.media_types:
-            return format_error_response('Need to specify valid media_type')
+        media_type = request.data.get('media_type') or request.query_params.get('type')
+        media, resolved_type = self._find_media_object(pk, media_type)
+        if not media:
+            return format_error_response(f"{media_type or 'media'} not found", status_code=status.HTTP_404_NOT_FOUND)
 
-        try:
-            model_class = self.media_types[media_type]['model']
-            media = model_class.objects.get(pk=pk)
-        except model_class.DoesNotExist:
-            return format_error_response(f"{media_type} not found", status_code=status.HTTP_404_NOT_FOUND)
- 
         user = self._get_authenticated_user(request)
         if isinstance(user, Response):
             return user
 
         if media.user_id != user.id and not is_admin_user(user):
             return format_error_response(
-                f"You do not have permission to edit this {media_type}.",
+                f"You do not have permission to edit this {resolved_type or 'media'}.",
                 status_code=status.HTTP_403_FORBIDDEN
             )
 
-        serializer = self.get_serializer(media, data=request.data, partial=True)
+        config = self.media_types.get(resolved_type)
+        serializer_class = config['serializer'] if config else None
+        if not serializer_class:
+            if isinstance(media, SocialPost):
+                serializer_class = SocialPostSerializer
+            elif isinstance(media, Photo):
+                serializer_class = PhotoSerializer
+            elif isinstance(media, Video):
+                serializer_class = VideoSerializer
+            elif isinstance(media, Poll):
+                serializer_class = PollSerializer
+
+        serializer = serializer_class(media, data=request.data, partial=True, context={'request': request})
         if serializer.is_valid():
             serializer.save()
             response_data = serializer.data
-            response_data['media_type'] = media_type
+            response_data['media_type'] = resolved_type
             return Response(response_data)
         return format_error_response('Invalid update data', serializer.errors)
 
     def destroy(self, request, pk=None):
-        media_type = request.query_params.get('type')
-        if not media_type or media_type not in self.media_types:
-            return format_error_response('Need type parameter (photo/video/poll)')
+        media_type = request.query_params.get('type') or request.data.get('media_type')
+        media, resolved_type = self._find_media_object(pk, media_type)
+        if not media:
+            return format_error_response(f"{media_type or 'media'} not found", status_code=status.HTTP_404_NOT_FOUND)
 
         user = self._get_authenticated_user(request)
         if isinstance(user, Response):
             return user
 
-        try:
-            model_class = self.media_types[media_type]['model']
-            obj = model_class.objects.get(pk=pk)
-        except model_class.DoesNotExist:
-            return format_error_response(f"{media_type} not found", status_code=status.HTTP_404_NOT_FOUND)
-
-        # Security Check: Allow deletion ONLY if author OR gym admin
-        if obj.user_id != user.id and not is_admin_user(user):
+        if media.user_id != user.id and not is_admin_user(user):
             return format_error_response(
-                f"You do not have permission to delete this {media_type}.",
+                f"You do not have permission to delete this {resolved_type or 'media'}.",
                 status_code=status.HTTP_403_FORBIDDEN
             )
 
-        obj.delete()
+        media.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     def _get_authenticated_user(self, request):
@@ -1633,15 +1680,10 @@ class MediaViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def like(self, request, pk=None):
-        is_liked = False
-        media_type = request.query_params.get('type')
-        if not media_type or media_type not in self.media_types:
-            return format_error_response('Missing type parameter')
-
-        try:
-            media = self.media_types[media_type]['model'].objects.get(pk=pk)
-        except self.media_types[media_type]['model'].DoesNotExist:
-            return format_error_response(f"{media_type} not found", status_code=status.HTTP_404_NOT_FOUND)
+        media_type = request.query_params.get('type') or request.data.get('media_type')
+        media, resolved_type = self._find_media_object(pk, media_type)
+        if not media:
+            return format_error_response(f"{media_type or 'media'} not found", status_code=status.HTTP_404_NOT_FOUND)
 
         content_type = ContentType.objects.get_for_model(media.__class__)
         like, created = Like.objects.get_or_create(
@@ -1651,7 +1693,6 @@ class MediaViewSet(viewsets.ModelViewSet):
         )
 
         if created:
-            # Emit Rewards Event
             try:
                 from apps.rewards.events import RewardEvent
                 from apps.rewards.services import RewardEngineService
@@ -1668,49 +1709,36 @@ class MediaViewSet(viewsets.ModelViewSet):
 
             return Response({'status': 'liked!'}, status=status.HTTP_201_CREATED)
         return Response({'status': 'already liked'}, status=status.HTTP_200_OK)
-    
+
     @action(detail=True, methods=['get'], permission_classes=[AllowAny])
     def comments(self, request, pk=None):
-        """
-        GET /api/media/<pk>/comments/?type=<photo|video|poll>
-        Returns a list of top-level comments for this media item, each with:
-        - 'comment': full CommentSerializer data
-        - 'user': minimal user info (UserMinimalSerializer)
-        """
-        media_type = request.query_params.get('type')
-        if not media_type or media_type not in self.media_types:
-            return format_error_response('Missing or invalid type parameter')
-        # 1) Retrieve the actual media object (Photo, Video, or Poll)
-        model = self.media_types[media_type]['model']
-        obj = get_object_or_404(model, pk=pk)
-        # 2) Build content type filter and fetch only top-level comments
-        ct = ContentType.objects.get_for_model(model)
+        media_type = request.query_params.get('type') or request.data.get('media_type')
+        media, resolved_type = self._find_media_object(pk, media_type)
+        if not media:
+            return format_error_response(f"{media_type or 'media'} not found", status_code=status.HTTP_404_NOT_FOUND)
+
+        ct = ContentType.objects.get_for_model(media.__class__)
         top_comments = Comment.objects.filter(
             content_type=ct,
-            object_id=obj.id,
+            object_id=media.id,
             parent=None
         ).select_related('user__profile').prefetch_related('replies__user__profile')
-        # 3) Serialize each comment plus the minimal user data
         results = []
         for c in top_comments:
             comment_data = CommentSerializer(c, context={'request': request}).data
-            user_data    = UserMinimalSerializer(c.user, context={'request': request}).data
+            user_data = UserMinimalSerializer(c.user, context={'request': request}).data
             results.append({
                 'comment': comment_data,
-                'user':    user_data
+                'user': user_data
             })
         return Response(results)
 
     @action(detail=True, methods=['post'])
     def unlike(self, request, pk=None):
-        media_type = request.query_params.get('type')
-        if not media_type or media_type not in self.media_types:
-            return format_error_response('Missing type parameter')
-
-        try:
-            media = self.media_types[media_type]['model'].objects.get(pk=pk)
-        except self.media_types[media_type]['model'].DoesNotExist:
-            return format_error_response(f"{media_type} not found", status_code=status.HTTP_404_NOT_FOUND)
+        media_type = request.query_params.get('type') or request.data.get('media_type')
+        media, resolved_type = self._find_media_object(pk, media_type)
+        if not media:
+            return format_error_response(f"{media_type or 'media'} not found", status_code=status.HTTP_404_NOT_FOUND)
 
         content_type = ContentType.objects.get_for_model(media.__class__)
         like = Like.objects.filter(
@@ -1726,14 +1754,13 @@ class MediaViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def comment(self, request, pk=None):
-        media_type = request.query_params.get('type')
-        if not media_type or media_type not in self.media_types:
-            return format_error_response('Need type parameter')
+        media_type = request.query_params.get('type') or request.data.get('media_type')
+        media, resolved_type = self._find_media_object(pk, media_type)
+        if not media:
+            return format_error_response(f"couldn't find that {media_type or 'media'}", status_code=status.HTTP_404_NOT_FOUND)
 
-        try:
-            media = self.media_types[media_type]['model'].objects.get(pk=pk)
-        except self.media_types[media_type]['model'].DoesNotExist:
-            return format_error_response(f"couldn't find that {media_type}", status_code=status.HTTP_404_NOT_FOUND)
+        if hasattr(media, 'comments_enabled') and not media.comments_enabled:
+            return format_error_response('Comments are disabled for this post', status_code=status.HTTP_403_FORBIDDEN)
 
         serializer = CommentSerializer(data=request.data)
         if not serializer.is_valid():
@@ -1743,7 +1770,6 @@ class MediaViewSet(viewsets.ModelViewSet):
         parent = None
         parent_id = request.data.get('parent_id')
 
-        # Logic for replies: Handles parent_id to nest the comment
         if parent_id:
             try:
                 parent = Comment.objects.get(id=parent_id)
@@ -1752,7 +1778,6 @@ class MediaViewSet(viewsets.ModelViewSet):
             except Comment.DoesNotExist:
                 return format_error_response("parent comment not found")
 
-        # Now safe from AnonymousUser error
         comment = Comment.objects.create(
             user=request.user, 
             content=serializer.validated_data['content'],
@@ -1761,7 +1786,6 @@ class MediaViewSet(viewsets.ModelViewSet):
             parent=parent
         )
 
-        # Emit Rewards Event
         try:
             from apps.rewards.events import RewardEvent
             from apps.rewards.services import RewardEngineService
@@ -1776,7 +1800,7 @@ class MediaViewSet(viewsets.ModelViewSet):
         except Exception:
             pass
 
-        return Response(CommentSerializer(comment).data, status=status.HTTP_201_CREATED)
+        return Response(CommentSerializer(comment, context={'request': request}).data, status=status.HTTP_201_CREATED)
 
 
 # Updated UnifiedFeedAPIView with the desired output format

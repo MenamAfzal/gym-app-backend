@@ -271,3 +271,77 @@ class SocialPostTestCase(TestCase):
         self.assertEqual(c_res.status_code, 201)
         post.refresh_from_db()
         self.assertEqual(post.comments_count, 1)
+
+    def test_media_viewset_socialpost_like_with_type_photo(self):
+        post = SocialPost.objects.create(
+            tenant=self.tenant,
+            user=self.client_1,
+            caption="Post liked via type=photo"
+        )
+        like_view = MediaViewSet.as_view({'post': 'like'})
+        req = self.factory.post(f'/api/v1/socialnetwork/media/{post.id}/like/?type=photo')
+        req.tenant = self.tenant
+        force_authenticate(req, user=self.client_2)
+        res = like_view(req, pk=str(post.id))
+        self.assertEqual(res.status_code, 201)
+        post.refresh_from_db()
+        self.assertEqual(post.likes_count, 1)
+
+        unlike_view = MediaViewSet.as_view({'post': 'unlike'})
+        req_unlike = self.factory.post(f'/api/v1/socialnetwork/media/{post.id}/unlike/?type=photo')
+        req_unlike.tenant = self.tenant
+        force_authenticate(req_unlike, user=self.client_2)
+        res_unlike = unlike_view(req_unlike, pk=str(post.id))
+        self.assertEqual(res_unlike.status_code, 200)
+        post.refresh_from_db()
+        self.assertEqual(post.likes_count, 0)
+
+    def test_media_viewset_socialpost_comment_and_comments_with_type_photo(self):
+        post = SocialPost.objects.create(
+            tenant=self.tenant,
+            user=self.client_1,
+            caption="Post commented via type=photo"
+        )
+        c_view = MediaViewSet.as_view({'post': 'comment'})
+        c_req = self.factory.post(
+            f'/api/v1/socialnetwork/media/{post.id}/comment/?type=photo',
+            {'content': 'Nice photo post'},
+            format='json'
+        )
+        c_req.tenant = self.tenant
+        force_authenticate(c_req, user=self.client_2)
+        c_res = c_view(c_req, pk=str(post.id))
+        self.assertEqual(c_res.status_code, 201)
+        post.refresh_from_db()
+        self.assertEqual(post.comments_count, 1)
+
+        list_view = MediaViewSet.as_view({'get': 'comments'})
+        l_req = self.factory.get(f'/api/v1/socialnetwork/media/{post.id}/comments/?type=photo')
+        l_req.tenant = self.tenant
+        force_authenticate(l_req, user=self.client_1)
+        l_res = list_view(l_req, pk=str(post.id))
+        self.assertEqual(l_res.status_code, 200)
+        self.assertEqual(len(l_res.data), 1)
+
+    def test_media_viewset_socialpost_with_fallback_types(self):
+        post = SocialPost.objects.create(
+            tenant=self.tenant,
+            user=self.client_1,
+            caption="Post with text and mixed types"
+        )
+        for t in ['text', 'mixed', 'video', '']:
+            like_view = MediaViewSet.as_view({'post': 'like'})
+            url = f'/api/v1/socialnetwork/media/{post.id}/like/'
+            if t:
+                url += f'?type={t}'
+            req = self.factory.post(url)
+            req.tenant = self.tenant
+            user = User.objects.create_user(
+                email=f"user_{t or 'none'}@fitgym.com",
+                password="password123",
+                role=UserRole.CLIENT,
+                tenant=self.tenant
+            )
+            force_authenticate(req, user=user)
+            res = like_view(req, pk=str(post.id))
+            self.assertEqual(res.status_code, 201)
