@@ -191,7 +191,12 @@ class WorkoutSerializer(serializers.ModelSerializer):
 
     def get_created_by(self, obj):
         if obj.created_by:
-            return f"{obj.created_by.profile.first_name} {obj.created_by.profile.last_name}"
+            try:
+                profile = obj.created_by.profile
+                name = f"{profile.first_name} {profile.last_name}".strip()
+                return name if name else obj.created_by.email
+            except Exception:
+                return getattr(obj.created_by, "email", str(obj.created_by))
         return None
 
     def get_exercises(self, obj):

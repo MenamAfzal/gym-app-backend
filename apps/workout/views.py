@@ -21,10 +21,11 @@ from config import settings
 from django.contrib.auth import get_user_model
 User = get_user_model()
 try:
-    from apps.scheduling.models import ClassSession as Session, Booking
+    from apps.scheduling.models import ClassSession as Session, Booking, Appointment
 except ImportError:
     Session = None
     Booking = None
+    Appointment = None
 try:
     from apps.scheduling.permissions import IsGymStaffOrOwner as IsStaffUser
 except ImportError:
@@ -85,7 +86,115 @@ RX_LEVEL_MAPPING = {
     "RX1": "Stability",
     "RX2": "Strength",
     "RX3": "Power",
+    "Stability": "Stability",
+    "Strength": "Strength",
+    "Power": "Power",
 }
+
+def clean_session_name(name):
+    if not name:
+        return ''
+    s = str(name)
+    s = re.sub(r'\b\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm|AM|PM)?\s*[-–—to/]+\s*\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm|AM|PM)?\b', ' ', s, flags=re.IGNORECASE)
+    s = re.sub(r'\b\d{1,2}(?::\d{2})?(?::\d{2})?\s*(?:am|pm|AM|PM)\b', ' ', s, flags=re.IGNORECASE)
+    s = re.sub(r'\b(?:[01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?\b', ' ', s)
+    s = re.sub(r'\b\d{4}-\d{2}-\d{2}\b', ' ', s)
+    s = re.sub(r'\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b', ' ', s)
+    s = re.sub(r'\b(?:mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b', ' ', s, flags=re.IGNORECASE)
+    s = re.sub(r'[\(\)\[\]\{\}]', ' ', s)
+    s = re.sub(r'[\s\-–—:|@~,.]+', ' ', s)
+    return s.strip()
+
+def strip_noise_words(s):
+    words = [w for w in s.lower().split() if w not in {'session', 'class', 'workout', 'training'}]
+    return ' '.join(words) if words else s.lower()
+
+def resolve_movement_level(level_val):
+    if not level_val:
+        return None
+    lvl_str = str(level_val).strip()
+    mapping = {
+        "rx1": "Stability",
+        "rx2": "Strength",
+        "rx3": "Power",
+        "stability": "Stability",
+        "strength": "Strength",
+        "power": "Power",
+    }
+    return mapping.get(lvl_str.lower(), lvl_str)
+
+def get_session_match_candidates(session_or_booking):
+    cands = []
+    if session_or_booking is None:
+        return cands
+
+    session = getattr(session_or_booking, 'session', session_or_booking)
+
+    if hasattr(session, 'template') and session.template:
+        if getattr(session.template, 'name', None):
+            cands.append(session.template.name)
+        if getattr(session.template, 'category', None):
+            cands.append(session.template.category)
+
+    if hasattr(session, 'recurrence_rule') and session.recurrence_rule and getattr(session.recurrence_rule, 'template', None):
+        if getattr(session.recurrence_rule.template, 'name', None):
+            cands.append(session.recurrence_rule.template.name)
+        if getattr(session.recurrence_rule.template, 'category', None):
+            cands.append(session.recurrence_rule.template.category)
+
+    if hasattr(session, 'name') and session.name:
+        cands.append(session.name)
+
+    if hasattr(session, 'room') and session.room and getattr(session.room, 'name', None):
+        cands.append(session.room.name)
+
+    credit_src = getattr(session_or_booking, 'credit_source', None) or getattr(session, 'credit_source', None)
+    if credit_src and hasattr(credit_src, 'package_type') and credit_src.package_type:
+        cands.append(credit_src.package_type.name)
+
+    if Appointment and (isinstance(session_or_booking, Appointment) or isinstance(session, Appointment)):
+        cands.extend(['Solo', 'Personal Training', 'Private'])
+
+    return cands
+
+def calculate_workout_session_score(workout, session_candidates):
+    w_clean = clean_session_name(workout.session_type or '').lower()
+    w_clean_core = strip_noise_words(w_clean)
+    w_base_clean = clean_session_name(workout.base_workout_name or '').lower()
+    w_name_clean = clean_session_name(workout.name or '').lower()
+
+    best_score = 0
+    for cand in session_candidates:
+        if not cand:
+            continue
+        c_raw = str(cand).strip().lower()
+        c_clean = clean_session_name(cand).lower()
+        c_clean_core = strip_noise_words(c_clean)
+
+        if not c_clean and not c_raw:
+            continue
+
+        if w_clean and (w_clean == c_clean or w_clean == c_raw):
+            score = 100
+        elif w_clean_core and c_clean_core and w_clean_core == c_clean_core:
+            score = 90
+        elif w_clean_core and c_clean_core and (w_clean_core in c_clean or c_clean_core in w_clean):
+            score = 80
+        elif (w_clean and c_raw and w_clean in c_raw) or (c_clean and w_clean and c_clean in w_clean):
+            score = 70
+        elif c_clean_core and ((w_base_clean and c_clean_core in w_base_clean) or (w_name_clean and c_clean_core in w_name_clean)):
+            score = 50
+        else:
+            score = 0
+
+        if score > best_score:
+            best_score = score
+
+    if best_score > 0 and workout.workout_exercises.exists():
+        best_score += 5
+
+    return best_score
+
 class ProductListCreateAPIView(APIView):
     """
     GET → List products (with filters)
@@ -115,16 +224,48 @@ class ProductListCreateAPIView(APIView):
 class WorkoutAPIView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
-        """List all workouts (staff: all, client: filtered by level)"""
         user = request.user
-        # Anyone who is superuser, django is_staff, or has a gym staff role gets all workouts
-        is_gym_staff = user.is_staff or user.is_superuser or user.role in ['gym_owner', 'gym_manager', 'trainer', 'front_desk']
+        is_gym_staff = user.is_staff or user.is_superuser or getattr(user, 'role', None) in ['gym_owner', 'gym_manager', 'trainer', 'front_desk']
+        session_type = request.query_params.get('session_type') or request.query_params.get('session_name') or request.query_params.get('class_type')
+        session_id = request.query_params.get('session_id') or request.query_params.get('class_id')
+        date_param = request.query_params.get('date')
+
         if is_gym_staff:
             workouts = Workout.objects.all()
         else:
             user_rx_level = getattr(user.profile, "level", None)
-            movement_level = RX_LEVEL_MAPPING.get(user_rx_level)
-            workouts = Workout.objects.filter(movement_level=movement_level)
+            movement_level = resolve_movement_level(user_rx_level)
+            if movement_level:
+                workouts = Workout.objects.filter(movement_level__iexact=movement_level)
+            else:
+                workouts = Workout.objects.none()
+
+        if date_param:
+            try:
+                target_date = datetime.strptime(date_param, "%Y-%m-%d").date()
+                workouts = workouts.filter(
+                    Q(start_date__isnull=True) | Q(start_date__lte=target_date)
+                ).filter(
+                    Q(end_date__isnull=True) | Q(end_date__gte=target_date)
+                )
+            except ValueError:
+                pass
+
+        if session_id:
+            session_obj = None
+            if Session:
+                session_obj = Session.objects.filter(id=session_id).select_related('template', 'recurrence_rule', 'recurrence_rule__template', 'room').first()
+            if not session_obj and Appointment:
+                session_obj = Appointment.objects.filter(id=session_id).first()
+            if session_obj:
+                cands = get_session_match_candidates(session_obj)
+                matched_ids = [w.id for w in workouts if calculate_workout_session_score(w, cands) > 0]
+                workouts = workouts.filter(id__in=matched_ids)
+        elif session_type:
+            cands = [session_type]
+            matched_ids = [w.id for w in workouts if calculate_workout_session_score(w, cands) > 0]
+            workouts = workouts.filter(id__in=matched_ids)
+
         serializer = WorkoutSerializer(workouts, many=True, context={"request": request})
         response_data = serializer.data
         favorited_ids = set(
@@ -164,7 +305,6 @@ class WorkoutDetailAPIView(APIView):
 class TodayWorkoutAPIView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
-        """Get today's prescribed workouts for each distinct booked session type (latest workout per type)"""
         user = request.user
         user_rx_level = getattr(user.profile, "level", None)
         date_param = request.query_params.get("date")
@@ -175,56 +315,105 @@ class TodayWorkoutAPIView(APIView):
                 return Response(
                     {"detail": "Invalid date format. Use YYYY-MM-DD."},
                     status=status.HTTP_400_BAD_REQUEST,
-            )
+                )
         else:
-            target_date = now().date()
-        movement_level = RX_LEVEL_MAPPING.get(user_rx_level)
+            target_date = timezone.localdate() if hasattr(timezone, "localdate") else now().date()
+        movement_level = resolve_movement_level(user_rx_level)
         if not movement_level:
             return Response(
                 {"detail": "Invalid movement level for user profile"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        bookings = (
-            Booking.objects.filter(
-                client=user,
-                session__start_at__date=target_date,
-                status__in=["booked", "attended", "confirmed"],
+        bookings = []
+        if Booking:
+            bookings = list(
+                Booking.objects.filter(
+                    client=user,
+                    session__start_at__date=target_date,
+                )
+                .exclude(status__in=["cancelled", "no_show", "waitlisted"])
+                .select_related(
+                    "session",
+                    "session__template",
+                    "session__recurrence_rule",
+                    "session__recurrence_rule__template",
+                    "session__room",
+                    "credit_source",
+                    "credit_source__package_type",
+                )
             )
-            .select_related("session", "session__template")
-        )
-        if not bookings.exists():
+        appointments = []
+        if Appointment:
+            appointments = list(
+                Appointment.objects.filter(
+                    client=user,
+                    start_at__date=target_date,
+                )
+                .exclude(status__in=["cancelled", "no_show"])
+                .select_related("room", "credit_source", "credit_source__package_type")
+            )
+        if not bookings and not appointments:
             return Response(
                 {"detail": "No session booked today"},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        session_types = set(booking.session.name for booking in bookings if booking.session)
+        available_workouts = list(
+            Workout.objects.filter(movement_level__iexact=movement_level)
+            .filter(Q(start_date__isnull=True) | Q(start_date__lte=target_date))
+            .filter(Q(end_date__isnull=True) | Q(end_date__gte=target_date))
+            .prefetch_related("workout_exercises")
+            .order_by("-created_at")
+        )
+        favorited_ids = set(
+            FavoriteWorkout.objects.filter(
+                user=user, is_favorited=True
+            ).values_list("workout_id", flat=True)
+        )
+        items_to_match = []
+        for b in bookings:
+            if b.session:
+                sess_name = b.session.name or (b.session.template.name if getattr(b.session, 'template', None) else "")
+                items_to_match.append({
+                    "session_id": b.session.id,
+                    "session_name": sess_name,
+                    "session_start_time": getattr(b.session, "start_time", getattr(b.session, "start_at", None)),
+                    "session_end_time": getattr(b.session, "end_time", getattr(b.session, "end_at", None)),
+                    "music_preference": getattr(b, "music_preference", "") or "",
+                    "match_source": b,
+                })
+        for appt in appointments:
+            items_to_match.append({
+                "session_id": appt.id,
+                "session_name": "Solo",
+                "session_start_time": appt.start_at,
+                "session_end_time": appt.end_at,
+                "music_preference": getattr(appt, "music_preference", "") or "",
+                "match_source": appt,
+            })
         workouts_data = []
-        for session_type in session_types:
-            workouts_qs = Workout.objects.filter(
-                movement_level=movement_level,
-                session_type=session_type,
-                start_date__lte=target_date,
-            ).filter(
-                Q(end_date__isnull=True) | Q(end_date__gte=target_date)
-            ).order_by('-created_at')
-            workout = None
-            for candidate in workouts_qs: 
-                if candidate.workout_exercises.exists():
-                    workout = candidate
-                    break
-            booking = next((b for b in bookings if b.session and b.session.name == session_type), None)
-            if workout and booking:
-                session = booking.session
+        matched_pair_keys = set()
+        for item in items_to_match:
+            cands = get_session_match_candidates(item["match_source"])
+            scored_workouts = []
+            for w in available_workouts:
+                s = calculate_workout_session_score(w, cands)
+                if s > 0:
+                    scored_workouts.append((s, w))
+            scored_workouts.sort(key=lambda x: (x[0], x[1].created_at), reverse=True)
+            if scored_workouts:
+                workout = scored_workouts[0][1]
+                pair_key = (workout.id, item["session_id"])
+                if pair_key in matched_pair_keys:
+                    continue
+                matched_pair_keys.add(pair_key)
                 serializer = WorkoutSerializer(workout, many=False, context={"request": request})
                 workout_data = serializer.data
-                workout_data["session_id"] = session.id
-                workout_data["Music Preference"] = booking.music_preference
-                workout_data["session_name"] = session.name
-                workout_data["session_start_time"] = session.start_time
-                workout_data["session_end_time"] = session.end_time
-                workout_data["is_favorited"] = FavoriteWorkout.objects.filter(
-                    user=user, workout=workout, is_favorited=True
-                ).exists()
+                workout_data["session_id"] = item["session_id"]
+                workout_data["Music Preference"] = item["music_preference"]
+                workout_data["session_name"] = item["session_name"]
+                workout_data["session_start_time"] = item["session_start_time"]
+                workout_data["session_end_time"] = item["session_end_time"]
+                workout_data["is_favorited"] = workout.id in favorited_ids
                 workouts_data.append(workout_data)
         if not workouts_data:
             return Response(
