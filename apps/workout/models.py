@@ -151,6 +151,13 @@ class Workout(TenantMixin):
         blank=True,
         related_name="created_workouts",
     )
+    assigned_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="assigned_workouts",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
@@ -325,3 +332,32 @@ class ExerciseSubstitutionLog(TenantMixin):
 
     def __str__(self):
         return f"{self.user} swapped in {self.workout} @ {self.created_at}"
+
+class WorkoutAssignment(TenantMixin):
+    workout = models.ForeignKey(Workout, on_delete=models.CASCADE, related_name="assignments")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="workout_assignments")
+    assigned_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="created_workout_assignments"
+    )
+    session = models.ForeignKey(
+        'scheduling.ClassSession',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="workout_assignments"
+    )
+    session_type = models.CharField(max_length=100, blank=True, null=True)
+    date = models.DateField(null=True, blank=True)
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.workout.name} -> {self.user.email}"

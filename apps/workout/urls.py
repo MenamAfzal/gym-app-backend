@@ -41,4 +41,8 @@ urlpatterns = [
     path('exercises/log-substitution/', LogExerciseSubstitutionView.as_view(), name='log-substitution'),
     path('exercises/substitutions/all/', StaffSubstitutionHistoryView.as_view(), name='staff-substitution-history'),
     path('exercises/substitutions/me/', UserSubstitutionHistoryView.as_view(), name='user-substitution-history'),
+    path("assignments/", views.WorkoutAssignmentListCreateAPIView.as_view(), name="workout-assignment-list-create"),
+    path("assignments/<int:pk>/", views.WorkoutAssignmentDetailAPIView.as_view(), name="workout-assignment-detail"),
+    path("assign/", views.AssignWorkoutAPIView.as_view(), name="workout-assign"),
+    path("staff/workouts/<int:pk>/assign/", views.AssignSpecificWorkoutAPIView.as_view(), name="workout-assign-specific"),
 ]

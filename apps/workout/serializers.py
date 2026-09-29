@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from rest_framework.response import Response
-from .models import Exercise, ExerciseSubstitutionLog, LikedExercise, Workout, WorkoutExercise, WorkoutTag, Equipment, WorkoutLog, WeightEntry, FavoriteWorkout, Product, WorkoutGroup
+from .models import Exercise, ExerciseSubstitutionLog, LikedExercise, Workout, WorkoutExercise, WorkoutTag, Equipment, WorkoutLog, WeightEntry, FavoriteWorkout, Product, WorkoutGroup, WorkoutAssignment
 from django.utils import timezone
 from django.db import transaction 
 from django.db.models import Q
@@ -8,6 +8,10 @@ from .models import MusicPlaylist, Song
 
 from django.contrib.auth import get_user_model
 User = get_user_model()
+try:
+    from apps.scheduling.models import ClassSession as Session
+except ImportError:
+    Session = None
 
 
 class ProductSerializer(serializers.ModelSerializer):
@@ -113,15 +117,26 @@ class WorkoutCreateWithExercisesSerializer(serializers.ModelSerializer):
     equipment = serializers.ListField(child=serializers.CharField(), required=False)
     exercises = serializers.JSONField(write_only=True)
     groups = serializers.JSONField(write_only=True, required=False)
+    assigned_user = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), required=False, allow_null=True)
 
     class Meta:
         model = Workout
         fields = [
             "id", "name", "description", "movement_level", "session_type",
             "workout_type", "video_url", "myzone_effort_range", "notes",
-            "tags", "equipment", "exercises", "groups"
+            "tags", "equipment", "exercises", "groups", "assigned_user",
+            "start_date", "end_date"
         ]
         read_only_fields = ["id"]
+
+    def to_internal_value(self, data):
+        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+        if 'assigned_user' not in data_copy:
+            for alias in ['assigned_to', 'client_id', 'user_id', 'client']:
+                if alias in data_copy and data_copy[alias]:
+                    data_copy['assigned_user'] = data_copy[alias]
+                    break
+        return super().to_internal_value(data_copy)
 
     def create(self, validated_data):
         tags_data = validated_data.pop("tags", [])
@@ -179,6 +194,9 @@ class WorkoutSerializer(serializers.ModelSerializer):
     exercises = serializers.SerializerMethodField()
     groups = serializers.SerializerMethodField()
     is_completed = serializers.SerializerMethodField()
+    assigned_user = serializers.PrimaryKeyRelatedField(read_only=True)
+    assigned_user_details = serializers.SerializerMethodField()
+    is_assigned = serializers.SerializerMethodField()
     
     class Meta:
         model = Workout
@@ -186,7 +204,8 @@ class WorkoutSerializer(serializers.ModelSerializer):
             "id", "name", "description", "movement_level", "session_type",
             "workout_type", "video_url", "myzone_effort_range", "notes",
             "tags", "equipment", "exercises", "groups", "created_by", "created_at",
-            "start_date", "end_date", "deck_config", "is_completed" 
+            "start_date", "end_date", "deck_config", "is_completed",
+            "assigned_user", "assigned_user_details", "is_assigned"
         ]
 
     def get_created_by(self, obj):
@@ -198,6 +217,35 @@ class WorkoutSerializer(serializers.ModelSerializer):
             except Exception:
                 return getattr(obj.created_by, "email", str(obj.created_by))
         return None
+
+    def get_assigned_user_details(self, obj):
+        if obj.assigned_user:
+            try:
+                profile = getattr(obj.assigned_user, 'profile', None)
+                first_name = profile.first_name if profile else ''
+                last_name = profile.last_name if profile else ''
+                name = f"{first_name} {last_name}".strip() or obj.assigned_user.email
+                return {
+                    "id": str(obj.assigned_user.id),
+                    "email": obj.assigned_user.email,
+                    "name": name,
+                }
+            except Exception:
+                return {
+                    "id": str(obj.assigned_user.id),
+                    "email": getattr(obj.assigned_user, 'email', ''),
+                }
+        return None
+
+    def get_is_assigned(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user or not request.user.is_authenticated:
+            return False
+        if obj.assigned_user_id == request.user.id:
+            return True
+        if hasattr(obj, 'assignments'):
+            return obj.assignments.filter(user=request.user).exists()
+        return False
 
     def get_exercises(self, obj):
         if obj.workout_type == 4:
@@ -397,15 +445,25 @@ class WorkoutUpdateSerializer(serializers.ModelSerializer):
     equipment = serializers.ListField(child=serializers.CharField(), required=False)
     exercises = serializers.JSONField(write_only=True, required=False)
     groups = serializers.JSONField(write_only=True, required=False)
+    assigned_user = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), required=False, allow_null=True)
 
     class Meta:
         model = Workout
         fields = [
             "id", "name", "description", "movement_level", "session_type",
             "workout_type", "video_url", "myzone_effort_range", "notes",
-            "tags", "equipment", "exercises", "groups", "start_date", "end_date"
+            "tags", "equipment", "exercises", "groups", "assigned_user", "start_date", "end_date"
         ]
         read_only_fields = ["id", "created_by", "created_at"]
+
+    def to_internal_value(self, data):
+        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+        if 'assigned_user' not in data_copy:
+            for alias in ['assigned_to', 'client_id', 'user_id', 'client']:
+                if alias in data_copy and data_copy[alias]:
+                    data_copy['assigned_user'] = data_copy[alias]
+                    break
+        return super().to_internal_value(data_copy)
 
     def update(self, instance, validated_data):
         tags_data = validated_data.pop("tags", None)
@@ -1263,3 +1321,85 @@ class ExerciseSubstitutionLogDetailSerializer(serializers.ModelSerializer):
             'reason', 
             'created_at'
         ]
+
+
+class WorkoutAssignmentSerializer(serializers.ModelSerializer):
+    workout_details = WorkoutSerializer(source="workout", read_only=True)
+    user_email = serializers.EmailField(source="user.email", read_only=True)
+    user_name = serializers.SerializerMethodField()
+    assigned_by_name = serializers.SerializerMethodField()
+    session_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = WorkoutAssignment
+        fields = [
+            "id", "workout", "workout_details", "user", "user_email", "user_name",
+            "assigned_by", "assigned_by_name", "session", "session_name",
+            "session_type", "date", "notes", "created_at", "updated_at"
+        ]
+        read_only_fields = ["id", "assigned_by", "created_at", "updated_at"]
+
+    def get_user_name(self, obj):
+        if obj.user:
+            profile = getattr(obj.user, 'profile', None)
+            if profile:
+                name = f"{profile.first_name} {profile.last_name}".strip()
+                if name:
+                    return name
+            return obj.user.email
+        return None
+
+    def get_assigned_by_name(self, obj):
+        if obj.assigned_by:
+            profile = getattr(obj.assigned_by, 'profile', None)
+            if profile:
+                name = f"{profile.first_name} {profile.last_name}".strip()
+                if name:
+                    return name
+            return obj.assigned_by.email
+        return None
+
+    def get_session_name(self, obj):
+        if obj.session:
+            return getattr(obj.session, 'name', '') or str(obj.session)
+        return obj.session_type or ''
+
+
+class WorkoutAssignCreateSerializer(serializers.Serializer):
+    workout_id = serializers.IntegerField(required=False)
+    workout = serializers.IntegerField(required=False)
+    user_id = serializers.CharField(required=False)
+    user = serializers.CharField(required=False)
+    client_id = serializers.CharField(required=False)
+    session_id = serializers.CharField(required=False, allow_null=True)
+    session_type = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    date = serializers.DateField(required=False, allow_null=True)
+    notes = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def validate(self, attrs):
+        w_id = attrs.get('workout_id') or attrs.get('workout')
+        if not w_id:
+            raise serializers.ValidationError({"workout_id": "This field is required."})
+        u_id = attrs.get('user_id') or attrs.get('user') or attrs.get('client_id')
+        if not u_id:
+            raise serializers.ValidationError({"user_id": "This field is required."})
+
+        try:
+            attrs['workout_obj'] = Workout.objects.get(id=w_id)
+        except Workout.DoesNotExist:
+            raise serializers.ValidationError({"workout_id": "Workout not found."})
+
+        try:
+            attrs['user_obj'] = User.objects.get(id=u_id)
+        except (User.DoesNotExist, ValueError):
+            raise serializers.ValidationError({"user_id": "User not found."})
+
+        sess_id = attrs.get('session_id')
+        attrs['session_obj'] = None
+        if sess_id and Session:
+            try:
+                attrs['session_obj'] = Session.objects.filter(id=sess_id).first()
+            except Exception:
+                pass
+
+        return attrs
