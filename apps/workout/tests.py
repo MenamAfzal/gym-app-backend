@@ -7,11 +7,12 @@ from apps.core.tenants.models import Tenant
 from apps.core.tenants.context import set_current_tenant
 from apps.users.models import User, UserRole, UserProfile
 from apps.scheduling.models import Location, Room, ClassTemplate, ClassSession, Booking, Appointment
-from apps.workout.models import Workout, Exercise, WorkoutExercise, WorkoutAssignment
+from apps.workout.models import Workout, Exercise, WorkoutExercise, WorkoutAssignment, WorkoutLog
 from apps.workout.views import (
     TodayWorkoutAPIView, WorkoutAPIView, clean_session_name, strip_noise_words,
     resolve_movement_level, calculate_workout_session_score,
-    WorkoutAssignmentListCreateAPIView, AssignWorkoutAPIView, WorkoutAssignmentDetailAPIView
+    WorkoutAssignmentListCreateAPIView, AssignWorkoutAPIView, WorkoutAssignmentDetailAPIView,
+    CreateWorkoutAPIView, LogCompletionAPIView
 )
 
 
@@ -541,3 +542,262 @@ class WorkoutMatchingTestCase(TestCase):
         returned_ids_a = [w["id"] for w in resp_a.data["data"]]
         self.assertIn(assigned_workout.id, returned_ids_a)
         self.assertIn(public_workout.id, returned_ids_a)
+
+    def test_workout_assignment_reversion_to_default_workout(self):
+        client_b = User.objects.create_user(
+            email="clientb_revert@testgym.com",
+            password="password123",
+            role=UserRole.CLIENT,
+            tenant=self.tenant
+        )
+        UserProfile.objects.create(user=client_b, level="RX1", first_name="Client", last_name="B")
+
+        template = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Solo - 09:00 AM",
+            duration_min=60
+        )
+        session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template,
+            room=self.room,
+            start_at=self.today_start,
+            end_at=self.today_end,
+            capacity=10
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            session=session,
+            status="confirmed"
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=client_b,
+            session=session,
+            status="confirmed"
+        )
+
+        workout_1 = Workout.objects.create(
+            tenant=self.tenant,
+            name="Standard Solo Workout",
+            session_type="Solo",
+            movement_level="Stability",
+            created_by=self.trainer
+        )
+        ex = Exercise.objects.create(tenant=self.tenant, name="Standard Push Up")
+        WorkoutExercise.objects.create(tenant=self.tenant, workout=workout_1, exercise=ex, order=1)
+
+        workout_2 = Workout.objects.create(
+            tenant=self.tenant,
+            name="Custom Solo Workout 2",
+            session_type="Solo",
+            movement_level="Stability",
+            created_by=self.trainer
+        )
+        ex2 = Exercise.objects.create(tenant=self.tenant, name="Custom Pull Up")
+        WorkoutExercise.objects.create(tenant=self.tenant, workout=workout_2, exercise=ex2, order=1)
+
+        assign_req = self.factory.post(
+            "/api/v1/workout/assign/",
+            {
+                "workout_id": workout_2.id,
+                "user_id": str(self.client_user.id),
+                "session_id": str(session.id)
+            },
+            format="json"
+        )
+        force_authenticate(assign_req, user=self.trainer)
+        assign_resp = AssignWorkoutAPIView.as_view()(assign_req)
+        self.assertEqual(assign_resp.status_code, 201)
+        assignment_id = assign_resp.data["data"]["id"]
+
+        today_req_a = self.factory.get("/api/v1/workout/today/")
+        force_authenticate(today_req_a, user=self.client_user)
+        today_resp_a = TodayWorkoutAPIView.as_view()(today_req_a)
+        self.assertEqual(today_resp_a.status_code, 200)
+        self.assertEqual(today_resp_a.data["data"][0]["id"], workout_2.id)
+
+        today_req_b = self.factory.get("/api/v1/workout/today/")
+        force_authenticate(today_req_b, user=client_b)
+        today_resp_b = TodayWorkoutAPIView.as_view()(today_req_b)
+        self.assertEqual(today_resp_b.status_code, 200)
+        self.assertEqual(today_resp_b.data["data"][0]["id"], workout_1.id)
+
+        del_req = self.factory.delete(f"/api/v1/workout/assignments/{assignment_id}/")
+        force_authenticate(del_req, user=self.trainer)
+        del_resp = WorkoutAssignmentDetailAPIView.as_view()(del_req, pk=assignment_id)
+        self.assertEqual(del_resp.status_code, 204)
+
+        today_req_a_after = self.factory.get("/api/v1/workout/today/")
+        force_authenticate(today_req_a_after, user=self.client_user)
+        today_resp_a_after = TodayWorkoutAPIView.as_view()(today_req_a_after)
+        self.assertEqual(today_resp_a_after.status_code, 200)
+        self.assertEqual(today_resp_a_after.data["data"][0]["id"], workout_1.id)
+
+        today_req_b_after = self.factory.get("/api/v1/workout/today/")
+        force_authenticate(today_req_b_after, user=client_b)
+        today_resp_b_after = TodayWorkoutAPIView.as_view()(today_req_b_after)
+        self.assertEqual(today_resp_b_after.status_code, 200)
+        self.assertEqual(today_resp_b_after.data["data"][0]["id"], workout_1.id)
+
+    def test_create_workout_with_session_and_user_scoping(self):
+        client_b = User.objects.create_user(
+            email="clientb_scoping@testgym.com",
+            password="password123",
+            role=UserRole.CLIENT,
+            tenant=self.tenant
+        )
+        UserProfile.objects.create(user=client_b, level="RX1", first_name="Client", last_name="B")
+
+        template = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Solo - 09:00 AM",
+            duration_min=60
+        )
+        session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template,
+            room=self.room,
+            start_at=self.today_start,
+            end_at=self.today_end,
+            capacity=10
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            session=session,
+            status="confirmed"
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=client_b,
+            session=session,
+            status="confirmed"
+        )
+
+        workout_default = Workout.objects.create(
+            tenant=self.tenant,
+            name="Default Solo Workout",
+            session_type="Solo",
+            movement_level="Stability",
+            created_by=self.trainer
+        )
+        ex = Exercise.objects.create(tenant=self.tenant, name="Default Ex")
+        WorkoutExercise.objects.create(tenant=self.tenant, workout=workout_default, exercise=ex, order=1)
+
+        ex2 = Exercise.objects.create(tenant=self.tenant, name="Ex Two")
+        create_req = self.factory.post(
+            "/api/v1/workout/create/",
+            {
+                "name": "Created For Client A",
+                "session_type": "Solo",
+                "movement_level": "Stability",
+                "user_id": str(self.client_user.id),
+                "session_id": session.id,
+                "workout_type": 1,
+                "exercises": [{"exercise_id": ex2.id, "sets": 3, "reps": 10}]
+            },
+            format="json"
+        )
+        force_authenticate(create_req, user=self.trainer)
+        create_resp = CreateWorkoutAPIView.as_view()(create_req)
+        self.assertEqual(create_resp.status_code, 201)
+        created_w_id = create_resp.data["id"]
+
+        w_created = Workout.objects.get(id=created_w_id)
+        self.assertTrue(w_created.is_custom)
+        self.assertEqual(w_created.assigned_user, self.client_user)
+        self.assertEqual(w_created.session, session)
+        self.assertTrue(WorkoutAssignment.objects.filter(workout=w_created, user=self.client_user).exists())
+
+        today_req_a = self.factory.get("/api/v1/workout/today/")
+        force_authenticate(today_req_a, user=self.client_user)
+        today_resp_a = TodayWorkoutAPIView.as_view()(today_req_a)
+        self.assertEqual(today_resp_a.status_code, 200)
+        self.assertEqual(today_resp_a.data["data"][0]["id"], created_w_id)
+
+        today_req_b = self.factory.get("/api/v1/workout/today/")
+        force_authenticate(today_req_b, user=client_b)
+        today_resp_b = TodayWorkoutAPIView.as_view()(today_req_b)
+        self.assertEqual(today_resp_b.status_code, 200)
+        self.assertEqual(today_resp_b.data["data"][0]["id"], workout_default.id)
+
+    def test_multi_session_completion_isolation(self):
+        template1 = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Solo - 09:00 AM",
+            duration_min=60
+        )
+        session1 = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template1,
+            room=self.room,
+            start_at=self.today_start,
+            end_at=self.today_end,
+            capacity=10
+        )
+        template2 = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Solo - 04:00 PM",
+            duration_min=60
+        )
+        session2 = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template2,
+            room=self.room,
+            start_at=self.today_start + timedelta(hours=7),
+            end_at=self.today_end + timedelta(hours=7),
+            capacity=10
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            session=session1,
+            status="confirmed"
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            session=session2,
+            status="confirmed"
+        )
+
+        workout = Workout.objects.create(
+            tenant=self.tenant,
+            name="Standard Solo Workout",
+            session_type="Solo",
+            movement_level="Stability",
+            created_by=self.trainer
+        )
+        ex = Exercise.objects.create(tenant=self.tenant, name="Exercise Solo")
+        WorkoutExercise.objects.create(tenant=self.tenant, workout=workout, exercise=ex, order=1)
+
+        log_req = self.factory.post(
+            "/api/v1/workout/log-completion/",
+            {
+                "workout_id": workout.id,
+                "session_id": session1.id
+            },
+            format="json"
+        )
+        force_authenticate(log_req, user=self.client_user)
+        log_resp = LogCompletionAPIView.as_view()(log_req)
+        self.assertEqual(log_resp.status_code, 201)
+
+        today_req = self.factory.get("/api/v1/workout/today/")
+        force_authenticate(today_req, user=self.client_user)
+        today_resp = TodayWorkoutAPIView.as_view()(today_req)
+        self.assertEqual(today_resp.status_code, 200)
+
+        data = today_resp.data["data"]
+        self.assertEqual(len(data), 2)
+        sess1_item = next(item for item in data if item["session_id"] == session1.id)
+        sess2_item = next(item for item in data if item["session_id"] == session2.id)
+
+        self.assertTrue(sess1_item["is_completed"])
+        self.assertFalse(sess2_item["is_completed"])

@@ -303,11 +303,10 @@ class WorkoutAPIView(APIView):
 class CreateWorkoutAPIView(APIView):
     permission_classes = [IsStaffUser]
     def post(self, request):
-        """Create a workout with exercises or as a mixed workout (staff only)"""
         serializer = WorkoutCreateWithExercisesSerializer(data=request.data)
         if serializer.is_valid():
             workout = serializer.save(created_by=request.user)
-            return Response(WorkoutSerializer(workout).data, status=status.HTTP_201_CREATED)
+            return Response(WorkoutSerializer(workout, context={"request": request}).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 class WorkoutDetailAPIView(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
@@ -427,24 +426,6 @@ class TodayWorkoutAPIView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        assigned_to_other_workout_ids = set(
-            WorkoutAssignment.objects.exclude(user=user).values_list('workout_id', flat=True)
-        )
-        assigned_to_this_user_workout_ids = set(
-            WorkoutAssignment.objects.filter(user=user).values_list('workout_id', flat=True)
-        )
-        disallowed_workout_ids = assigned_to_other_workout_ids - assigned_to_this_user_workout_ids
-
-        available_workouts = list(
-            Workout.objects.filter(movement_level__iexact=movement_level)
-            .filter(Q(assigned_user__isnull=True) | Q(assigned_user=user))
-            .exclude(id__in=disallowed_workout_ids)
-            .filter(Q(start_date__isnull=True) | Q(start_date__lte=target_date))
-            .filter(Q(end_date__isnull=True) | Q(end_date__gte=target_date))
-            .prefetch_related("workout_exercises")
-            .order_by("-created_at")
-        )
-
         items_to_match = []
         for b in bookings:
             if b.session:
@@ -467,6 +448,22 @@ class TodayWorkoutAPIView(APIView):
                 "match_source": appt,
             })
 
+        booked_session_ids = [it["session_id"] for it in items_to_match if it.get("session_id")]
+
+        custom_or_assigned_ids = set(
+            Workout.objects.filter(Q(is_custom=True) | Q(assigned_user__isnull=False)).values_list("id", flat=True)
+        ) | set(WorkoutAssignment.objects.values_list("workout_id", flat=True))
+
+        available_workouts = list(
+            Workout.objects.filter(movement_level__iexact=movement_level)
+            .exclude(id__in=custom_or_assigned_ids)
+            .filter(Q(start_date__isnull=True) | Q(start_date__lte=target_date))
+            .filter(Q(end_date__isnull=True) | Q(end_date__gte=target_date))
+            .filter(Q(session__isnull=True) | Q(session_id__in=booked_session_ids))
+            .prefetch_related("workout_exercises")
+            .order_by("-created_at")
+        )
+
         workouts_data = []
         matched_pair_keys = set()
         for item in items_to_match:
@@ -479,9 +476,9 @@ class TodayWorkoutAPIView(APIView):
                 score = 0
                 if a.session_id and str(a.session_id) == str(item["session_id"]):
                     score = 1000
-                elif a.session_type and any(clean_session_name(a.session_type).lower() == clean_session_name(c).lower() for c in cands if c):
+                elif not a.session_id and a.session_type and any(clean_session_name(a.session_type).lower() == clean_session_name(c).lower() for c in cands if c):
                     score = 900
-                else:
+                elif not a.session_id:
                     w_score = calculate_workout_session_score(a.workout, cands)
                     if w_score > 0:
                         score = 800 + w_score
@@ -491,9 +488,13 @@ class TodayWorkoutAPIView(APIView):
                     assigned_candidates.append((score, a.workout))
 
             for w in user_direct_assigned_workouts:
-                w_score = calculate_workout_session_score(w, cands)
-                score = 850 + w_score if w_score > 0 else 750
-                assigned_candidates.append((score, w))
+                if w.session_id:
+                    score = 1000 if str(w.session_id) == str(item["session_id"]) else 0
+                else:
+                    w_score = calculate_workout_session_score(w, cands)
+                    score = 850 + w_score if w_score > 0 else 750
+                if score > 0:
+                    assigned_candidates.append((score, w))
 
             assigned_candidates.sort(key=lambda x: (x[0], x[1].created_at), reverse=True)
 
@@ -503,7 +504,10 @@ class TodayWorkoutAPIView(APIView):
             else:
                 scored_workouts = []
                 for w in available_workouts:
-                    s = calculate_workout_session_score(w, cands)
+                    if w.session_id:
+                        s = 950 if str(w.session_id) == str(item["session_id"]) else 0
+                    else:
+                        s = calculate_workout_session_score(w, cands)
                     if s > 0:
                         scored_workouts.append((s, w))
                 scored_workouts.sort(key=lambda x: (x[0], x[1].created_at), reverse=True)
@@ -515,7 +519,7 @@ class TodayWorkoutAPIView(APIView):
                 if pair_key in matched_pair_keys:
                     continue
                 matched_pair_keys.add(pair_key)
-                serializer = WorkoutSerializer(workout, many=False, context={"request": request})
+                serializer = WorkoutSerializer(workout, many=False, context={"request": request, "session_id": item["session_id"]})
                 workout_data = serializer.data
                 workout_data["session_id"] = item["session_id"]
                 workout_data["Music Preference"] = item["music_preference"]
@@ -596,9 +600,10 @@ class WorkoutAssignmentListCreateAPIView(APIView):
                 'notes': notes,
             }
         )
+        workout.is_custom = True
         if workout.assigned_user is None:
             workout.assigned_user = target_user
-            workout.save(update_fields=['assigned_user'])
+        workout.save(update_fields=['assigned_user', 'is_custom'])
 
         output_serializer = WorkoutAssignmentSerializer(assignment, context={'request': request})
         return Response(
@@ -623,14 +628,7 @@ class WorkoutAssignmentDetailAPIView(APIView):
         is_gym_staff = request.user.is_staff or request.user.is_superuser or getattr(request.user, 'role', None) in ['gym_owner', 'gym_manager', 'trainer', 'front_desk']
         if not is_gym_staff:
             return Response({"detail": "Only staff members can delete workout assignments."}, status=status.HTTP_403_FORBIDDEN)
-        workout = assignment.workout
-        user = assignment.user
         assignment.delete()
-        if workout and workout.assigned_user == user:
-            remaining = WorkoutAssignment.objects.filter(workout=workout, user=user).exists()
-            if not remaining:
-                workout.assigned_user = None
-                workout.save(update_fields=['assigned_user'])
         return Response({"detail": "Workout assignment deleted successfully"}, status=status.HTTP_204_NO_CONTENT)
 
 
@@ -666,9 +664,10 @@ class AssignSpecificWorkoutAPIView(APIView):
                 'notes': notes,
             }
         )
+        workout.is_custom = True
         if workout.assigned_user is None:
             workout.assigned_user = target_user
-            workout.save(update_fields=['assigned_user'])
+        workout.save(update_fields=['assigned_user', 'is_custom'])
 
         output_serializer = WorkoutAssignmentSerializer(assignment, context={'request': request})
         return Response(
@@ -703,14 +702,12 @@ class LogWeightAPIView(APIView):
 class LogCompletionAPIView(APIView):
     permission_classes = [IsAuthenticated]
     def post(self, request):
-        """Mark a workout as completed for this user (per-user completion)"""
         serializer = WorkoutLogSerializer(data=request.data)
         if serializer.is_valid():
             workout_log = serializer.save(user=request.user)
             workout_log.is_completed = True
             workout_log.save(update_fields=["is_completed"])
 
-            # Emit Rewards Event
             try:
                 from apps.rewards.events import RewardEvent
                 from apps.rewards.services import RewardEngineService

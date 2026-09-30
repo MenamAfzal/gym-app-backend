@@ -118,6 +118,12 @@ class WorkoutCreateWithExercisesSerializer(serializers.ModelSerializer):
     exercises = serializers.JSONField(write_only=True)
     groups = serializers.JSONField(write_only=True, required=False)
     assigned_user = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), required=False, allow_null=True)
+    session = serializers.PrimaryKeyRelatedField(
+        queryset=getattr(Session, "all_objects", getattr(Session, "objects", None)).all() if Session else [],
+        required=False,
+        allow_null=True
+    )
+    is_custom = serializers.BooleanField(required=False, default=False)
 
     class Meta:
         model = Workout
@@ -125,7 +131,7 @@ class WorkoutCreateWithExercisesSerializer(serializers.ModelSerializer):
             "id", "name", "description", "movement_level", "session_type",
             "workout_type", "video_url", "myzone_effort_range", "notes",
             "tags", "equipment", "exercises", "groups", "assigned_user",
-            "start_date", "end_date"
+            "start_date", "end_date", "session", "is_custom"
         ]
         read_only_fields = ["id"]
 
@@ -136,15 +142,36 @@ class WorkoutCreateWithExercisesSerializer(serializers.ModelSerializer):
                 if alias in data_copy and data_copy[alias]:
                     data_copy['assigned_user'] = data_copy[alias]
                     break
+        if 'session' not in data_copy:
+            for alias in ['session_id', 'class_session', 'class_session_id']:
+                if alias in data_copy and data_copy[alias]:
+                    data_copy['session'] = data_copy[alias]
+                    break
+        if data_copy.get('assigned_user'):
+            data_copy['is_custom'] = True
         return super().to_internal_value(data_copy)
 
     def create(self, validated_data):
+        if validated_data.get('assigned_user'):
+            validated_data['is_custom'] = True
+
         tags_data = validated_data.pop("tags", [])
         equipment_data = validated_data.pop("equipment", [])
         exercises_data = validated_data.pop("exercises", [])
         groups_data = validated_data.pop("groups", [])
          
         workout = Workout.objects.create(**validated_data)
+
+        if workout.assigned_user:
+            WorkoutAssignment.objects.get_or_create(
+                workout=workout,
+                user=workout.assigned_user,
+                session=workout.session,
+                defaults={
+                    'assigned_by': validated_data.get('created_by') or getattr(workout, 'created_by', None),
+                    'session_type': workout.session_type,
+                }
+            )
 
         group_objects = {}
         for group_data in groups_data:
@@ -197,6 +224,9 @@ class WorkoutSerializer(serializers.ModelSerializer):
     assigned_user = serializers.PrimaryKeyRelatedField(read_only=True)
     assigned_user_details = serializers.SerializerMethodField()
     is_assigned = serializers.SerializerMethodField()
+    session = serializers.PrimaryKeyRelatedField(read_only=True)
+    session_id = serializers.IntegerField(source="session.id", read_only=True)
+    is_custom = serializers.BooleanField(read_only=True)
     
     class Meta:
         model = Workout
@@ -205,7 +235,8 @@ class WorkoutSerializer(serializers.ModelSerializer):
             "workout_type", "video_url", "myzone_effort_range", "notes",
             "tags", "equipment", "exercises", "groups", "created_by", "created_at",
             "start_date", "end_date", "deck_config", "is_completed",
-            "assigned_user", "assigned_user_details", "is_assigned"
+            "assigned_user", "assigned_user_details", "is_assigned",
+            "session", "session_id", "is_custom"
         ]
 
     def get_created_by(self, obj):
@@ -258,11 +289,15 @@ class WorkoutSerializer(serializers.ModelSerializer):
         if not request or not request.user.is_authenticated:
             return False
 
-        return WorkoutLog.objects.filter(
+        session_id = self.context.get("session_id")
+        logs = WorkoutLog.objects.filter(
             user=request.user,
             workout=obj,
             is_completed=True
-        ).exists()
+        )
+        if session_id:
+            return logs.filter(session_id=session_id).exists()
+        return logs.exists()
 
     def get_groups(self, obj):
         if obj.workout_type == 4:
@@ -277,10 +312,20 @@ class WorkoutSerializer(serializers.ModelSerializer):
 
 
 class WorkoutLogSerializer(serializers.ModelSerializer):
+    session_id = serializers.IntegerField(source="session.id", read_only=True)
+
     class Meta:
         model = WorkoutLog
-        fields = ["id", "user", "workout", "session", "completed_at", "duration_seconds"]
+        fields = ["id", "user", "workout", "session", "session_id", "completed_at", "duration_seconds", "is_completed"]
         read_only_fields = ["user", "completed_at"]
+
+    def to_internal_value(self, data):
+        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+        if 'workout' not in data_copy and 'workout_id' in data_copy:
+            data_copy['workout'] = data_copy['workout_id']
+        if 'session' not in data_copy and 'session_id' in data_copy:
+            data_copy['session'] = data_copy['session_id']
+        return super().to_internal_value(data_copy)
 
 
 class WeightEntrySerializer(serializers.ModelSerializer):
@@ -446,13 +491,20 @@ class WorkoutUpdateSerializer(serializers.ModelSerializer):
     exercises = serializers.JSONField(write_only=True, required=False)
     groups = serializers.JSONField(write_only=True, required=False)
     assigned_user = serializers.PrimaryKeyRelatedField(queryset=User.objects.all(), required=False, allow_null=True)
+    session = serializers.PrimaryKeyRelatedField(
+        queryset=getattr(Session, "all_objects", getattr(Session, "objects", None)).all() if Session else [],
+        required=False,
+        allow_null=True
+    )
+    is_custom = serializers.BooleanField(required=False)
 
     class Meta:
         model = Workout
         fields = [
             "id", "name", "description", "movement_level", "session_type",
             "workout_type", "video_url", "myzone_effort_range", "notes",
-            "tags", "equipment", "exercises", "groups", "assigned_user", "start_date", "end_date"
+            "tags", "equipment", "exercises", "groups", "assigned_user", "start_date", "end_date",
+            "session", "is_custom"
         ]
         read_only_fields = ["id", "created_by", "created_at"]
 
@@ -463,9 +515,18 @@ class WorkoutUpdateSerializer(serializers.ModelSerializer):
                 if alias in data_copy and data_copy[alias]:
                     data_copy['assigned_user'] = data_copy[alias]
                     break
+        if 'session' not in data_copy:
+            for alias in ['session_id', 'class_session', 'class_session_id']:
+                if alias in data_copy and data_copy[alias]:
+                    data_copy['session'] = data_copy[alias]
+                    break
+        if data_copy.get('assigned_user'):
+            data_copy['is_custom'] = True
         return super().to_internal_value(data_copy)
 
     def update(self, instance, validated_data):
+        if validated_data.get('assigned_user'):
+            validated_data['is_custom'] = True
         tags_data = validated_data.pop("tags", None)
         equipment_data = validated_data.pop("equipment", None)
         exercises_data = validated_data.pop("exercises", None)
@@ -474,6 +535,17 @@ class WorkoutUpdateSerializer(serializers.ModelSerializer):
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
+
+        if instance.assigned_user:
+            WorkoutAssignment.objects.get_or_create(
+                workout=instance,
+                user=instance.assigned_user,
+                session=instance.session,
+                defaults={
+                    'assigned_by': getattr(instance, 'created_by', None),
+                    'session_type': instance.session_type,
+                }
+            )
 
         if tags_data is not None:
             tag_objs = [WorkoutTag.objects.get_or_create(name=t)[0] for t in tags_data]

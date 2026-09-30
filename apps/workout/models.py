@@ -161,6 +161,19 @@ class Workout(TenantMixin):
     created_at = models.DateTimeField(auto_now_add=True)
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
+    session = models.ForeignKey(
+        Session,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="session_workouts",
+    )
+    is_custom = models.BooleanField(default=False)
+
+    def save(self, *args, **kwargs):
+        if self.assigned_user:
+            self.is_custom = True
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.name    
@@ -358,6 +371,20 @@ class WorkoutAssignment(TenantMixin):
 
     class Meta:
         ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        if self.workout_id and not getattr(self.workout, "is_custom", False):
+            Workout.objects.filter(id=self.workout_id).update(is_custom=True)
+
+    def delete(self, *args, **kwargs):
+        workout_id = self.workout_id
+        user_id = self.user_id
+        super().delete(*args, **kwargs)
+        if workout_id:
+            Workout.objects.filter(id=workout_id).update(is_custom=True)
+            if user_id and not WorkoutAssignment.objects.filter(workout_id=workout_id, user_id=user_id).exists():
+                Workout.objects.filter(id=workout_id, assigned_user_id=user_id).update(assigned_user=None)
 
     def __str__(self):
         return f"{self.workout.name} -> {self.user.email}"
