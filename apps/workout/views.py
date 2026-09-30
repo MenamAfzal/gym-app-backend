@@ -450,16 +450,21 @@ class TodayWorkoutAPIView(APIView):
 
         booked_session_ids = [it["session_id"] for it in items_to_match if it.get("session_id")]
 
+        other_user_assigned_ids = set(
+            WorkoutAssignment.objects.exclude(user=user).values_list("workout_id", flat=True)
+        )
         custom_or_assigned_ids = set(
-            Workout.objects.filter(Q(is_custom=True) | Q(assigned_user__isnull=False)).values_list("id", flat=True)
-        ) | set(WorkoutAssignment.objects.values_list("workout_id", flat=True))
+            Workout.objects.filter(
+                Q(is_custom=True) |
+                Q(assigned_user__isnull=False)
+            ).exclude(assigned_user=user).values_list("id", flat=True)
+        ) | (other_user_assigned_ids & set(Workout.objects.filter(is_custom=True).values_list("id", flat=True)))
 
         available_workouts = list(
             Workout.objects.filter(movement_level__iexact=movement_level)
             .exclude(id__in=custom_or_assigned_ids)
             .filter(Q(start_date__isnull=True) | Q(start_date__lte=target_date))
             .filter(Q(end_date__isnull=True) | Q(end_date__gte=target_date))
-            .filter(Q(session__isnull=True) | Q(session_id__in=booked_session_ids))
             .prefetch_related("workout_exercises")
             .order_by("-created_at")
         )
@@ -484,15 +489,24 @@ class TodayWorkoutAPIView(APIView):
                         score = 800 + w_score
                     elif a.date == target_date:
                         score = 700
+                elif a.session_id and str(a.session_id) != str(item["session_id"]):
+                    w_score = calculate_workout_session_score(a.workout, cands)
+                    if w_score > 0 and not available_workouts:
+                        score = 400 + w_score
                 if score > 0:
                     assigned_candidates.append((score, a.workout))
 
             for w in user_direct_assigned_workouts:
-                if w.session_id:
-                    score = 1000 if str(w.session_id) == str(item["session_id"]) else 0
-                else:
+                if w.session_id and str(w.session_id) == str(item["session_id"]):
+                    score = 1000
+                elif not w.session_id:
                     w_score = calculate_workout_session_score(w, cands)
                     score = 850 + w_score if w_score > 0 else 750
+                elif not available_workouts:
+                    w_score = calculate_workout_session_score(w, cands)
+                    score = 450 + w_score if w_score > 0 else 0
+                else:
+                    score = 0
                 if score > 0:
                     assigned_candidates.append((score, w))
 
@@ -504,8 +518,11 @@ class TodayWorkoutAPIView(APIView):
             else:
                 scored_workouts = []
                 for w in available_workouts:
-                    if w.session_id:
-                        s = 950 if str(w.session_id) == str(item["session_id"]) else 0
+                    if w.session_id and str(w.session_id) == str(item["session_id"]):
+                        s = 950
+                    elif not w.session_id:
+                        w_score = calculate_workout_session_score(w, cands)
+                        s = 500 + w_score if w_score > 0 else 0
                     else:
                         s = calculate_workout_session_score(w, cands)
                     if s > 0:

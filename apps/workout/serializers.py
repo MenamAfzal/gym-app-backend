@@ -225,7 +225,7 @@ class WorkoutSerializer(serializers.ModelSerializer):
     assigned_user_details = serializers.SerializerMethodField()
     is_assigned = serializers.SerializerMethodField()
     session = serializers.PrimaryKeyRelatedField(read_only=True)
-    session_id = serializers.IntegerField(source="session.id", read_only=True)
+    session_id = serializers.CharField(source="session.id", read_only=True)
     is_custom = serializers.BooleanField(read_only=True)
     
     class Meta:

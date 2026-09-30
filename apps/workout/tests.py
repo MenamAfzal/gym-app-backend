@@ -801,3 +801,72 @@ class WorkoutMatchingTestCase(TestCase):
 
         self.assertTrue(sess1_item["is_completed"])
         self.assertFalse(sess2_item["is_completed"])
+
+    def test_today_workout_multiple_sessions_same_name(self):
+        tmpl = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Solo",
+            duration_min=60
+        )
+        s1 = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=tmpl,
+            room=self.room,
+            start_at=self.today_start,
+            end_at=self.today_end,
+            capacity=10
+        )
+        s2 = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=tmpl,
+            room=self.room,
+            start_at=self.today_start + timedelta(hours=5),
+            end_at=self.today_end + timedelta(hours=5),
+            capacity=10
+        )
+        Booking.objects.create(tenant=self.tenant, client=self.client_user, session=s1, status="booked")
+        Booking.objects.create(tenant=self.tenant, client=self.client_user, session=s2, status="booked")
+
+        w1 = Workout.objects.create(
+            tenant=self.tenant,
+            name="Standard Solo Workout",
+            session_type="Solo",
+            movement_level="Stability",
+            created_by=self.trainer,
+            session=s1
+        )
+        ex = Exercise.objects.create(tenant=self.tenant, name="Exercise Multi")
+        WorkoutExercise.objects.create(tenant=self.tenant, workout=w1, exercise=ex, order=1)
+
+        req = self.factory.get("/api/v1/workout/today/")
+        force_authenticate(req, user=self.client_user)
+        res = TodayWorkoutAPIView.as_view()(req)
+        self.assertEqual(res.status_code, 200)
+        data = res.data["data"]
+        self.assertEqual(len(data), 2)
+        sess_ids = {d["session_id"] for d in data}
+        self.assertIn(s1.id, sess_ids)
+        self.assertIn(s2.id, sess_ids)
+        self.assertEqual(data[0]["id"], w1.id)
+        self.assertEqual(data[1]["id"], w1.id)
+
+        w2 = Workout.objects.create(
+            tenant=self.tenant,
+            name="Afternoon Solo Workout",
+            session_type="Solo",
+            movement_level="Stability",
+            created_by=self.trainer,
+            session=s2
+        )
+        WorkoutExercise.objects.create(tenant=self.tenant, workout=w2, exercise=ex, order=1)
+
+        res2 = TodayWorkoutAPIView.as_view()(req)
+        self.assertEqual(res2.status_code, 200)
+        data2 = res2.data["data"]
+        self.assertEqual(len(data2), 2)
+        item1 = next(d for d in data2 if d["session_id"] == s1.id)
+        item2 = next(d for d in data2 if d["session_id"] == s2.id)
+        self.assertEqual(item1["id"], w1.id)
+        self.assertEqual(item2["id"], w2.id)
+
