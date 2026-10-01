@@ -242,6 +242,72 @@ class WorkoutMatchingTestCase(TestCase):
 
         self.assertEqual(response.status_code, 404)
 
+    def test_today_workout_sessions_sorted_by_time(self):
+        template1 = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Session Early - 08:00 AM",
+            duration_min=60
+        )
+        template2 = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Session Late - 10:00 AM",
+            duration_min=60
+        )
+        session_late = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template2,
+            room=self.room,
+            start_at=self.today_start + timedelta(hours=2),
+            end_at=self.today_end + timedelta(hours=2),
+            capacity=10
+        )
+        session_early = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template1,
+            room=self.room,
+            start_at=self.today_start,
+            end_at=self.today_end,
+            capacity=10
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            session=session_late,
+            status="confirmed"
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            session=session_early,
+            status="confirmed"
+        )
+        Workout.objects.create(
+            tenant=self.tenant,
+            name="Early Workout",
+            session_type="Session Early",
+            movement_level="Stability",
+            created_by=self.trainer
+        )
+        Workout.objects.create(
+            tenant=self.tenant,
+            name="Late Workout",
+            session_type="Session Late",
+            movement_level="Stability",
+            created_by=self.trainer
+        )
+
+        request = self.factory.get("/api/v1/workout/today/")
+        force_authenticate(request, user=self.client_user)
+        view = TodayWorkoutAPIView.as_view()
+        response = view(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["data"]), 2)
+        self.assertEqual(str(response.data["data"][0]["session_id"]), str(session_early.id))
+        self.assertEqual(str(response.data["data"][1]["session_id"]), str(session_late.id))
+
     def test_today_workout_checked_in_status_matched(self):
         template = ClassTemplate.objects.create(
             tenant=self.tenant,

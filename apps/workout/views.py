@@ -355,6 +355,7 @@ class TodayWorkoutAPIView(APIView):
                     "credit_source",
                     "credit_source__package_type",
                 )
+                .order_by("session__start_at", "created_at")
             )
 
         user_assignments = list(
@@ -422,6 +423,16 @@ class TodayWorkoutAPIView(APIView):
                     "music_preference": getattr(b, "music_preference", "") or "",
                     "match_source": b,
                 })
+
+        items_to_match.sort(
+            key=lambda item: (
+                item.get("session_start_time").isoformat()
+                if hasattr(item.get("session_start_time"), "isoformat")
+                else str(item.get("session_start_time") or ""),
+                str(item.get("session_name") or ""),
+                str(item.get("session_id") or "")
+            )
+        )
 
         booked_session_ids = [it["session_id"] for it in items_to_match if it.get("session_id")]
 
@@ -520,6 +531,16 @@ class TodayWorkoutAPIView(APIView):
                 workout_data["session_end_time"] = item["session_end_time"]
                 workout_data["is_favorited"] = workout.id in favorited_ids
                 workouts_data.append(workout_data)
+
+        workouts_data.sort(
+            key=lambda w: (
+                w.get("session_start_time").isoformat()
+                if hasattr(w.get("session_start_time"), "isoformat")
+                else str(w.get("session_start_time") or ""),
+                str(w.get("session_name") or ""),
+                str(w.get("session_id") or "")
+            )
+        )
 
         if not workouts_data:
             return Response(
