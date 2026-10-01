@@ -21,11 +21,10 @@ from config import settings
 from django.contrib.auth import get_user_model
 User = get_user_model()
 try:
-    from apps.scheduling.models import ClassSession as Session, Booking, Appointment
+    from apps.scheduling.models import ClassSession as Session, Booking
 except ImportError:
     Session = None
     Booking = None
-    Appointment = None
 try:
     from apps.scheduling.permissions import IsGymStaffOrOwner as IsStaffUser
 except ImportError:
@@ -153,9 +152,6 @@ def get_session_match_candidates(session_or_booking):
     if credit_src and hasattr(credit_src, 'package_type') and credit_src.package_type:
         cands.append(credit_src.package_type.name)
 
-    if Appointment and (isinstance(session_or_booking, Appointment) or isinstance(session, Appointment)):
-        cands.extend(['Solo', 'Personal Training', 'Private'])
-
     return cands
 
 def calculate_workout_session_score(workout, session_candidates):
@@ -276,8 +272,6 @@ class WorkoutAPIView(APIView):
             session_obj = None
             if Session:
                 session_obj = Session.objects.filter(id=session_id).select_related('template', 'recurrence_rule', 'recurrence_rule__template', 'room').first()
-            if not session_obj and Appointment:
-                session_obj = Appointment.objects.filter(id=session_id).first()
             if session_obj:
                 cands = get_session_match_candidates(session_obj)
                 matched_ids = [w.id for w in workouts if calculate_workout_session_score(w, cands) > 0]
@@ -362,16 +356,6 @@ class TodayWorkoutAPIView(APIView):
                     "credit_source__package_type",
                 )
             )
-        appointments = []
-        if Appointment:
-            appointments = list(
-                Appointment.objects.filter(
-                    client=user,
-                    start_at__date=target_date,
-                )
-                .exclude(status__in=["cancelled", "no_show"])
-                .select_related("room", "credit_source", "credit_source__package_type")
-            )
 
         user_assignments = list(
             WorkoutAssignment.objects.filter(user=user)
@@ -394,7 +378,7 @@ class TodayWorkoutAPIView(APIView):
             ).values_list("workout_id", flat=True)
         )
 
-        if not bookings and not appointments:
+        if not bookings:
             assigned_today = []
             for a in user_assignments:
                 if a.date == target_date or (a.date is None and a.workout):
@@ -438,15 +422,6 @@ class TodayWorkoutAPIView(APIView):
                     "music_preference": getattr(b, "music_preference", "") or "",
                     "match_source": b,
                 })
-        for appt in appointments:
-            items_to_match.append({
-                "session_id": appt.id,
-                "session_name": "Solo",
-                "session_start_time": appt.start_at,
-                "session_end_time": appt.end_at,
-                "music_preference": getattr(appt, "music_preference", "") or "",
-                "match_source": appt,
-            })
 
         booked_session_ids = [it["session_id"] for it in items_to_match if it.get("session_id")]
 

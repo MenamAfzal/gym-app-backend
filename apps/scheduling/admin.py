@@ -3,7 +3,8 @@ from .models import (
     Location, Room, SpotType, RoomLayout, Spot, StaffLocation, StaffAvailability, ClassTemplate,
     RecurrenceRule, ClassSession, Booking, Appointment, Waitlist,
     SubstituteRequest, PackageType, Package, Payment, CancellationPolicy,
-    StaffClientAssignment, TenantBookingSettings
+    StaffClientAssignment, TenantBookingSettings,
+    Event, EventSession, EventEnrollment
 )
 
 class TenantAdminMixin:
@@ -102,9 +103,66 @@ class BookingAdmin(TenantAdminMixin, admin.ModelAdmin):
 
 @admin.register(Appointment)
 class AppointmentAdmin(TenantAdminMixin, admin.ModelAdmin):
-    list_display = ('client', 'provider', 'start_at', 'end_at', 'status', 'tenant')
+    list_display = ('client', 'provider', 'location', 'room', 'start_at', 'end_at', 'status', 'credits_used', 'credit_source', 'tenant')
+    list_filter = ('status', 'location', 'start_at', 'tenant')
+    search_fields = ('client__email', 'client__first_name', 'client__last_name', 'provider__email', 'provider__first_name', 'provider__last_name', 'location__name', 'room__name')
+    raw_id_fields = ('client', 'provider', 'location', 'room', 'credit_source')
+    date_hierarchy = 'start_at'
+    ordering = ('-start_at',)
+    readonly_fields = ('created_at', 'updated_at')
+
+class EventSessionInline(admin.TabularInline):
+    model = EventSession
+    extra = 0
+    fields = ('session_number', 'title', 'start_at', 'end_at', 'room', 'instructor', 'status')
+    raw_id_fields = ('room', 'instructor')
+
+class EventEnrollmentInline(admin.TabularInline):
+    model = EventEnrollment
+    extra = 0
+    fields = ('client', 'status', 'pricing_type', 'credit_source', 'credits_deducted', 'checked_in_at')
+    raw_id_fields = ('client', 'credit_source')
+    readonly_fields = ('checked_in_at',)
+
+@admin.register(Event)
+class EventAdmin(TenantAdminMixin, admin.ModelAdmin):
+    list_display = (
+        'title', 'category', 'event_type', 'enrollment_type', 'location', 'room',
+        'primary_instructor', 'start_at', 'end_at', 'capacity', 'waitlist_capacity',
+        'is_free', 'credits_required', 'status', 'is_deleted', 'tenant'
+    )
+    list_filter = ('category', 'event_type', 'enrollment_type', 'status', 'is_free', 'is_deleted', 'location', 'start_at', 'tenant')
+    search_fields = (
+        'title', 'description', 'location__name', 'room__name',
+        'primary_instructor__email', 'primary_instructor__first_name', 'primary_instructor__last_name'
+    )
+    raw_id_fields = ('location', 'room', 'primary_instructor')
+    filter_horizontal = ('assistant_instructors',)
+    date_hierarchy = 'start_at'
+    ordering = ('-start_at',)
+    readonly_fields = ('created_at', 'updated_at', 'deleted_at')
+    inlines = [EventSessionInline, EventEnrollmentInline]
+
+@admin.register(EventSession)
+class EventSessionAdmin(TenantAdminMixin, admin.ModelAdmin):
+    list_display = ('event', 'session_number', 'title', 'start_at', 'end_at', 'room', 'instructor', 'status', 'tenant')
     list_filter = ('status', 'start_at', 'tenant')
-    search_fields = ('client__email', 'provider__email')
+    search_fields = ('title', 'event__title', 'instructor__email', 'instructor__first_name', 'instructor__last_name')
+    raw_id_fields = ('event', 'room', 'instructor')
+    date_hierarchy = 'start_at'
+    ordering = ('-start_at',)
+    readonly_fields = ('created_at', 'updated_at')
+
+@admin.register(EventEnrollment)
+class EventEnrollmentAdmin(TenantAdminMixin, admin.ModelAdmin):
+    list_display = ('event', 'client', 'status', 'pricing_type', 'credit_source', 'credits_deducted', 'checked_in_at', 'cancelled_at', 'tenant')
+    list_filter = ('status', 'pricing_type', 'tenant')
+    search_fields = ('event__title', 'client__email', 'client__first_name', 'client__last_name')
+    raw_id_fields = ('event', 'client', 'credit_source')
+    filter_horizontal = ('attended_sessions',)
+    date_hierarchy = 'created_at'
+    ordering = ('-created_at',)
+    readonly_fields = ('created_at', 'updated_at', 'checked_in_at', 'cancelled_at')
 
 @admin.register(Waitlist)
 class WaitlistAdmin(TenantAdminMixin, admin.ModelAdmin):

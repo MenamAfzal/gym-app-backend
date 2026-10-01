@@ -6,7 +6,7 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 from apps.core.tenants.models import Tenant
 from apps.core.tenants.context import set_current_tenant
 from apps.users.models import User, UserRole, UserProfile
-from apps.scheduling.models import Location, Room, ClassTemplate, ClassSession, Booking, Appointment
+from apps.scheduling.models import Location, Room, ClassTemplate, ClassSession, Booking
 from apps.workout.models import Workout, Exercise, WorkoutExercise, WorkoutAssignment, WorkoutLog
 from apps.workout.views import (
     TodayWorkoutAPIView, WorkoutAPIView, clean_session_name, strip_noise_words,
@@ -215,8 +215,9 @@ class WorkoutMatchingTestCase(TestCase):
         self.assertEqual(len(response.data["data"]), 1)
         self.assertEqual(response.data["data"][0]["id"], workout.id)
 
-    def test_today_workout_appointment_solo_matching(self):
-        appointment = Appointment.objects.create(
+    def test_today_workout_does_not_match_appointments(self):
+        from apps.scheduling.models import Appointment
+        Appointment.objects.create(
             tenant=self.tenant,
             client=self.client_user,
             provider=self.trainer,
@@ -226,7 +227,7 @@ class WorkoutMatchingTestCase(TestCase):
             end_at=self.today_end,
             status="scheduled"
         )
-        workout = Workout.objects.create(
+        Workout.objects.create(
             tenant=self.tenant,
             name="Private Solo Workout",
             session_type="Solo",
@@ -239,10 +240,7 @@ class WorkoutMatchingTestCase(TestCase):
         view = TodayWorkoutAPIView.as_view()
         response = view(request)
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(response.data["data"]), 1)
-        self.assertEqual(response.data["data"][0]["id"], workout.id)
-        self.assertEqual(response.data["data"][0]["session_id"], appointment.id)
+        self.assertEqual(response.status_code, 404)
 
     def test_today_workout_checked_in_status_matched(self):
         template = ClassTemplate.objects.create(
