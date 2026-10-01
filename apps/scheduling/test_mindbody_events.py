@@ -83,6 +83,29 @@ class MindbodyEventsTestCase(APITestCase):
         res2 = self.client.post('/api/v1/scheduling/workshops/', payload, format='json')
         self.assertEqual(res2.status_code, status.HTTP_403_FORBIDDEN)
 
+    def test_owner_can_create_event_with_sessions_missing_start_at(self):
+        self.client.force_authenticate(user=self.owner)
+        payload = {
+            "title": "Bootcamp Series",
+            "category": "bootcamp",
+            "location": str(self.location.id),
+            "room": str(self.room.id),
+            "primary_instructor": str(self.trainer.id),
+            "event_type": "series",
+            "start_at": (timezone.now() + timedelta(days=5)).isoformat(),
+            "end_at": (timezone.now() + timedelta(days=5, hours=3)).isoformat(),
+            "capacity": 15,
+            "waitlist_capacity": 5,
+            "is_free": True,
+            "sessions": [
+                {"title": "Day 1"},
+                {"title": "Day 2"}
+            ]
+        }
+        res = self.client.post('/api/v1/scheduling/workshops/', payload, format='json')
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(EventSession.objects.filter(event_id=res.data['id']).count(), 2)
+
     def test_owner_can_create_event_with_image_multipart(self):
         """Owner can upload image file and create event via multipart/form-data."""
         self.client.force_authenticate(user=self.owner)

@@ -3,7 +3,7 @@ from datetime import timedelta
 from django.db import transaction
 from django.core.exceptions import ValidationError
 from django.utils import timezone
-from .models import Event, EventSession, EventEnrollment, Package
+from .models import Event, EventSession, EventEnrollment, Package, Room
 
 logger = logging.getLogger(__name__)
 
@@ -25,11 +25,72 @@ class EventCapacityError(EventRegistrationError):
     pass
 
 
+def create_event_session(*, tenant, event, session_data=None, index=1) -> EventSession:
+    if not isinstance(session_data, dict):
+        session_data = {}
+
+    title = session_data.get('title') or (event.title if index == 1 else f"Session {index}")
+    session_num = session_data.get('session_number', index)
+
+    start_at = (
+        session_data.get('start_at')
+        or session_data.get('start')
+        or session_data.get('start_time')
+        or session_data.get('startTime')
+    )
+    end_at = (
+        session_data.get('end_at')
+        or session_data.get('end')
+        or session_data.get('end_time')
+        or session_data.get('endTime')
+    )
+
+    date_val = session_data.get('date') or session_data.get('session_date')
+    if date_val and start_at and 'T' not in str(start_at) and ' ' not in str(start_at):
+        start_at = f"{date_val}T{start_at}"
+    if date_val and end_at and 'T' not in str(end_at) and ' ' not in str(end_at):
+        end_at = f"{date_val}T{end_at}"
+
+    if not start_at:
+        start_at = event.start_at
+    if not end_at:
+        end_at = event.end_at or start_at
+
+    room_val = session_data.get('room', event.room)
+    room_kwargs = {}
+    if isinstance(room_val, Room):
+        room_kwargs['room'] = room_val
+    elif room_val:
+        room_kwargs['room_id'] = room_val
+    else:
+        room_kwargs['room'] = event.room
+
+    instructor_val = session_data.get('instructor', event.primary_instructor)
+    instructor_kwargs = {}
+    from django.contrib.auth import get_user_model
+    User = get_user_model()
+    if isinstance(instructor_val, User):
+        instructor_kwargs['instructor'] = instructor_val
+    elif instructor_val:
+        instructor_kwargs['instructor_id'] = instructor_val
+    else:
+        instructor_kwargs['instructor'] = event.primary_instructor
+
+    return EventSession.all_objects.create(
+        tenant=tenant,
+        event=event,
+        session_number=session_num,
+        title=title,
+        start_at=start_at,
+        end_at=end_at,
+        status='scheduled',
+        **room_kwargs,
+        **instructor_kwargs
+    )
+
+
 @transaction.atomic
 def create_event(*, tenant, validated_data, sessions_data=None) -> Event:
-    """
-    Creates an Event/Workshop and optional multi-session breakdown.
-    """
     assistant_instructors = validated_data.pop('assistant_instructors', [])
     
     event = Event.all_objects.create(tenant=tenant, **validated_data)
@@ -37,33 +98,11 @@ def create_event(*, tenant, validated_data, sessions_data=None) -> Event:
     if assistant_instructors:
         event.assistant_instructors.set(assistant_instructors)
         
-    # If sessions_data is provided (multi-session workshop / series)
     if sessions_data:
         for idx, s_data in enumerate(sessions_data, start=1):
-            EventSession.all_objects.create(
-                tenant=tenant,
-                event=event,
-                session_number=s_data.get('session_number', idx),
-                title=s_data.get('title', f"Session {idx}"),
-                start_at=s_data['start_at'],
-                end_at=s_data['end_at'],
-                room=s_data.get('room', event.room),
-                instructor=s_data.get('instructor', event.primary_instructor),
-                status='scheduled'
-            )
+            create_event_session(tenant=tenant, event=event, session_data=s_data, index=idx)
     elif event.event_type == 'single':
-        # Automatically create the primary session for single-session events
-        EventSession.all_objects.create(
-            tenant=tenant,
-            event=event,
-            session_number=1,
-            title=event.title,
-            start_at=event.start_at,
-            end_at=event.end_at,
-            room=event.room,
-            instructor=event.primary_instructor,
-            status='scheduled'
-        )
+        create_event_session(tenant=tenant, event=event, session_data={}, index=1)
 
     return event
 

@@ -1200,11 +1200,23 @@ class EventCreateUpdateSerializer(serializers.ModelSerializer):
         import json
         normalized = data.copy() if hasattr(data, 'copy') else dict(data)
 
-        if 'sessions' in normalized and isinstance(normalized['sessions'], str):
-            try:
-                normalized['sessions'] = json.loads(normalized['sessions'])
-            except Exception:
-                pass
+        if 'sessions' in normalized:
+            raw_sessions = normalized['sessions']
+            if isinstance(raw_sessions, str):
+                raw_sessions = raw_sessions.strip()
+                if not raw_sessions:
+                    normalized.pop('sessions', None)
+                else:
+                    try:
+                        normalized['sessions'] = json.loads(raw_sessions)
+                    except Exception:
+                        pass
+            elif isinstance(raw_sessions, list):
+                filtered = [s for s in raw_sessions if s not in (None, '', {})]
+                if not filtered:
+                    normalized.pop('sessions', None)
+                else:
+                    normalized['sessions'] = filtered
 
         if 'assistant_instructors' in normalized and isinstance(normalized['assistant_instructors'], str):
             try:
@@ -1263,18 +1275,9 @@ class EventCreateUpdateSerializer(serializers.ModelSerializer):
             instance.sessions.all().delete()
             request = self.context.get('request')
             tenant = request.tenant if request and hasattr(request, 'tenant') else instance.tenant
+            from .event_services import create_event_session
             for idx, s in enumerate(sessions_data, start=1):
-                EventSession.objects.create(
-                    tenant=tenant,
-                    event=instance,
-                    session_number=s.get('session_number', idx),
-                    title=s.get('title', f"Session {idx}"),
-                    start_at=s['start_at'],
-                    end_at=s['end_at'],
-                    room_id=s.get('room_id') or s.get('room'),
-                    instructor_id=s.get('instructor_id') or s.get('instructor'),
-                    status='scheduled'
-                )
+                create_event_session(tenant=tenant, event=instance, session_data=s, index=idx)
         return instance
 
 
