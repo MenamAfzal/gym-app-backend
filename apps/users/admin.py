@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
-from .models import User, UserProfile
+from django.utils import timezone
+from .models import User, UserProfile, StaffRegistrationRequest, StaffRequestStatus
 
 class UserProfileInline(admin.StackedInline):
     model = UserProfile
@@ -62,3 +63,49 @@ class UserProfileAdmin(admin.ModelAdmin):
             'classes': ('collapse',),
         }),
     )
+
+
+@admin.register(StaffRegistrationRequest)
+class StaffRegistrationRequestAdmin(admin.ModelAdmin):
+    list_display = [
+        'email', 'role', 'status', 'first_name', 'last_name',
+        'tenant', 'reviewed_by', 'created_at'
+    ]
+    list_filter = ['status', 'role', 'tenant', 'created_at']
+    search_fields = ['email', 'first_name', 'last_name', 'specialization', 'rejection_reason']
+    readonly_fields = ['created_at', 'updated_at', 'reviewed_at', 'reviewed_by', 'created_user']
+    actions = ['approve_requests', 'reject_requests']
+
+    def approve_requests(self, request, queryset):
+        for req in queryset.filter(status=StaffRequestStatus.PENDING):
+            if not User.objects.filter(email=req.email).exists():
+                user = User.objects.create(
+                    email=req.email,
+                    password=req.password_hash,
+                    role=req.role,
+                    tenant=req.tenant,
+                    is_active=True,
+                )
+                profile, _ = UserProfile.objects.get_or_create(user=user)
+                profile.first_name = req.first_name
+                profile.last_name = req.last_name
+                profile.nickname = req.nickname
+                profile.bio = req.bio
+                profile.phone_number = req.phone_number
+                profile.date_of_birth = req.date_of_birth
+                profile.gender = req.gender
+                profile.save()
+                req.status = StaffRequestStatus.APPROVED
+                req.reviewed_by = request.user
+                req.reviewed_at = timezone.now()
+                req.created_user = user
+                req.save()
+
+    def reject_requests(self, request, queryset):
+        queryset.filter(status=StaffRequestStatus.PENDING).update(
+            status=StaffRequestStatus.REJECTED,
+            reviewed_by=request.user,
+            reviewed_at=timezone.now(),
+            rejection_reason='Rejected via Django admin'
+        )
+

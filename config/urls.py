@@ -21,6 +21,12 @@ from django.conf.urls.static import static
 from apps.food_logger.views import AnalyzeFoodAPIView
 from apps.rewards.views import ReferralJoinLandingView
 
+from apps.users.views import (
+    StaffRegistrationRequestCreateView,
+    StaffRegistrationStatusView,
+    StaffRegistrationRequestViewSet
+)
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     path('join/', ReferralJoinLandingView.as_view(), name='root-referral-join-landing'),
@@ -31,7 +37,15 @@ urlpatterns = [
     path('api/v1/ai/scan-meal/', AnalyzeFoodAPIView.as_view(), name='v1-ai-scan-meal'),
     path('api/v1/ai/scan-food/', AnalyzeFoodAPIView.as_view(), name='v1-ai-scan-food'),
 
-    # API Version 1
+    path('api/v1/auth/staff-register/', StaffRegistrationRequestCreateView.as_view(), name='top-staff-register'),
+    path('api/v1/auth/staff-register/status/', StaffRegistrationStatusView.as_view(), name='top-staff-register-status'),
+    path('api/v1/staff-requests/', include([
+        path('', StaffRegistrationRequestViewSet.as_view({'get': 'list'}), name='top-staff-requests-list'),
+        path('<uuid:pk>/', StaffRegistrationRequestViewSet.as_view({'get': 'retrieve', 'delete': 'destroy'}), name='top-staff-requests-detail'),
+        path('<uuid:pk>/approve/', StaffRegistrationRequestViewSet.as_view({'post': 'approve'}), name='top-staff-requests-approve'),
+        path('<uuid:pk>/reject/', StaffRegistrationRequestViewSet.as_view({'post': 'reject'}), name='top-staff-requests-reject'),
+    ])),
+
     path('api/v1/platform/', include('apps.core.urls')), 
     path('api/v1/users/', include('apps.users.urls')),
 

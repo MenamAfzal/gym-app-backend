@@ -11,6 +11,10 @@ from apps.core.permissions import IsGymOwnerOnly
 from apps.core.permissions_catalog import get_permission_catalog
 from apps.users.permission_service import PermissionService
 
+from django.db import models, transaction
+from django.contrib.auth.hashers import make_password
+from django.utils import timezone
+
 from apps.users.serializers import (
     ChangePasswordSerializer,
     CustomTokenObtainPairSerializer,
@@ -23,10 +27,14 @@ from apps.users.serializers import (
     StaffDetailedSchedulingSerializer,
     ClientDetailedNutritionSerializer,
     ClientDetailedReflectionSerializer,
-    ManagerPermissionPolicySerializer
+    ManagerPermissionPolicySerializer,
+    StaffRegistrationRequestCreateSerializer,
+    StaffRegistrationRequestDetailSerializer,
+    StaffRegistrationRequestRejectSerializer,
+    StaffRegistrationRequestApproveSerializer
 )
 from apps.users.services import AuthService, UserService
-from apps.users.models import OTPPurpose, UserRole
+from apps.users.models import OTPPurpose, UserRole, UserProfile, StaffRegistrationRequest, StaffRequestStatus
 from apps.core.permissions import TenantFeaturePermission
 from rest_framework_simplejwt.views import TokenObtainPairView 
 from rest_framework.views import APIView 
@@ -940,3 +948,179 @@ class ForgotPasswordVerifyView(APIView):
         )
         
         return Response({"detail": "Password has been successfully reset."}, status=status.HTTP_200_OK)
+
+
+class StaffRegistrationRequestCreateView(APIView):
+    permission_classes = [permissions.AllowAny]
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
+    serializer_class = StaffRegistrationRequestCreateSerializer
+
+    def post(self, request):
+        serializer = self.serializer_class(data=request.data, context={'request': request})
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        tenant = data['resolved_tenant']
+        password_hash = make_password(data['password'])
+        profile_image = request.FILES.get('profile_image') or data.get('profile_image')
+        staff_request = StaffRegistrationRequest.objects.create(
+            tenant=tenant,
+            email=data['email'],
+            password_hash=password_hash,
+            role=data['role'],
+            first_name=data.get('first_name', ''),
+            last_name=data.get('last_name', ''),
+            nickname=data.get('nickname', ''),
+            bio=data.get('bio', ''),
+            profile_image=profile_image,
+            phone_number=data.get('phone_number', ''),
+            date_of_birth=data.get('date_of_birth'),
+            gender=data.get('gender', ''),
+            height=data.get('height'),
+            weight=data.get('weight'),
+            address=data.get('address', ''),
+            city=data.get('city', ''),
+            country=data.get('country', ''),
+            postal_code=data.get('postal_code', ''),
+            emergency_contact_name=data.get('emergency_contact_name', ''),
+            emergency_contact_phone=data.get('emergency_contact_phone', ''),
+            specialization=data.get('specialization', ''),
+            experience_years=data.get('experience_years'),
+            certifications=data.get('certifications', ''),
+            notes=data.get('notes', ''),
+        )
+        return Response(
+            {
+                "detail": "Staff registration request submitted successfully. Awaiting admin approval.",
+                "request": StaffRegistrationRequestDetailSerializer(staff_request).data
+            },
+            status=status.HTTP_201_CREATED
+        )
+
+
+class StaffRegistrationStatusView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        email = request.query_params.get('email')
+        request_id = request.query_params.get('request_id') or request.query_params.get('id')
+        if not email and not request_id:
+            return Response(
+                {"detail": "Please provide an email or request_id to check status."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        qs = StaffRegistrationRequest.all_objects.select_related('tenant', 'reviewed_by', 'created_user')
+        if request_id:
+            qs = qs.filter(id=request_id)
+        elif email:
+            qs = qs.filter(email=email.lower().strip())
+        record = qs.first()
+        if not record:
+            return Response(
+                {"detail": "No staff registration request found matching the provided criteria."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        return Response(StaffRegistrationRequestDetailSerializer(record).data, status=status.HTTP_200_OK)
+
+
+class StaffRegistrationRequestViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsOwnerOrManager]
+    parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
+    serializer_class = StaffRegistrationRequestDetailSerializer
+    http_method_names = ['get', 'post', 'delete', 'head', 'options']
+    permission_app = 'staff_users'
+    permission_resource = 'staff'
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_superuser or user.role == UserRole.PLATFORM_ADMIN:
+            qs = StaffRegistrationRequest.all_objects.select_related('tenant', 'reviewed_by', 'created_user').all()
+        else:
+            qs = StaffRegistrationRequest.all_objects.filter(tenant=user.tenant).select_related('tenant', 'reviewed_by', 'created_user').all()
+        status_param = self.request.query_params.get('status')
+        if status_param and status_param != 'all':
+            qs = qs.filter(status=status_param)
+        role_param = self.request.query_params.get('role')
+        if role_param:
+            qs = qs.filter(role=role_param)
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                models.Q(email__icontains=search) |
+                models.Q(first_name__icontains=search) |
+                models.Q(last_name__icontains=search)
+            )
+        return qs
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        request_obj = self.get_object()
+        if request_obj.status == StaffRequestStatus.APPROVED:
+            return Response({"detail": "This request has already been approved."}, status=status.HTTP_400_BAD_REQUEST)
+        if User.objects.filter(email=request_obj.email).exists():
+            return Response({"detail": "A user with this email already exists."}, status=status.HTTP_400_BAD_REQUEST)
+        role = request.data.get('role') or request_obj.role
+        with transaction.atomic():
+            user = User.objects.create(
+                email=request_obj.email,
+                password=request_obj.password_hash,
+                role=role,
+                tenant=request_obj.tenant,
+                is_active=True,
+            )
+            profile, _ = UserProfile.objects.get_or_create(user=user)
+            profile.first_name = request_obj.first_name
+            profile.last_name = request_obj.last_name
+            profile.nickname = request_obj.nickname
+            profile.bio = request_obj.bio
+            profile.phone_number = request_obj.phone_number
+            profile.date_of_birth = request_obj.date_of_birth
+            profile.gender = request_obj.gender
+            profile.height = request_obj.height
+            profile.weight = request_obj.weight
+            profile.address = request_obj.address
+            profile.city = request_obj.city
+            profile.country = request_obj.country
+            profile.postal_code = request_obj.postal_code
+            profile.emergency_contact_name = request_obj.emergency_contact_name
+            profile.emergency_contact_phone = request_obj.emergency_contact_phone
+            if request_obj.profile_image:
+                profile.profile_image.save(request_obj.profile_image.name, request_obj.profile_image, save=False)
+            profile.save()
+            if role == UserRole.GYM_MANAGER:
+                PermissionService.get_or_create_policy(manager=user, tenant=request_obj.tenant)
+            request_obj.status = StaffRequestStatus.APPROVED
+            request_obj.role = role
+            request_obj.reviewed_by = request.user
+            request_obj.reviewed_at = timezone.now()
+            request_obj.created_user = user
+            request_obj.save()
+        return Response(
+            {
+                "detail": "Staff account approved successfully.",
+                "user": UserSerializer(user).data,
+                "request": StaffRegistrationRequestDetailSerializer(request_obj).data
+            },
+            status=status.HTTP_200_OK
+        )
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        request_obj = self.get_object()
+        if request_obj.status == StaffRequestStatus.APPROVED:
+            return Response({"detail": "Cannot reject an already approved request."}, status=status.HTTP_400_BAD_REQUEST)
+        reject_serializer = StaffRegistrationRequestRejectSerializer(data=request.data)
+        reject_serializer.is_valid(raise_exception=True)
+        reason = reject_serializer.validated_data.get('rejection_reason', '') or request.data.get('rejection_reason', '')
+        request_obj.status = StaffRequestStatus.REJECTED
+        request_obj.rejection_reason = reason
+        request_obj.reviewed_by = request.user
+        request_obj.reviewed_at = timezone.now()
+        request_obj.save()
+        return Response(
+            {
+                "detail": "Staff account request rejected.",
+                "request": StaffRegistrationRequestDetailSerializer(request_obj).data
+            },
+            status=status.HTTP_200_OK
+        )
+

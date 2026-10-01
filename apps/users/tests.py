@@ -782,3 +782,116 @@ class TenantLoginIsolationAPITests(TestCase):
         response = self.client.post(self.login_url, payload, format='json')
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
+
+class StaffRegistrationRequestAPITest(TestCase):
+    def setUp(self):
+        self.tenant = Tenant.objects.create(name="Fit Gym", subdomain="fitgym")
+        self.owner = User.objects.create_user(
+            email="owner@fitgym.com",
+            password="OwnerPassword123!",
+            role=UserRole.GYM_OWNER,
+            tenant=self.tenant
+        )
+        self.client_user = User.objects.create_user(
+            email="member@fitgym.com",
+            password="MemberPassword123!",
+            role=UserRole.CLIENT,
+            tenant=self.tenant
+        )
+        self.client = APIClient()
+
+    def test_staff_registration_submission_and_status(self):
+        url = "/api/v1/auth/staff-register/"
+        payload = {
+            "tenant_id": str(self.tenant.id),
+            "email": "trainer_applicant@fitgym.com",
+            "password": "TrainerPassword123!",
+            "role": "trainer",
+            "first_name": "Alex",
+            "last_name": "Smith",
+            "phone_number": "+1234567890",
+            "bio": "Certified strength coach",
+            "specialization": "Strength & Conditioning",
+            "experience_years": 5,
+            "certifications": "CSCS, NASM-CPT"
+        }
+        response = self.client.post(url, payload, format="json")
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(response.data["request"]["status"], "pending")
+        self.assertEqual(response.data["request"]["email"], "trainer_applicant@fitgym.com")
+        request_id = response.data["request"]["id"]
+
+        status_url = "/api/v1/auth/staff-register/status/?email=trainer_applicant@fitgym.com"
+        status_res = self.client.get(status_url)
+        self.assertEqual(status_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(status_res.data["status"], "pending")
+
+        dup_res = self.client.post(url, payload, format="json")
+        self.assertEqual(dup_res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_admin_list_and_approve_staff_request(self):
+        register_url = "/api/v1/auth/staff-register/"
+        payload = {
+            "tenant_id": str(self.tenant.id),
+            "email": "manager_applicant@fitgym.com",
+            "password": "ManagerPassword123!",
+            "role": "gym_manager",
+            "first_name": "Sarah",
+            "last_name": "Connor"
+        }
+        res = self.client.post(register_url, payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        request_id = res.data["request"]["id"]
+
+        admin_client = APIClient()
+        admin_client.force_authenticate(user=self.owner)
+        list_url = "/api/v1/staff-requests/"
+        list_res = admin_client.get(list_url, HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(list_res.status_code, status.HTTP_200_OK)
+        results = list_res.data if isinstance(list_res.data, list) else list_res.data.get("results", [])
+        self.assertTrue(any(item["id"] == request_id for item in results))
+
+        approve_url = f"/api/v1/staff-requests/{request_id}/approve/"
+        approve_res = admin_client.post(approve_url, {}, format="json", HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(approve_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(approve_res.data["request"]["status"], "approved")
+
+        new_user = User.objects.get(email="manager_applicant@fitgym.com")
+        self.assertEqual(new_user.role, UserRole.GYM_MANAGER)
+        self.assertEqual(new_user.tenant, self.tenant)
+        self.assertTrue(new_user.is_active)
+        self.assertEqual(new_user.profile.first_name, "Sarah")
+
+        login_url = reverse("auth_login")
+        login_res = self.client.post(login_url, {
+            "email": "manager_applicant@fitgym.com",
+            "password": "ManagerPassword123!",
+            "tenant_id": str(self.tenant.id)
+        }, format="json")
+        self.assertEqual(login_res.status_code, status.HTTP_200_OK)
+        self.assertIn("access", login_res.data)
+
+    def test_admin_reject_staff_request(self):
+        register_url = "/api/v1/auth/staff-register/"
+        payload = {
+            "tenant_id": str(self.tenant.id),
+            "email": "reject_me@fitgym.com",
+            "password": "Password123!",
+            "role": "trainer",
+            "first_name": "Bob"
+        }
+        res = self.client.post(register_url, payload, format="json")
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        request_id = res.data["request"]["id"]
+
+        admin_client = APIClient()
+        admin_client.force_authenticate(user=self.owner)
+        reject_url = f"/api/v1/staff-requests/{request_id}/reject/"
+        reject_res = admin_client.post(reject_url, {"rejection_reason": "Missing required certification"}, format="json", HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(reject_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(reject_res.data["request"]["status"], "rejected")
+        self.assertEqual(reject_res.data["request"]["rejection_reason"], "Missing required certification")
+
+        self.assertFalse(User.objects.filter(email="reject_me@fitgym.com").exists())
+
+

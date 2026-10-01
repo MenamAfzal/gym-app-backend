@@ -2,7 +2,10 @@
 User Serializers
 """
 from rest_framework import serializers
-from apps.users.models import User, UserProfile, UserRole, OTPPurpose, GenderChoices, ManagerPermissionPolicy
+from apps.users.models import (
+    User, UserProfile, UserRole, OTPPurpose, GenderChoices,
+    ManagerPermissionPolicy, StaffRegistrationRequest, StaffRequestStatus
+)
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from apps.core.tenants.models import Tenant
 from apps.users.services import UserService
@@ -947,3 +950,106 @@ class ManagerPermissionPolicySerializer(serializers.ModelSerializer):
     def validate_permissions(self, value):
         from apps.core.permissions_catalog import sanitize_permissions
         return sanitize_permissions(value)
+
+
+class StaffRegistrationRequestCreateSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=8)
+    role = serializers.ChoiceField(
+        choices=[
+            (UserRole.TRAINER, 'Trainer'),
+            (UserRole.GYM_MANAGER, 'Gym Manager'),
+            (UserRole.FRONT_DESK, 'Front Desk'),
+        ],
+        default=UserRole.TRAINER
+    )
+    tenant_id = serializers.UUIDField(required=False)
+    first_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    last_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    nickname = serializers.CharField(required=False, allow_blank=True, max_length=50)
+    bio = serializers.CharField(required=False, allow_blank=True, max_length=500)
+    profile_image = serializers.ImageField(required=False, allow_null=True)
+    phone_number = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    date_of_birth = serializers.DateField(required=False, allow_null=True)
+    gender = serializers.ChoiceField(choices=GenderChoices.choices, required=False, allow_blank=True)
+    height = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
+    weight = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
+    address = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    city = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    country = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    postal_code = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    emergency_contact_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
+    emergency_contact_phone = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    specialization = serializers.CharField(required=False, allow_blank=True, max_length=255)
+    experience_years = serializers.IntegerField(required=False, allow_null=True, min_value=0)
+    certifications = serializers.CharField(required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+    def validate_email(self, value):
+        normalized = value.lower().strip()
+        if User.objects.filter(email=normalized).exists():
+            raise serializers.ValidationError("A user with this email already exists.")
+        return normalized
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        tenant = None
+        if 'tenant_id' in attrs:
+            try:
+                tenant = Tenant.objects.get(id=attrs['tenant_id'])
+            except Tenant.DoesNotExist:
+                raise serializers.ValidationError({'tenant_id': 'Invalid tenant_id.'})
+        elif request:
+            if hasattr(request, 'tenant') and request.tenant:
+                tenant = request.tenant
+            else:
+                header_id = request.headers.get('X-Tenant-Id') or request.headers.get('X-Tenant-ID')
+                if header_id:
+                    try:
+                        tenant = Tenant.objects.get(id=header_id)
+                    except Exception:
+                        pass
+        if not tenant:
+            raise serializers.ValidationError({'tenant': 'Valid tenant context is required.'})
+        attrs['resolved_tenant'] = tenant
+
+        email = attrs.get('email')
+        if StaffRegistrationRequest.all_objects.filter(email=email, tenant=tenant, status=StaffRequestStatus.PENDING).exists():
+            raise serializers.ValidationError({'email': 'A pending registration request already exists for this email.'})
+        return attrs
+
+
+class StaffRegistrationRequestDetailSerializer(serializers.ModelSerializer):
+    tenant_id = serializers.UUIDField(source='tenant.id', read_only=True)
+    tenant_name = serializers.CharField(source='tenant.name', read_only=True)
+    reviewed_by_email = serializers.EmailField(source='reviewed_by.email', read_only=True)
+    created_user_id = serializers.UUIDField(source='created_user.id', read_only=True)
+
+    class Meta:
+        model = StaffRegistrationRequest
+        fields = [
+            'id', 'tenant_id', 'tenant_name', 'email', 'role', 'status',
+            'first_name', 'last_name', 'nickname', 'bio', 'profile_image',
+            'phone_number', 'date_of_birth', 'gender', 'height', 'weight',
+            'address', 'city', 'country', 'postal_code',
+            'emergency_contact_name', 'emergency_contact_phone',
+            'specialization', 'experience_years', 'certifications', 'notes',
+            'reviewed_by', 'reviewed_by_email', 'reviewed_at', 'rejection_reason',
+            'created_user_id', 'created_at', 'updated_at'
+        ]
+        read_only_fields = fields
+
+
+class StaffRegistrationRequestRejectSerializer(serializers.Serializer):
+    rejection_reason = serializers.CharField(required=False, allow_blank=True, default='')
+
+
+class StaffRegistrationRequestApproveSerializer(serializers.Serializer):
+    role = serializers.ChoiceField(
+        choices=[
+            (UserRole.TRAINER, 'Trainer'),
+            (UserRole.GYM_MANAGER, 'Gym Manager'),
+            (UserRole.FRONT_DESK, 'Front Desk'),
+        ],
+        required=False
+    )

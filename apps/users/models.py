@@ -313,4 +313,77 @@ class ManagerPermissionPolicy(UUIDMixin, TimestampMixin, TenantMixin):
         app_perms = self.permissions.get(app, {})
         return bool(app_perms)
 
+
+class StaffRequestStatus(models.TextChoices):
+    PENDING = 'pending', _('Pending')
+    APPROVED = 'approved', _('Approved')
+    REJECTED = 'rejected', _('Rejected')
+
+
+class StaffRegistrationRequest(UUIDMixin, TimestampMixin, TenantMixin):
+    email = models.EmailField(db_index=True)
+    password_hash = models.CharField(max_length=128)
+    role = models.CharField(
+        max_length=20,
+        choices=[
+            (UserRole.TRAINER, 'Trainer'),
+            (UserRole.GYM_MANAGER, 'Gym Manager'),
+            (UserRole.FRONT_DESK, 'Front Desk'),
+        ],
+        default=UserRole.TRAINER
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=StaffRequestStatus.choices,
+        default=StaffRequestStatus.PENDING,
+        db_index=True
+    )
+    first_name = models.CharField(max_length=100, blank=True)
+    last_name = models.CharField(max_length=100, blank=True)
+    nickname = models.CharField(max_length=50, blank=True)
+    bio = models.TextField(max_length=500, blank=True)
+    profile_image = models.ImageField(upload_to='staff_requests/%Y/%m/', null=True, blank=True)
+    phone_number = models.CharField(max_length=20, blank=True)
+    date_of_birth = models.DateField(null=True, blank=True)
+    gender = models.CharField(max_length=20, choices=GenderChoices.choices, blank=True)
+    height = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    weight = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    address = models.CharField(max_length=255, blank=True)
+    city = models.CharField(max_length=100, blank=True)
+    country = models.CharField(max_length=100, blank=True)
+    postal_code = models.CharField(max_length=20, blank=True)
+    emergency_contact_name = models.CharField(max_length=100, blank=True)
+    emergency_contact_phone = models.CharField(max_length=20, blank=True)
+    specialization = models.CharField(max_length=255, blank=True)
+    experience_years = models.PositiveIntegerField(null=True, blank=True)
+    certifications = models.TextField(blank=True)
+    notes = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_staff_requests'
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    rejection_reason = models.TextField(blank=True, default='')
+    created_user = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='staff_registration_request'
+    )
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['tenant', 'status']),
+            models.Index(fields=['email', 'tenant']),
+        ]
+
+    def __str__(self):
+        return f"{self.email} ({self.role}) - {self.status}"
+
+
     
