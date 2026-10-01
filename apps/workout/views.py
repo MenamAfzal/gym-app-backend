@@ -304,18 +304,149 @@ class CreateWorkoutAPIView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 class WorkoutDetailAPIView(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
+
     def get(self, request, pk):
-        """Retrieve a single workout by ID."""
         workout = get_object_or_404(Workout, pk=pk)
-        serializer = WorkoutSerializer(workout)
-        return Response(serializer.data)
+        serializer = WorkoutSerializer(workout, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def put(self, request, pk):
+        workout = get_object_or_404(Workout, pk=pk)
+        is_admin_staff = request.user.is_staff or request.user.is_superuser or getattr(request.user, 'role', None) in ['gym_owner', 'gym_manager']
+        if not is_admin_staff and workout.created_by != request.user:
+            return Response({"detail": "You are not authorized to edit this workout."}, status=status.HTTP_403_FORBIDDEN)
+        serializer = WorkoutUpdateSerializer(workout, data=request.data, partial=False, context={"request": request})
+        if serializer.is_valid():
+            updated = serializer.save()
+            return Response(WorkoutSerializer(updated, context={"request": request}).data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def patch(self, request, pk):
+        workout = get_object_or_404(Workout, pk=pk)
+        is_admin_staff = request.user.is_staff or request.user.is_superuser or getattr(request.user, 'role', None) in ['gym_owner', 'gym_manager']
+        if not is_admin_staff and workout.created_by != request.user:
+            return Response({"detail": "You are not authorized to edit this workout."}, status=status.HTTP_403_FORBIDDEN)
+        serializer = WorkoutUpdateSerializer(workout, data=request.data, partial=True, context={"request": request})
+        if serializer.is_valid():
+            updated = serializer.save()
+            return Response(WorkoutSerializer(updated, context={"request": request}).data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
     def delete(self, request, pk):
-        """Delete a specific workout."""
         workout = get_object_or_404(Workout, pk=pk)
-        if workout.created_by != request.user:
+        is_admin_staff = request.user.is_staff or request.user.is_superuser or getattr(request.user, 'role', None) in ['gym_owner', 'gym_manager']
+        if not is_admin_staff and workout.created_by != request.user:
             return Response({"detail": "You are not authorized to delete this workout."}, status=status.HTTP_403_FORBIDDEN)
         workout.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response({"detail": "Workout deleted successfully."}, status=status.HTTP_200_OK)
+
+
+class WorkoutCopyAPIView(APIView):
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def post(self, request, pk=None):
+        workout_id = pk or request.data.get("workout_id") or request.data.get("id")
+        if not workout_id:
+            return Response({"detail": "Workout ID is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        workout = get_object_or_404(Workout, pk=workout_id)
+
+        custom_name = request.data.get("name") or request.data.get("new_name")
+        timestamp_suffix = timezone.now().strftime("%Y%m%d%H%M%S")
+        if custom_name:
+            new_name = custom_name
+        else:
+            base_cand = f"{workout.name} (Copy)"
+            new_name = f"{workout.name} - copy {timestamp_suffix}" if Workout.objects.filter(name=base_cand).exists() else base_cand
+
+        override_start = request.data.get("start_date")
+        override_end = request.data.get("end_date")
+        override_session_type = request.data.get("session_type")
+        override_movement_level = request.data.get("movement_level")
+
+        target_user = None
+        assigned_user_val = request.data.get("assigned_user") or request.data.get("user_id") or request.data.get("client_id")
+        if assigned_user_val:
+            try:
+                target_user = User.objects.get(id=assigned_user_val)
+            except (User.DoesNotExist, ValueError):
+                return Response({"detail": "Assigned user not found."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with transaction.atomic():
+            cloned = Workout.objects.create(
+                tenant=getattr(workout, 'tenant', None),
+                name=new_name,
+                base_workout_name=workout.base_workout_name or workout.name,
+                description=workout.description,
+                movement_level=override_movement_level or workout.movement_level,
+                session_type=override_session_type or workout.session_type,
+                workout_type=workout.workout_type,
+                video_url=workout.video_url,
+                myzone_effort_range=workout.myzone_effort_range,
+                notes=workout.notes,
+                created_by=request.user,
+                assigned_user=target_user or workout.assigned_user,
+                start_date=override_start if override_start is not None else workout.start_date,
+                end_date=override_end if override_end is not None else workout.end_date,
+                session=workout.session,
+                is_custom=True if (target_user or workout.assigned_user) else workout.is_custom,
+                deck_config=workout.deck_config if workout.workout_type == 4 else None,
+            )
+            cloned.tags.set(workout.tags.all())
+            cloned.equipment.set(workout.equipment.all())
+
+            group_map = {}
+            for group in workout.groups.all():
+                new_group = WorkoutGroup.objects.create(
+                    tenant=getattr(group, 'tenant', None),
+                    workout=cloned,
+                    group_type=group.group_type,
+                    group_number=group.group_number,
+                    group_work_minutes=group.group_work_minutes,
+                    group_work_seconds=group.group_work_seconds,
+                    group_rest_minutes=group.group_rest_minutes,
+                    group_rest_seconds=group.group_rest_seconds,
+                )
+                group_map[group.id] = new_group
+
+            for we in workout.workout_exercises.all().order_by("order", "id"):
+                WorkoutExercise.objects.create(
+                    tenant=getattr(we, 'tenant', None),
+                    workout=cloned,
+                    exercise=we.exercise,
+                    order=we.order,
+                    sets=we.sets,
+                    reps=we.reps,
+                    rounds=we.rounds,
+                    work_seconds=we.work_seconds,
+                    work_minutes=we.work_minutes,
+                    rest_minutes=we.rest_minutes,
+                    rest_seconds=we.rest_seconds,
+                    seconds=we.seconds,
+                    is_hold=we.is_hold,
+                    suit=we.suit,
+                    is_joker=we.is_joker,
+                    group=group_map.get(we.group_id),
+                    video_url=we.video_url,
+                    custom_cues=we.custom_cues,
+                )
+
+            if cloned.assigned_user:
+                WorkoutAssignment.objects.create(
+                    tenant=getattr(cloned, 'tenant', None),
+                    workout=cloned,
+                    user=cloned.assigned_user,
+                    session=cloned.session,
+                    assigned_by=request.user,
+                    session_type=cloned.session_type,
+                    date=cloned.start_date
+                )
+
+        serializer = WorkoutSerializer(cloned, context={"request": request})
+        return Response(
+            {"detail": "Workout copied successfully.", "data": serializer.data},
+            status=status.HTTP_201_CREATED
+        )
 class TodayWorkoutAPIView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
@@ -1082,6 +1213,14 @@ class WorkoutEditAPIView(APIView):
                 status=status.HTTP_200_OK
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, pk):
+        workout = get_object_or_404(Workout, pk=pk)
+        is_admin_staff = request.user.is_staff or request.user.is_superuser or getattr(request.user, 'role', None) in ['gym_owner', 'gym_manager']
+        if not is_admin_staff and workout.created_by != request.user:
+            return Response({"detail": "You are not authorized to delete this workout."}, status=status.HTTP_403_FORBIDDEN)
+        workout.delete()
+        return Response({"detail": "Workout deleted successfully."}, status=status.HTTP_200_OK)
 class MultipleCreateWorkoutAPIView(APIView):
     permission_classes = [IsStaffUser]
     def post(self, request):

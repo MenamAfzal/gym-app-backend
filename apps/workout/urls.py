@@ -9,7 +9,13 @@ from . import views
 
 urlpatterns = [
     path('products/', ProductListCreateAPIView.as_view(), name='product-list-create'),
-    path("workouts/", views.WorkoutAPIView.as_view(), name="workouts"),   
+    path("workouts/", views.WorkoutAPIView.as_view(), name="workouts"),
+    path("workouts/<int:pk>/", views.WorkoutDetailAPIView.as_view(), name="workout-detail-pk"),
+    path("workouts/<int:pk>/edit/", views.WorkoutEditAPIView.as_view(), name="workout-edit"),
+    path("workouts/<int:pk>/delete/", views.WorkoutDetailAPIView.as_view(), name="workout-delete"),
+    path("workouts/<int:pk>/copy/", views.WorkoutCopyAPIView.as_view(), name="workout-copy-pk"),
+    path("workouts/<int:pk>/clone/", views.WorkoutCopyAPIView.as_view(), name="workout-clone-pk"),
+    path("workouts/copy/", views.WorkoutCopyAPIView.as_view(), name="workout-copy"),   
     path("today/", views.TodayWorkoutAPIView.as_view(), name="today-workout"),   
     path("log-weight/", views.LogWeightAPIView.as_view(), name="log-weight"),
     path("log-completion/", views.LogCompletionAPIView.as_view(), name="log-completion"),

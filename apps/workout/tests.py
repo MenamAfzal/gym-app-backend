@@ -12,7 +12,8 @@ from apps.workout.views import (
     TodayWorkoutAPIView, WorkoutAPIView, clean_session_name, strip_noise_words,
     resolve_movement_level, calculate_workout_session_score,
     WorkoutAssignmentListCreateAPIView, AssignWorkoutAPIView, WorkoutAssignmentDetailAPIView,
-    CreateWorkoutAPIView, LogCompletionAPIView
+    CreateWorkoutAPIView, LogCompletionAPIView, WorkoutDetailAPIView, WorkoutEditAPIView,
+    WorkoutCopyAPIView
 )
 
 
@@ -933,4 +934,63 @@ class WorkoutMatchingTestCase(TestCase):
         item2 = next(d for d in data2 if d["session_id"] == s2.id)
         self.assertEqual(item1["id"], w1.id)
         self.assertEqual(item2["id"], w2.id)
+
+    def test_single_workout_edit(self):
+        workout = Workout.objects.create(
+            tenant=self.tenant,
+            name="Original Workout",
+            session_type="Strength",
+            movement_level="Stability",
+            created_by=self.trainer
+        )
+        req = self.factory.patch(
+            f"/api/v1/workout/workouts/{workout.id}/",
+            {"name": "Updated Workout Name", "notes": "Updated notes"},
+            format="json"
+        )
+        force_authenticate(req, user=self.trainer)
+        res = WorkoutDetailAPIView.as_view()(req, pk=workout.id)
+        self.assertEqual(res.status_code, 200)
+        workout.refresh_from_db()
+        self.assertEqual(workout.name, "Updated Workout Name")
+        self.assertEqual(workout.notes, "Updated notes")
+
+    def test_single_workout_delete(self):
+        workout = Workout.objects.create(
+            tenant=self.tenant,
+            name="Workout To Delete",
+            session_type="Strength",
+            movement_level="Stability",
+            created_by=self.trainer
+        )
+        req = self.factory.delete(f"/api/v1/workout/workouts/{workout.id}/")
+        force_authenticate(req, user=self.trainer)
+        res = WorkoutDetailAPIView.as_view()(req, pk=workout.id)
+        self.assertEqual(res.status_code, 200)
+        self.assertFalse(Workout.objects.filter(id=workout.id).exists())
+
+    def test_single_workout_copy(self):
+        workout = Workout.objects.create(
+            tenant=self.tenant,
+            name="Base Single Workout",
+            session_type="Solo",
+            movement_level="Stability",
+            created_by=self.trainer
+        )
+        ex = Exercise.objects.create(tenant=self.tenant, name="Exercise For Copy")
+        WorkoutExercise.objects.create(tenant=self.tenant, workout=workout, exercise=ex, order=1, sets=3, reps=10)
+
+        req = self.factory.post(
+            f"/api/v1/workout/workouts/{workout.id}/copy/",
+            {"name": "Cloned Single Workout"},
+            format="json"
+        )
+        force_authenticate(req, user=self.trainer)
+        res = WorkoutCopyAPIView.as_view()(req, pk=workout.id)
+        self.assertEqual(res.status_code, 201)
+        cloned_id = res.data["data"]["id"]
+        cloned = Workout.objects.get(id=cloned_id)
+        self.assertEqual(cloned.name, "Cloned Single Workout")
+        self.assertEqual(cloned.workout_exercises.count(), 1)
+        self.assertEqual(cloned.workout_exercises.first().exercise.name, "Exercise For Copy")
 
