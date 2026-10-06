@@ -1249,6 +1249,31 @@ class BookingViewSet(viewsets.ModelViewSet):
     def check_out_underscore(self, request, pk=None):
         return self.check_out(request, pk)
 
+    @action(detail=True, methods=['post'], url_path='no-show', permission_classes=[IsAuthenticated])
+    def mark_no_show(self, request, pk=None):
+        booking = self.get_object()
+        user = request.user
+        is_staff = user.role in [UserRole.PLATFORM_ADMIN, UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.FRONT_DESK, UserRole.TRAINER]
+        if not is_staff and not user.is_superuser:
+            return Response({"detail": "Only staff can mark bookings as no-show."}, status=status.HTTP_403_FORBIDDEN)
+
+        now = timezone.now()
+        booking.status = 'no_show'
+        booking.no_show_at = now
+        booking.save(update_fields=['status', 'no_show_at'])
+
+        try:
+            from apps.retention.tasks import recalculate_single_client_metrics
+            recalculate_single_client_metrics.delay(str(booking.tenant_id), str(booking.client_id))
+        except Exception:
+            pass
+
+        return Response({"status": "no_show", "detail": "Booking marked as no-show."})
+
+    @action(detail=True, methods=['post'], url_path='no_show', permission_classes=[IsAuthenticated])
+    def mark_no_show_underscore(self, request, pk=None):
+        return self.mark_no_show(request, pk)
+
     @action(detail=True, methods=['patch'], url_path='spot', permission_classes=[IsAuthenticated])
     def change_spot(self, request, pk=None):
         """

@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import ClientRetentionMetrics, SavedSegment
+from .models import ClientRetentionMetrics, SavedSegment, TenantRetentionDailySnapshot
 from apps.users.serializers import UserSerializer
 
 
@@ -69,3 +69,30 @@ class SavedSegmentSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
         read_only_fields = ['id', 'created_by', 'created_by_email', 'created_at', 'updated_at']
+
+
+class TenantRetentionDailySnapshotSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TenantRetentionDailySnapshot
+        fields = [
+            'id',
+            'snapshot_date',
+            'total_active_members',
+            'total_leads',
+            'total_trials',
+            'total_at_risk',
+            'total_inactive',
+            'total_churned',
+            'reactivated_last_30d',
+            'avg_visit_frequency',
+            'churn_rate_monthly',
+            'retention_rate_monthly',
+            'attended_today',
+            'cancellations_today',
+            'no_shows_today',
+            'expiring_packages_next_7d',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = fields
+

@@ -9,9 +9,13 @@ from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from apps.core.tenants.context import bypass_tenant_isolation
+from apps.core.tenants.models import Tenant
 from apps.scheduling.models import Booking, FacilityAccessLog, Package, Payment
 from apps.users.models import ClientLifecycleStatus, User, UserRole
-from .models import AttendanceTrend, ChurnRiskLevel, ClientRetentionMetrics
+from .models import (
+    AttendanceTrend, ChurnRiskLevel, ClientRetentionMetrics,
+    TenantRetentionDailySnapshot
+)
 
 logger = logging.getLogger(__name__)
 
@@ -514,3 +518,279 @@ class RetentionMetricsService:
                 f"clients in tenant {tenant_id} ({len(users_to_update)} lifecycle transitions)."
             )
             return len(metrics_to_upsert)
+
+    @classmethod
+    def capture_daily_snapshot(
+        cls,
+        tenant,
+        snapshot_date=None
+    ) -> TenantRetentionDailySnapshot:
+        """
+        Captures a daily aggregated historical snapshot of studio retention health for a tenant.
+        Powers Momence/Mindbody period-over-period trend charts and cohort curves.
+        """
+        now = timezone.now()
+        target_date = snapshot_date or now.date()
+        tenant_id = str(tenant.id if hasattr(tenant, 'id') else tenant)
+        tenant_obj = tenant if hasattr(tenant, 'id') else Tenant.all_objects.filter(id=tenant_id).first()
+
+        d30_ago = now - timedelta(days=30)
+        d7_ahead = now + timedelta(days=7)
+
+        with bypass_tenant_isolation():
+            # 1. Aggregate User lifecycle breakdown
+            client_qs = User.objects.filter(
+                tenant_id=tenant_id,
+                role=UserRole.CLIENT
+            )
+            lifecycle_counts = client_qs.aggregate(
+                total_leads=Count('id', filter=Q(lifecycle_status=ClientLifecycleStatus.LEAD)),
+                total_trials=Count('id', filter=Q(lifecycle_status=ClientLifecycleStatus.TRIAL)),
+                total_active=Count('id', filter=Q(lifecycle_status=ClientLifecycleStatus.ACTIVE)),
+                total_at_risk=Count('id', filter=Q(lifecycle_status=ClientLifecycleStatus.AT_RISK)),
+                total_inactive=Count('id', filter=Q(lifecycle_status=ClientLifecycleStatus.INACTIVE)),
+                total_churned=Count('id', filter=Q(lifecycle_status=ClientLifecycleStatus.CHURNED)),
+                reactivated_last_30d=Count('id', filter=Q(reactivated_at__gte=d30_ago)),
+            )
+
+            total_active = lifecycle_counts['total_active'] or 0
+            total_leads = lifecycle_counts['total_leads'] or 0
+            total_trials = lifecycle_counts['total_trials'] or 0
+            total_at_risk = lifecycle_counts['total_at_risk'] or 0
+            total_inactive = lifecycle_counts['total_inactive'] or 0
+            total_churned = lifecycle_counts['total_churned'] or 0
+            reactivated_30d = lifecycle_counts['reactivated_last_30d'] or 0
+
+            # Active pool = active + at_risk + inactive + churned
+            active_pool = total_active + total_at_risk + total_inactive + total_churned
+            if active_pool > 0:
+                retention_rate = round(Decimal(str(total_active + total_at_risk)) / Decimal(str(active_pool)) * Decimal('100.0'), 2)
+                churn_rate = round(Decimal(str(total_inactive + total_churned)) / Decimal(str(active_pool)) * Decimal('100.0'), 2)
+            else:
+                retention_rate = Decimal('0.00')
+                churn_rate = Decimal('0.00')
+
+            # 2. Average visit frequency from ClientRetentionMetrics
+            metrics_agg = ClientRetentionMetrics.all_objects.filter(
+                tenant_id=tenant_id
+            ).aggregate(
+                avg_frequency=Coalesce(Avg('visit_frequency_weekly_30d'), Value(Decimal('0.00')))
+            )
+            avg_freq = round(Decimal(str(metrics_agg['avg_frequency'] or '0.00')), 2)
+
+            # 3. Attendance, cancellation, and no-show summary for target_date
+            # Attended: checked_in or attended on target_date
+            attended_bk = Booking.all_objects.filter(
+                tenant_id=tenant_id,
+                status__in=['checked_in', 'attended']
+            ).filter(
+                Q(checked_in_at__date=target_date) |
+                Q(checked_in_at__isnull=True, session__start_at__date=target_date)
+            ).count()
+
+            facility_today = FacilityAccessLog.all_objects.filter(
+                tenant_id=tenant_id,
+                checked_in_at__date=target_date
+            ).count()
+
+            attended_today = attended_bk + facility_today
+
+            # Cancellations on target_date
+            cancellations_today = Booking.all_objects.filter(
+                tenant_id=tenant_id,
+                status='cancelled'
+            ).filter(
+                Q(cancelled_at__date=target_date) |
+                Q(cancelled_at__isnull=True, updated_at__date=target_date)
+            ).count()
+
+            # No-shows on target_date
+            no_shows_today = Booking.all_objects.filter(
+                tenant_id=tenant_id,
+                status='no_show'
+            ).filter(
+                Q(no_show_at__date=target_date) |
+                Q(no_show_at__isnull=True, session__start_at__date=target_date)
+            ).count()
+
+            # 4. Expiring packages in next 7 days
+            expiring_7d = Package.all_objects.filter(
+                tenant_id=tenant_id,
+                status='active',
+                credits_remaining__gt=0,
+                expires_at__gte=now,
+                expires_at__lte=d7_ahead
+            ).count()
+
+            defaults = {
+                'total_active_members': total_active,
+                'total_leads': total_leads,
+                'total_trials': total_trials,
+                'total_at_risk': total_at_risk,
+                'total_inactive': total_inactive,
+                'total_churned': total_churned,
+                'reactivated_last_30d': reactivated_30d,
+                'avg_visit_frequency': avg_freq,
+                'churn_rate_monthly': churn_rate,
+                'retention_rate_monthly': retention_rate,
+                'attended_today': attended_today,
+                'cancellations_today': cancellations_today,
+                'no_shows_today': no_shows_today,
+                'expiring_packages_next_7d': expiring_7d,
+            }
+
+            snapshot, _ = TenantRetentionDailySnapshot.all_objects.update_or_create(
+                tenant=tenant_obj,
+                snapshot_date=target_date,
+                defaults=defaults
+            )
+            logger.info(f"Captured retention snapshot for tenant {tenant_id} on {target_date}.")
+            return snapshot
+
+
+class SegmentQueryService:
+    """
+    Dynamic Momence/Mindbody-style filter evaluation service for SavedSegments
+    and on-demand client retention cohort filtering.
+    """
+
+    @classmethod
+    def apply_criteria(cls, queryset, filter_criteria: dict):
+        """
+        Applies JSON filter_criteria rules against a ClientRetentionMetrics queryset.
+        Ensures client and profile are eagerly loaded to prevent N+1 queries.
+        """
+        queryset = queryset.select_related('client', 'client__profile')
+        if not filter_criteria or not isinstance(filter_criteria, dict):
+            return queryset
+
+        now = timezone.now()
+
+        # 1. Lifecycle Status
+        lifecycle_status = filter_criteria.get('lifecycle_status')
+        if lifecycle_status:
+            statuses = lifecycle_status if isinstance(lifecycle_status, list) else [lifecycle_status]
+            queryset = queryset.filter(client__lifecycle_status__in=statuses)
+
+        # 2. Churn Risk Level
+        risk_level = filter_criteria.get('risk_level')
+        if risk_level:
+            levels = risk_level if isinstance(risk_level, list) else [risk_level]
+            queryset = queryset.filter(risk_level__in=levels)
+
+        # 3. Attendance Trend
+        attendance_trend = filter_criteria.get('attendance_trend')
+        if attendance_trend:
+            trends = attendance_trend if isinstance(attendance_trend, list) else [attendance_trend]
+            queryset = queryset.filter(attendance_trend__in=trends)
+
+        # 4. Inactivity & Recency Days
+        min_days = filter_criteria.get('min_days_since_last_visit', filter_criteria.get('days_inactive_gte'))
+        if min_days is not None:
+            try:
+                queryset = queryset.filter(days_since_last_visit__gte=int(min_days))
+            except (ValueError, TypeError):
+                pass
+
+        max_days = filter_criteria.get('max_days_since_last_visit', filter_criteria.get('days_inactive_lte'))
+        if max_days is not None:
+            try:
+                queryset = queryset.filter(days_since_last_visit__lte=int(max_days))
+            except (ValueError, TypeError):
+                pass
+
+        # 5. Visit Frequency (30-day window)
+        min_visits_30d = filter_criteria.get('min_visits_last_30d')
+        if min_visits_30d is not None:
+            try:
+                queryset = queryset.filter(visits_last_30d__gte=int(min_visits_30d))
+            except (ValueError, TypeError):
+                pass
+
+        max_visits_30d = filter_criteria.get('max_visits_last_30d')
+        if max_visits_30d is not None:
+            try:
+                queryset = queryset.filter(visits_last_30d__lte=int(max_visits_30d))
+            except (ValueError, TypeError):
+                pass
+
+        # 6. Credits Remaining & Unused Balances
+        min_credits = filter_criteria.get('min_credits_remaining', filter_criteria.get('unused_credits_gte'))
+        if min_credits is not None:
+            try:
+                queryset = queryset.filter(total_credits_remaining__gte=int(min_credits))
+            except (ValueError, TypeError):
+                pass
+
+        max_credits = filter_criteria.get('max_credits_remaining', filter_criteria.get('unused_credits_lte'))
+        if max_credits is not None:
+            try:
+                queryset = queryset.filter(total_credits_remaining__lte=int(max_credits))
+            except (ValueError, TypeError):
+                pass
+
+        # 7. Credit Utilization Rate (Under-utilization / Low Usage Alert)
+        max_util = filter_criteria.get('max_credit_utilization_rate')
+        if max_util is not None:
+            try:
+                queryset = queryset.filter(credit_utilization_rate__lte=Decimal(str(max_util)))
+            except (ValueError, TypeError):
+                pass
+
+        min_util = filter_criteria.get('min_credit_utilization_rate')
+        if min_util is not None:
+            try:
+                queryset = queryset.filter(credit_utilization_rate__gte=Decimal(str(min_util)))
+            except (ValueError, TypeError):
+                pass
+
+        # 8. Expiring Packages Window
+        expiring_days = filter_criteria.get('package_expiring_within_days', filter_criteria.get('expiring_within_days'))
+        if expiring_days is not None:
+            try:
+                exp_delta = timedelta(days=int(expiring_days))
+                queryset = queryset.filter(
+                    nearest_package_expiry_at__isnull=False,
+                    nearest_package_expiry_at__gte=now,
+                    nearest_package_expiry_at__lte=now + exp_delta
+                )
+            except (ValueError, TypeError):
+                pass
+
+        # 9. Cancellation & No-Show Rates
+        min_cancel = filter_criteria.get('min_cancellation_rate')
+        if min_cancel is not None:
+            try:
+                queryset = queryset.filter(cancellation_rate__gte=Decimal(str(min_cancel)))
+            except (ValueError, TypeError):
+                pass
+
+        min_noshow = filter_criteria.get('min_no_show_rate')
+        if min_noshow is not None:
+            try:
+                queryset = queryset.filter(no_show_rate__gte=Decimal(str(min_noshow)))
+            except (ValueError, TypeError):
+                pass
+
+        # 10. Tags Matching
+        tags = filter_criteria.get('tags', filter_criteria.get('tag'))
+        if tags:
+            tag_list = tags if isinstance(tags, list) else [tags]
+            tag_q = Q()
+            for t in tag_list:
+                tag_str = str(t).strip()
+                if tag_str:
+                    tag_q |= Q(client__tags__icontains=tag_str)
+            if tag_q:
+                queryset = queryset.filter(tag_q)
+
+        # 11. Assigned Trainer
+        trainer_id = filter_criteria.get('assigned_trainer_id', filter_criteria.get('trainer_id'))
+        if trainer_id:
+            queryset = queryset.filter(
+                Q(client__profile__assigned_trainer_id=trainer_id) |
+                Q(client__assigned_staff_relations__staff_id=trainer_id)
+            ).distinct()
+
+        return queryset
+

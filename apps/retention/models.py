@@ -157,3 +157,43 @@ class SavedSegment(TenantAwareModel):
 
     def __str__(self):
         return f"{self.name} ({'System' if self.is_system_preset else 'Custom'})"
+
+
+class TenantRetentionDailySnapshot(TenantAwareModel):
+    """
+    Daily aggregated historical snapshot of studio retention health.
+    Powers Momence/Mindbody period-over-period trend charts and cohort curves.
+    """
+    snapshot_date = models.DateField(db_index=True)
+
+    total_active_members = models.PositiveIntegerField(default=0)
+    total_leads = models.PositiveIntegerField(default=0)
+    total_trials = models.PositiveIntegerField(default=0)
+    total_at_risk = models.PositiveIntegerField(default=0)
+    total_inactive = models.PositiveIntegerField(default=0)
+    total_churned = models.PositiveIntegerField(default=0)
+    reactivated_last_30d = models.PositiveIntegerField(default=0)
+
+    # 30-Day Health
+    avg_visit_frequency = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
+    churn_rate_monthly = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
+    retention_rate_monthly = models.DecimalField(max_digits=5, decimal_places=2, default=0.00)
+
+    # Attendance summary for the date
+    attended_today = models.PositiveIntegerField(default=0)
+    cancellations_today = models.PositiveIntegerField(default=0)
+    no_shows_today = models.PositiveIntegerField(default=0)
+    expiring_packages_next_7d = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        verbose_name = _('Tenant Retention Daily Snapshot')
+        verbose_name_plural = _('Tenant Retention Daily Snapshots')
+        ordering = ['-snapshot_date']
+        unique_together = ['tenant', 'snapshot_date']
+        indexes = [
+            models.Index(fields=['tenant', 'snapshot_date'], name='ret_snap_tenant_date_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.tenant.name} Snapshot - {self.snapshot_date}"
+

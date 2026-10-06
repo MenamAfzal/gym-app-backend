@@ -234,6 +234,9 @@ class ClassSession(UUIDMixin, TimestampMixin, TenantMixin):
 
     class Meta:
         ordering = ['start_at']
+        indexes = [
+            models.Index(fields=['tenant', 'start_at', 'status'], name='sched_sess_tenant_start_idx'),
+        ]
 
     def __str__(self):
         return f"{self.template.name} on {self.start_at} ({self.status})"
@@ -452,6 +455,11 @@ class Booking(UUIDMixin, TimestampMixin, TenantMixin):
     )
     cancelled_at = models.DateTimeField(null=True, blank=True)
     cancellation_reason = models.TextField(blank=True, default="")
+    no_show_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp when booking was marked as no_show"
+    )
 
     class Meta:
         ordering = ['-created_at']
@@ -467,6 +475,8 @@ class Booking(UUIDMixin, TimestampMixin, TenantMixin):
             models.Index(fields=['tenant', 'status', 'created_at'], name='sched_bk_tenant_status_idx'),
             models.Index(fields=['client', 'status', 'checked_in_at'], name='sched_bk_client_attend_idx'),
             models.Index(fields=['session', 'status'], name='sched_bk_session_status_idx'),
+            models.Index(fields=['tenant', 'checked_in_at'], name='sched_bk_tenant_checkin_idx'),
+            models.Index(fields=['tenant', 'cancelled_at'], name='sched_bk_tenant_cancel_idx'),
         ]
 
     def __str__(self):

@@ -22,10 +22,33 @@ def recalculate_all_tenants_metrics():
                 processed = RetentionMetricsService.recalculate_for_tenant(tenant.id)
                 count += processed
                 logger.info(f"Processed {processed} clients for tenant {tenant.name} ({tenant.id})")
+                try:
+                    RetentionMetricsService.capture_daily_snapshot(tenant)
+                except Exception as snap_err:
+                    logger.exception(f"Failed to capture daily snapshot for tenant {tenant.id}: {snap_err}")
             except Exception as e:
                 logger.exception(f"Failed to recalculate retention metrics for tenant {tenant.id}: {str(e)}")
         
         logger.info(f"Completed recalculate_all_tenants_metrics across {active_tenants.count()} tenants ({count} total clients).")
+        return count
+
+
+@shared_task(name='retention.capture_all_tenants_daily_snapshots')
+def capture_all_tenants_daily_snapshots():
+    """
+    Captures daily retention snapshots for all active tenants.
+    """
+    logger.info("Starting daily snapshot capture for all active tenants...")
+    with bypass_tenant_isolation():
+        active_tenants = Tenant.objects.filter(is_active=True)
+        count = 0
+        for tenant in active_tenants:
+            try:
+                RetentionMetricsService.capture_daily_snapshot(tenant)
+                count += 1
+            except Exception as e:
+                logger.exception(f"Failed to capture daily snapshot for tenant {tenant.id}: {str(e)}")
+        logger.info(f"Captured daily snapshots for {count} tenants.")
         return count
 
 

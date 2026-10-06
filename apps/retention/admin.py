@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import ClientRetentionMetrics, SavedSegment
+from .models import ClientRetentionMetrics, SavedSegment, TenantRetentionDailySnapshot
 
 
 @admin.register(ClientRetentionMetrics)
@@ -15,3 +15,11 @@ class SavedSegmentAdmin(admin.ModelAdmin):
     list_display = ('name', 'tenant', 'is_system_preset', 'created_by', 'created_at')
     list_filter = ('tenant', 'is_system_preset')
     search_fields = ('name', 'description')
+
+
+@admin.register(TenantRetentionDailySnapshot)
+class TenantRetentionDailySnapshotAdmin(admin.ModelAdmin):
+    list_display = ('tenant', 'snapshot_date', 'total_active_members', 'retention_rate_monthly', 'churn_rate_monthly', 'attended_today')
+    list_filter = ('tenant', 'snapshot_date')
+    readonly_fields = ('created_at', 'updated_at')
+

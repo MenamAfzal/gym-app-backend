@@ -120,7 +120,8 @@ def run_no_show_marking_job():
                 )
                 for booking in bookings:
                     booking.status = 'no_show'
-                    booking.save(update_fields=['status'])
+                    booking.no_show_at = now
+                    booking.save(update_fields=['status', 'no_show_at'])
                     logger.info(f"Booking {booking.id} marked as no_show.")
                     try:
                         from apps.retention.tasks import recalculate_single_client_metrics

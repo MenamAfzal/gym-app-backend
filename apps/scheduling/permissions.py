@@ -59,11 +59,16 @@ class IsOwnerOrManager(permissions.BasePermission):
                 if basename in ['user', 'staff', 'users']:
                     app = 'staff_users'
                     resource = resource or 'staff'
+                elif 'retention' in basename:
+                    app = 'retention'
+                    resource = resource or ('segments' if 'segment' in basename else 'metrics')
                 else:
                     app = 'scheduling'
                     resource = resource or SCHEDULING_RESOURCE_MAP.get(basename, 'classes')
             action = getattr(view, 'action', None)
-            resolved_action = SCHEDULING_ACTION_MAP.get(action, action or 'edit')
+            if not action and hasattr(request, 'method'):
+                action = 'view' if request.method in ['GET', 'HEAD', 'OPTIONS'] else 'edit'
+            resolved_action = SCHEDULING_ACTION_MAP.get(action, action or 'view')
             return PermissionService.has_permission(user, app, resource, resolved_action)
         return False
 

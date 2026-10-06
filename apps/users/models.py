@@ -158,6 +158,15 @@ class UserProfile(UUIDMixin, TimestampMixin):
         related_name='primary_clients',
         help_text="The main location this client belongs to. Used for data isolation."
     )
+    assigned_trainer = models.ForeignKey(
+        'users.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assigned_client_profiles',
+        limit_choices_to={'role__in': ['trainer', 'gym_owner', 'gym_manager']},
+        help_text="Primary assigned personal trainer or coach"
+    )
     
     # Basic Info
     nickname = models.CharField(max_length=50, blank=True)

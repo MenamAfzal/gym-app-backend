@@ -8,14 +8,23 @@ from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.tenants.context import set_current_tenant, reset_current_tenant
 from apps.core.tenants.models import Tenant
-from apps.retention.models import AttendanceTrend, ChurnRiskLevel, ClientRetentionMetrics
-from apps.retention.services import RetentionMetricsService
+from apps.notifications.models import NotificationInbox
+from apps.retention.models import (
+    AttendanceTrend, ChurnRiskLevel, ClientRetentionMetrics,
+    SavedSegment, TenantRetentionDailySnapshot
+)
+from apps.retention.services import RetentionMetricsService, SegmentQueryService
+from apps.retention.views import (
+    ClientActivityTimelineView,
+    RetentionOverviewDashboardView,
+    SavedSegmentViewSet,
+)
 from apps.scheduling.models import (
     Booking, CancellationPolicy, ClassSession, ClassTemplate,
     FacilityAccessLog, Location, Package, PackageType, Payment, Room
 )
 from apps.scheduling.views import BookingViewSet
-from apps.users.models import ClientLifecycleStatus, User, UserRole
+from apps.users.models import ClientLifecycleStatus, User, UserProfile, UserRole
 
 
 class Phase1RetentionMetricsTestCase(TestCase):
@@ -464,3 +473,237 @@ class Phase1RetentionMetricsTestCase(TestCase):
             # 9: ClientRetentionMetrics bulk_create / upsert
             processed = RetentionMetricsService.recalculate_for_tenant(str(self.tenant.id))
             self.assertEqual(processed, 13)
+
+    def test_tenant_daily_snapshot_generation(self):
+        """
+        Verify that capture_daily_snapshot computes lifecycle counts,
+        retention/churn rates, attended counts, and expiring packages.
+        """
+        now = timezone.now()
+        today = now.date()
+
+        sess_today = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            start_at=now,
+            end_at=now + timedelta(minutes=45),
+            capacity=20
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            session=sess_today,
+            status='checked_in',
+            checked_in_at=now
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client2,
+            session=sess_today,
+            status='cancelled',
+            cancelled_at=now
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client3,
+            session=sess_today,
+            status='no_show',
+            no_show_at=now
+        )
+        Package.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            package_type=self.package_type,
+            credits_remaining=5,
+            total_credits_allocated=10,
+            expires_at=now + timedelta(days=3),
+            status='active'
+        )
+
+        RetentionMetricsService.recalculate_for_tenant(str(self.tenant.id))
+        snapshot = RetentionMetricsService.capture_daily_snapshot(self.tenant, today)
+
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot.snapshot_date, today)
+        self.assertEqual(snapshot.attended_today, 1)
+        self.assertEqual(snapshot.cancellations_today, 1)
+        self.assertEqual(snapshot.no_shows_today, 1)
+        self.assertEqual(snapshot.expiring_packages_next_7d, 1)
+        self.assertGreater(snapshot.retention_rate_monthly, Decimal('0.00'))
+
+    def test_saved_segment_preview_and_members_filtering(self):
+        """
+        Verify SavedSegment preview and members actions with criteria filtering:
+        trainer, expiring packages, unused credits, and lifecycle status.
+        """
+        now = timezone.now()
+
+        trainer = User.objects.create_user(
+            email="trainer@peakgym.com",
+            password="password123",
+            role=UserRole.TRAINER,
+            tenant=self.tenant
+        )
+        profile, _ = UserProfile.objects.get_or_create(user=self.client1)
+        profile.assigned_trainer = trainer
+        profile.save()
+
+        Package.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            package_type=self.package_type,
+            credits_remaining=8,
+            total_credits_allocated=10,
+            expires_at=now + timedelta(days=4),
+            status='active'
+        )
+
+        RetentionMetricsService.recalculate_for_tenant(str(self.tenant.id))
+
+        view = SavedSegmentViewSet.as_view({'post': 'preview'})
+        req = self.factory.post(
+            '/api/v1/retention/segments/preview/',
+            {'filter_criteria': {'package_expiring_within_days': 7}},
+            format='json'
+        )
+        req.tenant = self.tenant
+        force_authenticate(req, user=self.owner)
+        resp = view(req)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['matching_count'], 1)
+
+        req2 = self.factory.post(
+            '/api/v1/retention/segments/preview/',
+            {'filter_criteria': {'assigned_trainer_id': str(trainer.id)}},
+            format='json'
+        )
+        req2.tenant = self.tenant
+        force_authenticate(req2, user=self.owner)
+        resp2 = view(req2)
+        self.assertEqual(resp2.status_code, 200)
+        self.assertEqual(resp2.data['matching_count'], 1)
+
+        segment = SavedSegment.objects.create(
+            tenant=self.tenant,
+            name="Expiring Soon",
+            filter_criteria={'package_expiring_within_days': 7},
+            created_by=self.owner
+        )
+        members_view = SavedSegmentViewSet.as_view({'get': 'members'})
+        req3 = self.factory.get(f'/api/v1/retention/segments/{segment.id}/members/')
+        req3.tenant = self.tenant
+        force_authenticate(req3, user=self.owner)
+        resp3 = members_view(req3, pk=str(segment.id))
+        self.assertEqual(resp3.status_code, 200)
+        results = resp3.data.get('results', resp3.data) if isinstance(resp3.data, dict) else resp3.data
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['client_email'], self.client1.email)
+
+    def test_client_activity_timeline_view(self):
+        """
+        Verify ClientActivityTimelineView returns chronological, normalized
+        timeline events and enforces tenant isolation.
+        """
+        now = timezone.now()
+
+        b = Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            session=ClassSession.objects.create(
+                tenant=self.tenant,
+                template=self.template,
+                room=self.room,
+                start_at=now - timedelta(days=2),
+                end_at=now - timedelta(days=2, minutes=-45),
+                capacity=20
+            ),
+            status='checked_in',
+            checked_in_at=now - timedelta(days=2)
+        )
+        Payment.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            amount=Decimal('150.00'),
+            type='package_purchase',
+            status='completed',
+            idempotency_key=f"pay-timeline-{now.timestamp()}"
+        )
+        NotificationInbox.objects.create(
+            tenant=self.tenant,
+            recipient=self.client1,
+            title="Welcome to Studio",
+            body="Thanks for signing up!",
+            notification_type="SYSTEM"
+        )
+
+        view = ClientActivityTimelineView.as_view()
+        req = self.factory.get(f'/api/v1/retention/clients/{self.client1.id}/timeline/')
+        req.tenant = self.tenant
+        force_authenticate(req, user=self.owner)
+        resp = view(req, client_id=str(self.client1.id))
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('results', resp.data)
+        self.assertGreater(resp.data['count'], 0)
+
+        results = resp.data['results']
+        timestamps = [r['timestamp'] for r in results if r.get('timestamp')]
+        self.assertEqual(timestamps, sorted(timestamps, reverse=True))
+
+        # Test tenant isolation: client belonging to another tenant
+        other_tenant = Tenant.objects.create(name="Other Gym", subdomain="other-gym")
+        other_client = User.objects.create_user(
+            email="other@gym.com",
+            password="pass",
+            role=UserRole.CLIENT,
+            tenant=other_tenant
+        )
+        req_iso = self.factory.get(f'/api/v1/retention/clients/{other_client.id}/timeline/')
+        req_iso.tenant = self.tenant
+        force_authenticate(req_iso, user=self.owner)
+        resp_iso = view(req_iso, client_id=str(other_client.id))
+        self.assertEqual(resp_iso.status_code, 404)
+
+    def test_retention_overview_dashboard_view(self):
+        """
+        Verify RetentionOverviewDashboardView returns period-over-period attendance,
+        lifecycle breakdown, and alerts.
+        """
+        now = timezone.now()
+
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            session=ClassSession.objects.create(
+                tenant=self.tenant,
+                template=self.template,
+                room=self.room,
+                start_at=now - timedelta(days=5),
+                end_at=now - timedelta(days=5, minutes=-45),
+                capacity=20
+            ),
+            status='checked_in',
+            checked_in_at=now - timedelta(days=5)
+        )
+
+        RetentionMetricsService.recalculate_for_tenant(str(self.tenant.id))
+
+        view = RetentionOverviewDashboardView.as_view()
+        req = self.factory.get('/api/v1/retention/dashboard/overview/?days=30')
+        req.tenant = self.tenant
+        force_authenticate(req, user=self.owner)
+        resp = view(req)
+
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data
+        self.assertIn('lifecycle_breakdown', data)
+        self.assertIn('retention_kpis', data)
+        self.assertIn('attendance_summary', data)
+        self.assertIn('membership_alerts', data)
+        self.assertIn('trend_series', data)
+
+        self.assertIn('current_period', data['attendance_summary'])
+        self.assertIn('deltas_percent', data['attendance_summary'])
+        self.assertGreater(data['attendance_summary']['current_period']['total_attended'], 0)
+
