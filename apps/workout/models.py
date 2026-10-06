@@ -373,6 +373,13 @@ class WorkoutAssignment(TenantMixin):
         ordering = ['-created_at']
 
     def save(self, *args, **kwargs):
+        if not self.date and self.workout_id:
+            try:
+                w = self.workout
+                if w and (w.start_date or w.end_date):
+                    self.date = w.start_date or w.end_date
+            except Exception:
+                pass
         super().save(*args, **kwargs)
         if self.workout_id and not getattr(self.workout, "is_custom", False):
             Workout.objects.filter(id=self.workout_id).update(is_custom=True)

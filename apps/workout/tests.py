@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIRequestFactory, force_authenticate
@@ -993,4 +993,276 @@ class WorkoutMatchingTestCase(TestCase):
         self.assertEqual(cloned.name, "Cloned Single Workout")
         self.assertEqual(cloned.workout_exercises.count(), 1)
         self.assertEqual(cloned.workout_exercises.first().exercise.name, "Exercise For Copy")
+
+    def test_workout_creation_sets_date_on_client_assignment_record(self):
+        """
+        Verify that creating a workout with an assigned client and session sets
+        the selected workout date on the background WorkoutAssignment record.
+        """
+        template = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Solo Session Template",
+            category="Solo",
+            duration_min=60
+        )
+        session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template,
+            room=self.room,
+            start_at=timezone.now(),
+            end_at=timezone.now() + timedelta(hours=1),
+            capacity=10
+        )
+        ex = Exercise.objects.create(tenant=self.tenant, name="Push Up")
+
+        create_req = self.factory.post(
+            "/api/v1/workout/create/",
+            {
+                "name": "Oct 2 Assigned Workout",
+                "session_type": "Solo",
+                "movement_level": "Stability",
+                "user_id": str(self.client_user.id),
+                "session_id": session.id,
+                "start_date": "2026-10-02",
+                "end_date": "2026-10-02",
+                "workout_type": 1,
+                "exercises": [{"exercise_id": ex.id, "sets": 3, "reps": 12}]
+            },
+            format="json"
+        )
+        force_authenticate(create_req, user=self.trainer)
+        create_resp = CreateWorkoutAPIView.as_view()(create_req)
+        self.assertEqual(create_resp.status_code, 201)
+        created_w_id = create_resp.data["id"]
+
+        workout = Workout.objects.get(id=created_w_id)
+        self.assertEqual(str(workout.start_date), "2026-10-02")
+        self.assertEqual(str(workout.end_date), "2026-10-02")
+
+        assignment = WorkoutAssignment.objects.get(workout=workout, user=self.client_user)
+        self.assertIsNotNone(assignment.date)
+        self.assertEqual(str(assignment.date), "2026-10-02")
+        self.assertEqual(assignment.session, session)
+
+    def test_today_workout_api_date_boundary_filtering(self):
+        """
+        Ensure Today's Workout API only returns a workout when the requested date falls
+        within its configured date range (e.g. October 2nd only), and returns 404 for
+        dates outside the range (Sept 28, 29, 30, Oct 1, Oct 3, Oct 4).
+        """
+        template = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Solo Session Template",
+            category="Solo",
+            duration_min=60
+        )
+        session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template,
+            room=self.room,
+            start_at=timezone.now(),
+            end_at=timezone.now() + timedelta(hours=1),
+            capacity=10
+        )
+        ex = Exercise.objects.create(tenant=self.tenant, name="Deadlift")
+
+        # Create workout configured only for October 2nd, 2026
+        create_req = self.factory.post(
+            "/api/v1/workout/create/",
+            {
+                "name": "Strict October 2 Workout",
+                "session_type": "Solo",
+                "movement_level": "Stability",
+                "user_id": str(self.client_user.id),
+                "session_id": session.id,
+                "start_date": "2026-10-02",
+                "end_date": "2026-10-02",
+                "workout_type": 1,
+                "exercises": [{"exercise_id": ex.id, "sets": 4, "reps": 8}]
+            },
+            format="json"
+        )
+        force_authenticate(create_req, user=self.trainer)
+        create_resp = CreateWorkoutAPIView.as_view()(create_req)
+        self.assertEqual(create_resp.status_code, 201)
+        created_w_id = create_resp.data["id"]
+
+        # 1. Matching target date: 2026-10-02 -> MUST be returned
+        req_match = self.factory.get("/api/v1/workout/today/?date=2026-10-02")
+        force_authenticate(req_match, user=self.client_user)
+        resp_match = TodayWorkoutAPIView.as_view()(req_match)
+        self.assertEqual(resp_match.status_code, 200)
+        self.assertEqual(len(resp_match.data["data"]), 1)
+        self.assertEqual(resp_match.data["data"][0]["id"], created_w_id)
+
+        # 2. Outside dates: past dates and future dates -> MUST NOT be returned
+        outside_dates = [
+            "2026-09-28",
+            "2026-09-29",
+            "2026-09-30",
+            "2026-10-01",
+            "2026-10-03",
+            "2026-10-04",
+        ]
+        for d in outside_dates:
+            req_outside = self.factory.get(f"/api/v1/workout/today/?date={d}")
+            force_authenticate(req_outside, user=self.client_user)
+            resp_outside = TodayWorkoutAPIView.as_view()(req_outside)
+            self.assertEqual(
+                resp_outside.status_code,
+                404,
+                f"Workout should not be returned for date {d}"
+            )
+
+    def test_today_workout_api_date_boundary_filtering_with_booked_session(self):
+        """
+        Verify that even when the client has a session booked on past or future dates,
+        an assigned workout configured strictly for 2026-10-02 is NOT returned for
+        bookings on other dates (e.g. 2026-10-01 or 2026-10-03).
+        """
+        template = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Daily Solo Session",
+            category="Solo",
+            duration_min=60
+        )
+        start1 = datetime(2026, 10, 1, 9, 0, tzinfo=dt_timezone.utc)
+        session_oct1 = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template,
+            room=self.room,
+            start_at=start1,
+            end_at=start1 + timedelta(hours=1),
+            capacity=10
+        )
+        start2 = datetime(2026, 10, 2, 9, 0, tzinfo=dt_timezone.utc)
+        session_oct2 = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template,
+            room=self.room,
+            start_at=start2,
+            end_at=start2 + timedelta(hours=1),
+            capacity=10
+        )
+        start3 = datetime(2026, 10, 3, 9, 0, tzinfo=dt_timezone.utc)
+        session_oct3 = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template,
+            room=self.room,
+            start_at=start3,
+            end_at=start3 + timedelta(hours=1),
+            capacity=10
+        )
+
+        # Bookings on Oct 1, Oct 2, Oct 3
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            session=session_oct1,
+            status="booked"
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            session=session_oct2,
+            status="booked"
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            session=session_oct3,
+            status="booked"
+        )
+
+        ex = Exercise.objects.create(tenant=self.tenant, name="Squat")
+        workout = Workout.objects.create(
+            tenant=self.tenant,
+            name="Oct 2 Only Workout",
+            session_type="Solo",
+            movement_level="Stability",
+            assigned_user=self.client_user,
+            session=session_oct2,
+            start_date=datetime(2026, 10, 2).date(),
+            end_date=datetime(2026, 10, 2).date(),
+            created_by=self.trainer,
+            is_custom=True
+        )
+        WorkoutExercise.objects.create(tenant=self.tenant, workout=workout, exercise=ex, order=1)
+        WorkoutAssignment.objects.create(
+            tenant=self.tenant,
+            workout=workout,
+            user=self.client_user,
+            session=session_oct2,
+            date=datetime(2026, 10, 2).date(),
+            session_type="Solo",
+            assigned_by=self.trainer
+        )
+
+        # Oct 2: Returns the assigned workout
+        req_oct2 = self.factory.get("/api/v1/workout/today/?date=2026-10-02")
+        force_authenticate(req_oct2, user=self.client_user)
+        resp_oct2 = TodayWorkoutAPIView.as_view()(req_oct2)
+        self.assertEqual(resp_oct2.status_code, 200)
+        self.assertEqual(resp_oct2.data["data"][0]["id"], workout.id)
+
+        # Oct 1: Outside configured date range -> workout must NOT be returned
+        req_oct1 = self.factory.get("/api/v1/workout/today/?date=2026-10-01")
+        force_authenticate(req_oct1, user=self.client_user)
+        resp_oct1 = TodayWorkoutAPIView.as_view()(req_oct1)
+        self.assertEqual(resp_oct1.status_code, 404)
+
+        # Oct 3: Outside configured date range -> workout must NOT be returned
+        req_oct3 = self.factory.get("/api/v1/workout/today/?date=2026-10-03")
+        force_authenticate(req_oct3, user=self.client_user)
+        resp_oct3 = TodayWorkoutAPIView.as_view()(req_oct3)
+        self.assertEqual(resp_oct3.status_code, 404)
+
+    def test_today_workout_api_multi_day_date_range(self):
+        """
+        Verify that a workout configured with a multi-day range (e.g. 2026-10-02 to 2026-10-04)
+        is returned for dates within the range and rejected outside the range.
+        """
+        ex = Exercise.objects.create(tenant=self.tenant, name="Pull Up")
+        workout = Workout.objects.create(
+            tenant=self.tenant,
+            name="Oct 2 to Oct 4 Range Workout",
+            session_type="Solo",
+            movement_level="Stability",
+            assigned_user=self.client_user,
+            start_date=datetime(2026, 10, 2).date(),
+            end_date=datetime(2026, 10, 4).date(),
+            created_by=self.trainer,
+            is_custom=True
+        )
+        WorkoutExercise.objects.create(tenant=self.tenant, workout=workout, exercise=ex, order=1)
+        WorkoutAssignment.objects.create(
+            tenant=self.tenant,
+            workout=workout,
+            user=self.client_user,
+            date=datetime(2026, 10, 2).date(),
+            session_type="Solo",
+            assigned_by=self.trainer
+        )
+
+        # Before range: 2026-10-01 -> 404
+        req_before = self.factory.get("/api/v1/workout/today/?date=2026-10-01")
+        force_authenticate(req_before, user=self.client_user)
+        self.assertEqual(TodayWorkoutAPIView.as_view()(req_before).status_code, 404)
+
+        # Within range: 2026-10-02, 2026-10-03, 2026-10-04 -> 200
+        for in_date in ["2026-10-02", "2026-10-03", "2026-10-04"]:
+            req_in = self.factory.get(f"/api/v1/workout/today/?date={in_date}")
+            force_authenticate(req_in, user=self.client_user)
+            resp_in = TodayWorkoutAPIView.as_view()(req_in)
+            self.assertEqual(resp_in.status_code, 200, f"Expected 200 for date {in_date}")
+            self.assertEqual(resp_in.data["data"][0]["id"], workout.id)
+
+        # After range: 2026-10-05 -> 404
+        req_after = self.factory.get("/api/v1/workout/today/?date=2026-10-05")
+        force_authenticate(req_after, user=self.client_user)
+        self.assertEqual(TodayWorkoutAPIView.as_view()(req_after).status_code, 404)
+
 

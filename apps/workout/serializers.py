@@ -147,6 +147,14 @@ class WorkoutCreateWithExercisesSerializer(serializers.ModelSerializer):
                 if alias in data_copy and data_copy[alias]:
                     data_copy['session'] = data_copy[alias]
                     break
+        if 'start_date' not in data_copy or not data_copy.get('start_date'):
+            for alias in ['date', 'workout_date', 'scheduled_date']:
+                if alias in data_copy and data_copy[alias]:
+                    data_copy['start_date'] = data_copy[alias]
+                    break
+        if ('end_date' not in data_copy or not data_copy.get('end_date')) and ('date' in data_copy or 'workout_date' in data_copy or 'scheduled_date' in data_copy):
+            if data_copy.get('start_date'):
+                data_copy['end_date'] = data_copy.get('start_date')
         if data_copy.get('assigned_user'):
             data_copy['is_custom'] = True
         return super().to_internal_value(data_copy)
@@ -163,15 +171,23 @@ class WorkoutCreateWithExercisesSerializer(serializers.ModelSerializer):
         workout = Workout.objects.create(**validated_data)
 
         if workout.assigned_user:
-            WorkoutAssignment.objects.get_or_create(
+            selected_date = workout.start_date or workout.end_date or validated_data.get('start_date') or validated_data.get('end_date')
+            defaults = {
+                'assigned_by': validated_data.get('created_by') or getattr(workout, 'created_by', None),
+                'session_type': workout.session_type,
+                'date': selected_date,
+            }
+            if hasattr(workout, 'tenant') and workout.tenant:
+                defaults['tenant'] = workout.tenant
+            assignment, created = WorkoutAssignment.objects.get_or_create(
                 workout=workout,
                 user=workout.assigned_user,
                 session=workout.session,
-                defaults={
-                    'assigned_by': validated_data.get('created_by') or getattr(workout, 'created_by', None),
-                    'session_type': workout.session_type,
-                }
+                defaults=defaults
             )
+            if not created and selected_date and assignment.date != selected_date:
+                assignment.date = selected_date
+                assignment.save(update_fields=['date'])
 
         group_objects = {}
         for group_data in groups_data:
@@ -520,6 +536,14 @@ class WorkoutUpdateSerializer(serializers.ModelSerializer):
                 if alias in data_copy and data_copy[alias]:
                     data_copy['session'] = data_copy[alias]
                     break
+        if 'start_date' not in data_copy or not data_copy.get('start_date'):
+            for alias in ['date', 'workout_date', 'scheduled_date']:
+                if alias in data_copy and data_copy[alias]:
+                    data_copy['start_date'] = data_copy[alias]
+                    break
+        if ('end_date' not in data_copy or not data_copy.get('end_date')) and ('date' in data_copy or 'workout_date' in data_copy or 'scheduled_date' in data_copy):
+            if data_copy.get('start_date'):
+                data_copy['end_date'] = data_copy.get('start_date')
         if data_copy.get('assigned_user'):
             data_copy['is_custom'] = True
         return super().to_internal_value(data_copy)
@@ -537,15 +561,33 @@ class WorkoutUpdateSerializer(serializers.ModelSerializer):
         instance.save()
 
         if instance.assigned_user:
-            WorkoutAssignment.objects.get_or_create(
+            selected_date = instance.start_date or instance.end_date or validated_data.get('start_date') or validated_data.get('end_date')
+            defaults = {
+                'assigned_by': getattr(instance, 'created_by', None),
+                'session_type': instance.session_type,
+                'date': selected_date,
+            }
+            if hasattr(instance, 'tenant') and instance.tenant:
+                defaults['tenant'] = instance.tenant
+            assignment, created = WorkoutAssignment.objects.get_or_create(
                 workout=instance,
                 user=instance.assigned_user,
                 session=instance.session,
-                defaults={
-                    'assigned_by': getattr(instance, 'created_by', None),
-                    'session_type': instance.session_type,
-                }
+                defaults=defaults
             )
+            if not created:
+                updated_fields = []
+                if selected_date and assignment.date != selected_date:
+                    assignment.date = selected_date
+                    updated_fields.append('date')
+                if instance.session and assignment.session != instance.session:
+                    assignment.session = instance.session
+                    updated_fields.append('session')
+                if instance.session_type and assignment.session_type != instance.session_type:
+                    assignment.session_type = instance.session_type
+                    updated_fields.append('session_type')
+                if updated_fields:
+                    assignment.save(update_fields=updated_fields)
 
         if tags_data is not None:
             tag_objs = [WorkoutTag.objects.get_or_create(name=t)[0] for t in tags_data]

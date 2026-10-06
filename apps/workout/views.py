@@ -439,7 +439,7 @@ class WorkoutCopyAPIView(APIView):
                     session=cloned.session,
                     assigned_by=request.user,
                     session_type=cloned.session_type,
-                    date=cloned.start_date
+                    date=cloned.start_date or cloned.end_date
                 )
 
         serializer = WorkoutSerializer(cloned, context={"request": request})
@@ -447,6 +447,42 @@ class WorkoutCopyAPIView(APIView):
             {"detail": "Workout copied successfully.", "data": serializer.data},
             status=status.HTTP_201_CREATED
         )
+
+
+def is_workout_active_on_date(workout, target_date):
+    """
+    Checks if a workout is applicable for target_date based on its start_date and end_date.
+    Ensures workouts are not returned for dates before the start date or after the end date.
+    """
+    if not workout:
+        return False
+    if workout.start_date and target_date < workout.start_date:
+        return False
+    if workout.end_date and target_date > workout.end_date:
+        return False
+    return True
+
+
+def is_assignment_active_on_date(assignment, target_date):
+    """
+    Checks if a WorkoutAssignment is applicable for the given target_date.
+    - An assigned workout is returned only when the requested date falls within its configured date range.
+    - If assignment has an explicit date, target_date must match (or fall within multi-day workout range).
+    """
+    if not assignment or not assignment.workout:
+        return False
+    w = assignment.workout
+    if not is_workout_active_on_date(w, target_date):
+        return False
+    if assignment.date:
+        if w.start_date and w.end_date and w.start_date < w.end_date:
+            if not (w.start_date <= target_date <= w.end_date):
+                return False
+        elif assignment.date != target_date:
+            return False
+    return True
+
+
 class TodayWorkoutAPIView(APIView):
     permission_classes = [IsAuthenticated]
     def get(self, request):
@@ -489,13 +525,28 @@ class TodayWorkoutAPIView(APIView):
                 .order_by("session__start_at", "created_at")
             )
 
-        user_assignments = list(
+        user_assignments_qs = (
             WorkoutAssignment.objects.filter(user=user)
-            .filter(Q(date__isnull=True) | Q(date=target_date))
+            .filter(
+                Q(workout__start_date__isnull=True) | Q(workout__start_date__lte=target_date)
+            )
+            .filter(
+                Q(workout__end_date__isnull=True) | Q(workout__end_date__gte=target_date)
+            )
+            .filter(
+                Q(date__isnull=True) |
+                Q(date=target_date) |
+                Q(workout__start_date__lte=target_date, workout__end_date__gte=target_date)
+            )
             .select_related("workout")
             .prefetch_related("workout__workout_exercises")
             .order_by("-created_at")
         )
+        user_assignments = [
+            a for a in user_assignments_qs
+            if is_assignment_active_on_date(a, target_date)
+        ]
+
         user_direct_assigned_workouts = list(
             Workout.objects.filter(assigned_user=user)
             .filter(Q(start_date__isnull=True) | Q(start_date__lte=target_date))
@@ -503,6 +554,10 @@ class TodayWorkoutAPIView(APIView):
             .prefetch_related("workout_exercises")
             .order_by("-created_at")
         )
+        user_direct_assigned_workouts = [
+            w for w in user_direct_assigned_workouts
+            if is_workout_active_on_date(w, target_date)
+        ]
 
         favorited_ids = set(
             FavoriteWorkout.objects.filter(
@@ -513,11 +568,11 @@ class TodayWorkoutAPIView(APIView):
         if not bookings:
             assigned_today = []
             for a in user_assignments:
-                if a.date == target_date or (a.date is None and a.workout):
+                if a.workout and is_assignment_active_on_date(a, target_date):
                     if a.workout not in assigned_today:
                         assigned_today.append(a.workout)
             for w in user_direct_assigned_workouts:
-                if w not in assigned_today:
+                if is_workout_active_on_date(w, target_date) and w not in assigned_today:
                     assigned_today.append(w)
 
             if assigned_today:
@@ -585,6 +640,10 @@ class TodayWorkoutAPIView(APIView):
             .prefetch_related("workout_exercises")
             .order_by("-created_at")
         )
+        available_workouts = [
+            w for w in available_workouts
+            if is_workout_active_on_date(w, target_date)
+        ]
 
         workouts_data = []
         matched_pair_keys = set()
@@ -593,7 +652,7 @@ class TodayWorkoutAPIView(APIView):
 
             assigned_candidates = []
             for a in user_assignments:
-                if not a.workout:
+                if not a.workout or not is_assignment_active_on_date(a, target_date):
                     continue
                 score = 0
                 if a.session_id and str(a.session_id) == str(item["session_id"]):
@@ -614,6 +673,8 @@ class TodayWorkoutAPIView(APIView):
                     assigned_candidates.append((score, a.workout))
 
             for w in user_direct_assigned_workouts:
+                if not is_workout_active_on_date(w, target_date):
+                    continue
                 if w.session_id and str(w.session_id) == str(item["session_id"]):
                     score = 1000
                 elif not w.session_id:
@@ -730,7 +791,7 @@ class WorkoutAssignmentListCreateAPIView(APIView):
         target_user = serializer.validated_data['user_obj']
         session_obj = serializer.validated_data.get('session_obj')
         session_type = serializer.validated_data.get('session_type') or (session_obj.name if session_obj else workout.session_type)
-        date_val = serializer.validated_data.get('date')
+        date_val = serializer.validated_data.get('date') or workout.start_date or workout.end_date
         notes = serializer.validated_data.get('notes', '')
 
         assignment, created = WorkoutAssignment.objects.update_or_create(
@@ -794,7 +855,7 @@ class AssignSpecificWorkoutAPIView(APIView):
         target_user = serializer.validated_data['user_obj']
         session_obj = serializer.validated_data.get('session_obj')
         session_type = serializer.validated_data.get('session_type') or (session_obj.name if session_obj else workout.session_type)
-        date_val = serializer.validated_data.get('date')
+        date_val = serializer.validated_data.get('date') or workout.start_date or workout.end_date
         notes = serializer.validated_data.get('notes', '')
 
         assignment, created = WorkoutAssignment.objects.update_or_create(
