@@ -181,11 +181,19 @@ class StripePackageService:
                 client=client,
                 amount=amount_total / 100.0,
                 type='package_purchase',
+                package=package,
+                package_type=package_type,
                 status='completed',
                 provider_ref=session.get('id'),
                 idempotency_key=session.get('id')
             )
             logger.info(f"Created Package {package.id} and Payment for checkout session {session.get('id')}")
+
+            try:
+                from apps.retention.tasks import recalculate_single_client_metrics
+                recalculate_single_client_metrics.delay(str(tenant_id), str(client_id))
+            except Exception:
+                pass
 
     @staticmethod
     def handle_subscription_updated(subscription) -> None:

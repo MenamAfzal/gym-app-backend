@@ -389,10 +389,24 @@ class Package(UUIDMixin, TimestampMixin, TenantMixin):
         related_name='assigned_packages',
         help_text="Staff or Admin who manually assigned this package"
     )
+    total_credits_allocated = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="Frozen snapshot of total credits granted upon purchase/assignment"
+    )
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['tenant', 'status', 'expires_at'], name='sched_pkg_tenant_exp_idx'),
+        ]
 
     def save(self, *args, **kwargs):
         if self.price is None and self.package_type_id:
             self.price = self.package_type.price
+        if self.total_credits_allocated is None:
+            if self.credits_remaining is not None:
+                self.total_credits_allocated = self.credits_remaining
+            elif self.package_type_id and hasattr(self.package_type, 'credit_count'):
+                self.total_credits_allocated = self.package_type.credit_count
         super().save(*args, **kwargs)
 
     def __str__(self):
@@ -432,6 +446,12 @@ class Booking(UUIDMixin, TimestampMixin, TenantMixin):
      
     join_mode = models.CharField(max_length=20, default='physical')
     music_preference = models.CharField(max_length=100, blank=True)
+    is_late_cancel = models.BooleanField(
+        default=False,
+        help_text="True if cancelled after late cancellation cutoff window"
+    )
+    cancelled_at = models.DateTimeField(null=True, blank=True)
+    cancellation_reason = models.TextField(blank=True, default="")
 
     class Meta:
         ordering = ['-created_at']
@@ -442,6 +462,11 @@ class Booking(UUIDMixin, TimestampMixin, TenantMixin):
                 condition=models.Q(status='booked', spot__isnull=False),
                 name='unique_active_spot_booking'
             )
+        ]
+        indexes = [
+            models.Index(fields=['tenant', 'status', 'created_at'], name='sched_bk_tenant_status_idx'),
+            models.Index(fields=['client', 'status', 'checked_in_at'], name='sched_bk_client_attend_idx'),
+            models.Index(fields=['session', 'status'], name='sched_bk_session_status_idx'),
         ]
 
     def __str__(self):
@@ -560,14 +585,23 @@ class Payment(UUIDMixin, TimestampMixin, TenantMixin):
         ('pending', 'Pending'),
         ('completed', 'Completed'),
         ('failed', 'Failed'),
+        ('refunded', 'Refunded'),
+        ('past_due', 'Past Due'),
     ]
     client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='payments')
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     type = models.CharField(max_length=20, choices=TYPE_CHOICES)
     related_booking = models.ForeignKey(Booking, on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
+    package = models.ForeignKey('Package', on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
+    package_type = models.ForeignKey('PackageType', on_delete=models.SET_NULL, null=True, blank=True, related_name='payments')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='completed')
     provider_ref = models.CharField(max_length=255, blank=True)
     idempotency_key = models.CharField(max_length=255, unique=True, db_index=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['tenant', 'status', 'created_at'], name='sched_pay_tenant_date_idx'),
+        ]
 
     def save(self, *args, **kwargs):
         is_new = self._state.adding
@@ -657,6 +691,12 @@ class FacilityAccessLog(UUIDMixin, TimestampMixin, TenantMixin):
     location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='access_logs')
     checked_in_at = models.DateTimeField(auto_now_add=True)
     checked_out_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['tenant', 'checked_in_at'], name='sched_fac_tenant_checkin_idx'),
+            models.Index(fields=['client', 'checked_in_at'], name='sched_fac_client_checkin_idx'),
+        ]
 
     def __str__(self):
         return f"{self.client.email} at {self.location.name} (In: {self.checked_in_at})"

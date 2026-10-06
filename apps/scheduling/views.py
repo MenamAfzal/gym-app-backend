@@ -1137,7 +1137,14 @@ class BookingViewSet(viewsets.ModelViewSet):
 
         is_early_cancel = now <= cutoff_time
 
+        cancellation_reason = ''
+        if hasattr(request, 'data') and isinstance(request.data, dict):
+            cancellation_reason = request.data.get('cancellation_reason') or request.data.get('reason') or ''
+
         booking.status = 'cancelled'
+        booking.is_late_cancel = not is_early_cancel
+        booking.cancelled_at = now
+        booking.cancellation_reason = cancellation_reason
         booking.save()
 
         if is_early_cancel:
@@ -1160,6 +1167,14 @@ class BookingViewSet(viewsets.ModelViewSet):
                 booking_id=booking.id,
                 is_late_cancel=not is_early_cancel
             ))
+        except Exception:
+            pass
+
+        # Trigger retention recalculation hook
+        try:
+            from apps.retention.tasks import recalculate_single_client_metrics
+            t_id = booking.tenant_id or (booking_tenant.id if hasattr(booking_tenant, 'id') else booking_tenant)
+            recalculate_single_client_metrics.delay(str(t_id), str(booking.client_id))
         except Exception:
             pass
 
@@ -1201,6 +1216,13 @@ class BookingViewSet(viewsets.ModelViewSet):
             ))
         except Exception as e:
             # Reward failures must never break core check-in flow
+            pass
+
+        # Trigger retention recalculation hook
+        try:
+            from apps.retention.tasks import recalculate_single_client_metrics
+            recalculate_single_client_metrics.delay(str(booking.tenant_id), str(booking.client_id))
+        except Exception:
             pass
 
         return Response({"detail": "Checked in successfully."})

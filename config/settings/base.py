@@ -40,6 +40,7 @@ LOCAL_APPS = [
     'apps.workout',
     'apps.client_assements',
     'apps.rewards',
+    'apps.retention',
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -140,6 +141,14 @@ CELERY_BEAT_SCHEDULE = {
     'process-time-based-automations': {
         'task': 'notifications.process_time_based_automations',
         'schedule': crontab(minute='*/5'),  # Every 5 minutes
+    },
+    'run-no-show-marking-job': {
+        'task': 'scheduling.run_no_show_marking_job',
+        'schedule': crontab(minute='*/15'),
+    },
+    'recalculate-retention-metrics-daily': {
+        'task': 'retention.recalculate_all_tenants_metrics',
+        'schedule': crontab(hour=2, minute=0),
     },
 }
 

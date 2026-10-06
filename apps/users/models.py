@@ -22,6 +22,16 @@ class UserRole(models.TextChoices):
     TRAINER = 'trainer', _('Trainer')
     CLIENT = 'client', _('Client')
 
+
+class ClientLifecycleStatus(models.TextChoices):
+    LEAD = 'lead', _('Lead')
+    TRIAL = 'trial', _('Trial')
+    ACTIVE = 'active', _('Active')
+    AT_RISK = 'at_risk', _('At Risk')
+    INACTIVE = 'inactive', _('Inactive')
+    CHURNED = 'churned', _('Churned')
+
+
 class UserManager(BaseUserManager):
     """Custom manager for email-based authentication."""
     
@@ -67,6 +77,21 @@ class User(UUIDMixin, AbstractUser):
         db_index=True # Optimize permission checks
     )
 
+    lifecycle_status = models.CharField(
+        max_length=20,
+        choices=ClientLifecycleStatus.choices,
+        default=ClientLifecycleStatus.ACTIVE,
+        db_index=True
+    )
+    lead_source = models.CharField(max_length=100, blank=True, default='')
+    converted_at = models.DateTimeField(null=True, blank=True)
+    reactivated_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Last timestamp when client transitioned from inactive/churned back to active"
+    )
+    tags = models.JSONField(default=list, blank=True)
+
     USERNAME_FIELD = 'email'
     REQUIRED_FIELDS = []
 
@@ -76,6 +101,7 @@ class User(UUIDMixin, AbstractUser):
         ordering = ['-date_joined']
         indexes = [
             models.Index(fields=['email', 'tenant']),
+            models.Index(fields=['tenant', 'role', 'lifecycle_status'], name='user_tenant_role_status_idx'),
         ]
 
     def __str__(self):

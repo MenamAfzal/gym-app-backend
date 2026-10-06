@@ -193,6 +193,19 @@ PERMISSION_CATALOG = {
                 'actions': ['view', 'edit']
             }
         }
+    },
+    'retention': {
+        'label': 'Retention & Intelligence',
+        'resources': {
+            'metrics': {
+                'label': 'Client Retention Metrics',
+                'actions': ['view', 'recalculate']
+            },
+            'segments': {
+                'label': 'Saved Segments',
+                'actions': ['view', 'create', 'edit', 'delete']
+            }
+        }
     }
 }
 

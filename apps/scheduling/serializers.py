@@ -487,13 +487,14 @@ class PackageSerializer(serializers.ModelSerializer):
         model = Package
         fields = [
             'id', 'client', 'client_name', 'client_email', 'package_type', 
-            'package_type_name', 'credits_remaining', 'purchased_at', 'expires_at', 'created_at',
+            'package_type_name', 'credits_remaining', 'total_credits_allocated', 'purchased_at', 'expires_at', 'created_at',
             'location', 'status', 'cancel_at_period_end', 'is_canceled',
             'grant_source', 'is_complimentary', 'assigned_by', 'assigned_by_email', 'price'
         ]
         read_only_fields = [
             'id', 'client_name', 'client_email', 'package_type_name', 'created_at',
-            'location', 'is_canceled', 'grant_source', 'is_complimentary', 'assigned_by', 'assigned_by_email'
+            'location', 'is_canceled', 'grant_source', 'is_complimentary', 'assigned_by', 'assigned_by_email',
+            'total_credits_allocated'
         ]
         extra_kwargs = {
             'credits_remaining': {'required': False},
@@ -683,7 +684,8 @@ class BookingReadSerializer(serializers.ModelSerializer):
             'id', 'client', 'client_email', 'client_name', 'client_first_name', 'client_last_name',
             'session', 'session_name', 'staff_name', 'spot', 'spot_label',
             'spot_number', 'is_guest', 'status', 'credit_source', 'credits_used', 'checked_in_at',
-            'checked_out_at', 'join_mode', 'music_preference', 'created_at', 'updated_at'
+            'checked_out_at', 'join_mode', 'music_preference', 'is_late_cancel', 'cancelled_at',
+            'cancellation_reason', 'created_at', 'updated_at'
         ]
 
     def get_client_name(self, obj):
@@ -896,7 +898,7 @@ class PaymentSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Payment
-        fields = ['id', 'client', 'client_email', 'amount', 'type', 'related_booking', 'status', 'provider_ref', 'idempotency_key', 'created_at']
+        fields = ['id', 'client', 'client_email', 'amount', 'type', 'related_booking', 'package', 'package_type', 'status', 'provider_ref', 'idempotency_key', 'created_at']
         read_only_fields = ['id', 'client_email', 'created_at']
 
 

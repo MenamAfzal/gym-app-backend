@@ -88,7 +88,7 @@ def process_waitlist_promotion_job(session_id):
         reset_current_tenant(token)
 
 
-@shared_task
+@shared_task(name='scheduling.run_no_show_marking_job')
 def run_no_show_marking_job():
     """
     Scheduled task. Checks sessions and appointments that have completed,
@@ -122,6 +122,11 @@ def run_no_show_marking_job():
                     booking.status = 'no_show'
                     booking.save(update_fields=['status'])
                     logger.info(f"Booking {booking.id} marked as no_show.")
+                    try:
+                        from apps.retention.tasks import recalculate_single_client_metrics
+                        recalculate_single_client_metrics.delay(str(session.tenant_id), str(booking.client_id))
+                    except Exception:
+                        pass
         finally:
             reset_current_tenant(token)
 
@@ -144,8 +149,12 @@ def cancel_session_bookings_and_refund(session):
             session=session
         ).exclude(status='cancelled')
 
+        now = timezone.now()
         for booking in bookings:
             booking.status = 'cancelled'
+            booking.is_late_cancel = False
+            booking.cancelled_at = now
+            booking.cancellation_reason = 'Class session cancelled by facility'
             booking.save()
 
             # Refund credit to package

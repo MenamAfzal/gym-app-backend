@@ -419,8 +419,12 @@ class UserViewSet(viewsets.ModelViewSet):
                 active_bookings = Booking.objects.filter(client=user, status='booked').select_for_update()
                 cancelled_count = active_bookings.count()
                 
+                now = timezone.now()
                 for booking in active_bookings:
                     booking.status = 'cancelled'
+                    booking.is_late_cancel = False
+                    booking.cancelled_at = now
+                    booking.cancellation_reason = 'User account deactivated'
                     booking.save()
                     
                     # Refund credit if a package was used
