@@ -391,3 +391,41 @@ class RetentionConversionAttribution(TenantAwareModel):
     def __str__(self):
         return f"Attribution for Client {self.client_id} ({self.conversion_event} - ${self.attributed_revenue})"
 
+
+class WeeklyBusinessInsight(TenantAwareModel):
+    """
+    Weekly executive AI synthesis consolidating studio performance, retention deltas,
+    revenue trends, at-risk client movements, and actionable operational recommendations.
+    """
+    week_start = models.DateField(db_index=True)
+    week_end = models.DateField()
+    executive_summary = models.TextField(help_text="Plain-language LLM executive summary of weekly performance")
+    revenue_insights = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="AI notes on MRR, package spend, and attributed conversion revenue"
+    )
+    retention_insights = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="AI notes on churn rate, attendance deltas, and at-risk cohort transitions"
+    )
+    recommended_actions = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Prioritized operational and marketing interventions for studio staff"
+    )
+    generated_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        verbose_name = _('Weekly Business Insight')
+        verbose_name_plural = _('Weekly Business Insights')
+        ordering = ['-week_start']
+        unique_together = ['tenant', 'week_start']
+        indexes = [
+            models.Index(fields=['tenant', '-week_start'], name='ret_insight_tenant_week_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.tenant.name} Executive Insight: {self.week_start} to {self.week_end}"
+

@@ -113,3 +113,26 @@ def attribute_conversion_task(tenant_id, client_id, event_type, object_id=None):
     except Exception as e:
         logger.exception(f"Error in attribute_conversion_task for client {client_id}: {e}")
         return None
+
+
+@shared_task(name='retention.generate_all_weekly_insights')
+def generate_all_weekly_insights():
+    """
+    Weekly scheduled Celery job generating executive business AI insights across all active tenants.
+    Runs every Monday at 04:00 AM UTC.
+    """
+    logger.info("Starting weekly business insights generation across all active tenants...")
+    with bypass_tenant_isolation():
+        active_tenants = Tenant.objects.filter(is_active=True)
+        count = 0
+        from .ai_service import RetentionAIService
+        for tenant in active_tenants:
+            try:
+                RetentionAIService.generate_weekly_business_insights(tenant)
+                count += 1
+                logger.info(f"Generated weekly business insight for tenant {tenant.name} ({tenant.id})")
+            except Exception as e:
+                logger.exception(f"Error generating weekly insight for tenant {tenant.id}: {e}")
+        logger.info(f"Completed weekly business insights generation for {count} tenants.")
+        return count
+

@@ -1,7 +1,8 @@
 from rest_framework import serializers
 from .models import (
     ClientRetentionMetrics, RetentionCampaignActionLog, RetentionCampaignTrigger,
-    RetentionConversionAttribution, SavedSegment, TenantRetentionDailySnapshot
+    RetentionConversionAttribution, SavedSegment, TenantRetentionDailySnapshot,
+    WeeklyBusinessInsight
 )
 from apps.users.serializers import UserSerializer
 
@@ -176,6 +177,24 @@ class RetentionConversionAttributionSerializer(serializers.ModelSerializer):
             'attributed_revenue',
             'converted_at',
             'created_at',
+        ]
+        read_only_fields = fields
+
+
+class WeeklyBusinessInsightSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = WeeklyBusinessInsight
+        fields = [
+            'id',
+            'week_start',
+            'week_end',
+            'executive_summary',
+            'revenue_insights',
+            'retention_insights',
+            'recommended_actions',
+            'generated_at',
+            'created_at',
+            'updated_at',
         ]
         read_only_fields = fields
 

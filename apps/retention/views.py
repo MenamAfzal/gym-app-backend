@@ -20,7 +20,8 @@ from apps.users.models import ClientLifecycleStatus, User, UserRole
 from .models import (
     AttendanceTrend, ChurnRiskLevel, ClientRetentionMetrics,
     RetentionActionType, RetentionCampaignActionLog, RetentionCampaignTrigger,
-    RetentionConversionAttribution, SavedSegment, TenantRetentionDailySnapshot
+    RetentionConversionAttribution, SavedSegment, TenantRetentionDailySnapshot,
+    WeeklyBusinessInsight
 )
 from .serializers import (
     ClientRetentionMetricsSerializer,
@@ -29,6 +30,7 @@ from .serializers import (
     RetentionConversionAttributionSerializer,
     SavedSegmentSerializer,
     TenantRetentionDailySnapshotSerializer,
+    WeeklyBusinessInsightSerializer,
 )
 from .services import (
     AttributionService, CohortAnalyticsService, FunnelAnalyticsService,
@@ -950,4 +952,119 @@ class RetentionCampaignTriggerViewSet(viewsets.ModelViewSet):
             "detail": f"Trigger '{trigger.name}' executed.",
             "dispatched_interventions_count": executed_count,
         }, status=status.HTTP_200_OK)
+
+
+class ExecutiveKPIDashboardView(APIView):
+    """
+    Executive KPI Dashboard API for studio owners and management.
+    Aggregates high-level metrics across:
+    - Current Studio Health (active members, at-risk members, churn rate, at-risk revenue)
+    - Campaign Performance (last 30 days: sent, conversion rate %, attributed revenue)
+    - Latest Weekly Business AI Insight (LLM/deterministic synthesis, recommendations)
+    - Top Risk Accounts (5 clients with highest churn risk and estimated monthly value)
+    """
+    permission_classes = [IsAuthenticated, IsOwnerOrManager]
+    permission_app = 'retention'
+    permission_resource = 'metrics'
+
+    def get(self, request):
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        if not tenant:
+            return Response({"detail": "Tenant context required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        now = timezone.now()
+        d30_ago = now - timedelta(days=30)
+
+        with bypass_tenant_isolation():
+            # 1. Current Health
+            total_active_members = User.objects.filter(
+                tenant=tenant,
+                role=UserRole.CLIENT,
+                lifecycle_status=ClientLifecycleStatus.ACTIVE
+            ).count()
+
+            at_risk_members_count = User.objects.filter(
+                tenant=tenant,
+                role=UserRole.CLIENT,
+                lifecycle_status=ClientLifecycleStatus.AT_RISK
+            ).count()
+
+            # Churn rate from latest daily snapshot
+            latest_snap = TenantRetentionDailySnapshot.all_objects.filter(
+                tenant=tenant
+            ).order_by('-snapshot_date').first()
+            churn_rate = float(latest_snap.churn_rate_monthly) if latest_snap else 0.0
+
+            total_at_risk_rev = ClientRetentionMetrics.all_objects.filter(
+                tenant=tenant
+            ).aggregate(
+                total=Coalesce(Sum('at_risk_revenue'), Value(Decimal('0.00')))
+            )['total']
+
+            current_health = {
+                "total_active_members": total_active_members,
+                "at_risk_members_count": at_risk_members_count,
+                "monthly_churn_rate_percent": churn_rate,
+                "total_at_risk_revenue": float(total_at_risk_rev),
+            }
+
+            # 2. Campaign Performance (Last 30 Days)
+            actions_30d = RetentionCampaignActionLog.all_objects.filter(
+                tenant=tenant,
+                sent_at__gte=d30_ago
+            )
+            sent_count = actions_30d.filter(action_type=RetentionActionType.SENT).count()
+            converted_count = actions_30d.filter(converted_at__isnull=False).count()
+            conversion_rate = round(converted_count / sent_count * 100.0, 2) if sent_count > 0 else 0.0
+
+            attributed_rev_30d = RetentionConversionAttribution.all_objects.filter(
+                tenant=tenant,
+                converted_at__gte=d30_ago
+            ).aggregate(
+                total=Coalesce(Sum('attributed_revenue'), Value(Decimal('0.00')))
+            )['total']
+
+            campaign_performance = {
+                "period_days": 30,
+                "sent_interventions_count": sent_count,
+                "converted_interventions_count": converted_count,
+                "conversion_rate_percent": conversion_rate,
+                "total_attributed_revenue": float(attributed_rev_30d),
+            }
+
+            # 3. Latest Weekly Business Insight
+            latest_insight = WeeklyBusinessInsight.all_objects.filter(
+                tenant=tenant
+            ).order_by('-week_start').first()
+            insight_data = WeeklyBusinessInsightSerializer(latest_insight).data if latest_insight else None
+
+            # 4. Top Risk Clients (Top 5 by churn_risk_score & estimated_monthly_value)
+            top_risk_qs = (
+                ClientRetentionMetrics.all_objects.filter(tenant=tenant)
+                .select_related('client', 'client__profile')
+                .order_by('-churn_risk_score', '-estimated_monthly_value')[:5]
+            )
+
+            top_risk_clients = []
+            for m in top_risk_qs:
+                top_risk_clients.append({
+                    "client_id": str(m.client_id),
+                    "name": m.client.full_name or m.client.email,
+                    "email": m.client.email,
+                    "lifecycle_status": m.client.lifecycle_status,
+                    "risk_level": m.risk_level,
+                    "churn_risk_score": m.churn_risk_score,
+                    "estimated_monthly_value": float(m.estimated_monthly_value),
+                    "at_risk_revenue": float(m.at_risk_revenue),
+                    "days_since_last_visit": m.days_since_last_visit,
+                    "risk_factors": m.risk_factors or [],
+                })
+
+        return Response({
+            "current_health": current_health,
+            "campaign_performance_last_30d": campaign_performance,
+            "latest_weekly_insight": insight_data,
+            "top_risk_clients": top_risk_clients,
+        }, status=status.HTTP_200_OK)
+
 

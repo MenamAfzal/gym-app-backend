@@ -154,6 +154,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'retention.evaluate_all_retention_triggers',
         'schedule': crontab(minute=0),  # Every hour
     },
+    'generate-weekly-business-insights': {
+        'task': 'retention.generate_all_weekly_insights',
+        'schedule': crontab(day_of_week=1, hour=4, minute=0),  # Every Monday at 04:00 UTC
+    },
 }
 
 # Session Configuration

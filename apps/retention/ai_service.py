@@ -328,3 +328,310 @@ class RetentionAIService:
                 f"Hi {first_name}, we'd love to see you back on the floor at {studio_name}! "
                 "Check out the latest schedule and book your next session with us today."
             )
+
+    @classmethod
+    def generate_weekly_business_insights(
+        cls,
+        tenant,
+        reference_date=None,
+        use_llm: bool = True
+    ):
+        """
+        Synthesizes weekly executive business and retention intelligence for studio leadership.
+        Compares WoW metrics (attendance, churn, conversions, underperforming classes) and
+        generates structured AI insights and operational recommendations.
+        """
+        from datetime import datetime, timedelta
+        from django.db.models import Avg, Count, Q, Sum, Value
+        from django.db.models.functions import Coalesce
+        from apps.core.tenants.context import bypass_tenant_isolation
+        from apps.scheduling.models import Booking, ClassSession, ClassTemplate
+        from .models import (
+            ChurnRiskLevel, ClientRetentionMetrics, RetentionConversionAttribution,
+            TenantRetentionDailySnapshot, WeeklyBusinessInsight
+        )
+
+        now = timezone.now()
+        today = now.date()
+ 
+        if reference_date is None:
+            ref = today
+        elif isinstance(reference_date, str):
+            ref = datetime.fromisoformat(reference_date).date()
+        elif hasattr(reference_date, 'date'):
+            ref = reference_date.date()
+        else:
+            ref = reference_date
+
+        week_start = ref - timedelta(days=ref.weekday() + 7)
+        week_end = week_start + timedelta(days=6)
+
+        prev_week_start = week_start - timedelta(days=7)
+        prev_week_end = week_start - timedelta(days=1)
+
+        with bypass_tenant_isolation(): 
+            b_this = Booking.all_objects.filter(
+                tenant=tenant,
+                session__start_at__date__gte=week_start,
+                session__start_at__date__lte=week_end
+            )
+            this_attended = b_this.filter(status__in=['attended', 'checked_in']).count()
+            this_no_shows = b_this.filter(status='no_show').count()
+            this_cancellations = b_this.filter(status='cancelled').count()
+
+            b_prev = Booking.all_objects.filter(
+                tenant=tenant,
+                session__start_at__date__gte=prev_week_start,
+                session__start_at__date__lte=prev_week_end
+            )
+            prev_attended = b_prev.filter(status__in=['attended', 'checked_in']).count()
+            prev_no_shows = b_prev.filter(status='no_show').count()
+            prev_cancellations = b_prev.filter(status='cancelled').count()
+
+            att_delta_pct = (
+                round((this_attended - prev_attended) / prev_attended * 100.0, 2)
+                if prev_attended > 0 else 0.0
+            )
+ 
+            snap_this = (
+                TenantRetentionDailySnapshot.all_objects.filter(
+                    tenant=tenant,
+                    snapshot_date__lte=week_end
+                ).order_by('-snapshot_date').first()
+            )
+            snap_prev = (
+                TenantRetentionDailySnapshot.all_objects.filter(
+                    tenant=tenant,
+                    snapshot_date__lte=prev_week_end
+                ).order_by('-snapshot_date').first()
+            )
+
+            retention_rate = float(snap_this.retention_rate_monthly) if snap_this else 0.0
+            churn_rate = float(snap_this.churn_rate_monthly) if snap_this else 0.0
+            prev_churn_rate = float(snap_prev.churn_rate_monthly) if snap_prev else 0.0
+            churn_delta = round(churn_rate - prev_churn_rate, 2)
+ 
+            high_crit_qs = ClientRetentionMetrics.all_objects.filter(
+                tenant=tenant,
+                risk_level__in=[ChurnRiskLevel.HIGH, ChurnRiskLevel.CRITICAL]
+            )
+            high_crit_count = high_crit_qs.count()
+            at_risk_revenue_total = float(
+                high_crit_qs.aggregate(
+                    s=Coalesce(Sum('at_risk_revenue'), Value(Decimal('0.00')))
+                )['s']
+            )
+ 
+            attr_qs = RetentionConversionAttribution.all_objects.filter(
+                tenant=tenant,
+                converted_at__date__gte=week_start,
+                converted_at__date__lte=week_end
+            )
+            attributed_rev = float(
+                attr_qs.aggregate(
+                    s=Coalesce(Sum('attributed_revenue'), Value(Decimal('0.00')))
+                )['s']
+            )
+            attributed_conv_count = attr_qs.count()
+ 
+            sessions_this_week = ClassSession.all_objects.filter(
+                tenant=tenant,
+                start_at__date__gte=week_start,
+                start_at__date__lte=week_end
+            ).select_related('template')
+
+            template_stats = {}
+            for s in sessions_this_week:
+                if not s.template:
+                    continue
+                tid = str(s.template.id)
+                cap = s.capacity or s.template.default_capacity or 10
+                if tid not in template_stats:
+                    template_stats[tid] = {
+                        "name": s.template.name,
+                        "capacity": 0,
+                        "attended": 0,
+                    }
+                template_stats[tid]["capacity"] += cap
+
+            for s in sessions_this_week:
+                if not s.template:
+                    continue
+                tid = str(s.template.id)
+                att_cnt = s.bookings.filter(status__in=['attended', 'checked_in']).count()
+                template_stats[tid]["attended"] += att_cnt
+
+            underperforming_templates = []
+            for t_item in template_stats.values():
+                fill_pct = (
+                    round(t_item["attended"] / t_item["capacity"] * 100.0, 1)
+                    if t_item["capacity"] > 0 else 0.0
+                )
+                underperforming_templates.append({
+                    "name": t_item["name"],
+                    "fill_rate_percent": fill_pct
+                })
+            underperforming_templates.sort(key=lambda x: x["fill_rate_percent"])
+            bottom_3_templates = underperforming_templates[:3]
+
+        context_data = {
+            "tenant_name": tenant.name,
+            "week_start": week_start.isoformat(),
+            "week_end": week_end.isoformat(),
+            "attended_this_week": this_attended,
+            "attended_prev_week": prev_attended,
+            "attendance_delta_percent": att_delta_pct,
+            "no_shows": this_no_shows,
+            "cancellations": this_cancellations,
+            "retention_rate_monthly": retention_rate,
+            "churn_rate_monthly": churn_rate,
+            "churn_rate_delta": churn_delta,
+            "high_critical_risk_clients_count": high_crit_count,
+            "at_risk_revenue_total": at_risk_revenue_total,
+            "attributed_conversion_revenue": attributed_rev,
+            "attributed_conversions_count": attributed_conv_count,
+            "bottom_performing_templates": bottom_3_templates,
+        }
+ 
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        kimi_key = os.environ.get("KIMI_API_KEY")
+
+        if use_llm and (gemini_key or kimi_key):
+            try:
+                import requests
+                prompt = (
+                    "You are an executive fitness studio operations AI advisor.\n"
+                    "Analyze these weekly metrics and return a JSON object with keys:\n"
+                    "- 'executive_summary': 2-3 sentence high-level overview of studio health\n"
+                    "- 'revenue_insights': JSON object with keys 'attributed_revenue', 'mrr_trend', 'notes'\n"
+                    "- 'retention_insights': JSON object with keys 'attendance_trend', 'churn_summary', 'notes'\n"
+                    "- 'recommended_actions': list of 3-4 specific prioritized action items for management\n\n"
+                    f"Weekly Context:\n{json.dumps(context_data, indent=2)}"
+                )
+                if gemini_key:
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+                    payload = {
+                        "contents": [{"parts": [{"text": prompt}]}],
+                        "generationConfig": {"response_mime_type": "application/json"}
+                    }
+                    res = requests.post(url, json=payload, timeout=5)
+                    if res.status_code == 200:
+                        parsed = json.loads(res.json()['candidates'][0]['content']['parts'][0]['text'])
+                        if all(k in parsed for k in ["executive_summary", "revenue_insights", "retention_insights", "recommended_actions"]):
+                            insight, _ = WeeklyBusinessInsight.objects.update_or_create(
+                                tenant=tenant,
+                                week_start=week_start,
+                                defaults={
+                                    "week_end": week_end,
+                                    "executive_summary": parsed["executive_summary"],
+                                    "revenue_insights": parsed["revenue_insights"],
+                                    "retention_insights": parsed["retention_insights"],
+                                    "recommended_actions": parsed["recommended_actions"],
+                                    "generated_at": timezone.now(),
+                                }
+                            )
+                            return insight
+                elif kimi_key:
+                    url = "https://api.moonshot.cn/v1/chat/completions"
+                    headers = {"Authorization": f"Bearer {kimi_key}", "Content-Type": "application/json"}
+                    payload = {
+                        "model": "moonshot-v1-8k",
+                        "messages": [
+                            {"role": "system", "content": "You are an executive retention intelligence AI that returns JSON."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "response_format": {"type": "json_object"}
+                    }
+                    res = requests.post(url, headers=headers, json=payload, timeout=5)
+                    if res.status_code == 200:
+                        parsed = json.loads(res.json()['choices'][0]['message']['content'])
+                        if all(k in parsed for k in ["executive_summary", "revenue_insights", "retention_insights", "recommended_actions"]):
+                            insight, _ = WeeklyBusinessInsight.objects.update_or_create(
+                                tenant=tenant,
+                                week_start=week_start,
+                                defaults={
+                                    "week_end": week_end,
+                                    "executive_summary": parsed["executive_summary"],
+                                    "revenue_insights": parsed["revenue_insights"],
+                                    "retention_insights": parsed["retention_insights"],
+                                    "recommended_actions": parsed["recommended_actions"],
+                                    "generated_at": timezone.now(),
+                                }
+                            )
+                            return insight
+            except Exception as e:
+                logger.warning(f"Weekly insight LLM synthesis failed, using deterministic fallback: {e}")
+ 
+        if att_delta_pct < -5.0:
+            exec_summary = (
+                f"Attendance dropped by {abs(att_delta_pct):.1f}% this week ({this_attended} attended vs {prev_attended} prior week). "
+                f"Studio churn stands at {churn_rate:.1f}%, with {high_crit_count} members currently categorized as High or Critical risk."
+            )
+        elif att_delta_pct > 5.0:
+            exec_summary = (
+                f"Strong growth week: member attendance increased by {att_delta_pct:.1f}% ({this_attended} visits vs {prev_attended} prior week). "
+                f"Automated retention workflows generated ${attributed_rev:.2f} in recovered revenue with churn stable at {churn_rate:.1f}%."
+            )
+        else:
+            exec_summary = (
+                f"Studio performance held steady this week with {this_attended} class visits and ${attributed_rev:.2f} in campaign-attributed revenue. "
+                f"Monthly retention rate is {retention_rate:.1f}% with {high_crit_count} members needing proactive intervention."
+            )
+
+        revenue_insights = {
+            "attributed_conversion_revenue": attributed_rev,
+            "conversions_count": attributed_conv_count,
+            "at_risk_revenue_total": at_risk_revenue_total,
+            "mrr_notes": (
+                f"${attributed_rev:.2f} in winback conversions recorded this week. "
+                f"${at_risk_revenue_total:.2f} in projected monthly value is at stake across high-risk accounts."
+            )
+        }
+
+        retention_insights = {
+            "attendance_delta_percent": att_delta_pct,
+            "classes_attended": this_attended,
+            "classes_no_shows": this_no_shows,
+            "classes_cancellations": this_cancellations,
+            "monthly_churn_rate": churn_rate,
+            "churn_rate_delta": churn_delta,
+            "high_critical_risk_clients": high_crit_count,
+            "notes": (
+                f"{this_no_shows} no-shows and {this_cancellations} cancellations recorded. "
+                f"{high_crit_count} clients require proactive retention management."
+            )
+        }
+
+        recommended_actions = []
+        if high_crit_count > 0:
+            recommended_actions.append(
+                f"Deploy personalized outreach to the {high_crit_count} High/Critical risk members to address lapses before churn."
+            )
+        if this_no_shows > 0:
+            recommended_actions.append(
+                f"Follow up with {this_no_shows} members who registered no-shows to reschedule and maintain their training habits."
+            )
+        if bottom_3_templates:
+            low_names = ", ".join(t["name"] for t in bottom_3_templates[:2])
+            recommended_actions.append(
+                f"Review schedule times and instructor pairings for underutilized classes ({low_names})."
+            )
+        if len(recommended_actions) < 3:
+            recommended_actions.append("Launch a targeted 7-day win-back campaign for members absent over 14 days.")
+        if len(recommended_actions) < 3:
+            recommended_actions.append("Celebrate milestones with active members to boost retention velocity and NPS.")
+
+        insight, _ = WeeklyBusinessInsight.objects.update_or_create(
+            tenant=tenant,
+            week_start=week_start,
+            defaults={
+                "week_end": week_end,
+                "executive_summary": exec_summary,
+                "revenue_insights": revenue_insights,
+                "retention_insights": retention_insights,
+                "recommended_actions": recommended_actions,
+                "generated_at": timezone.now(),
+            }
+        )
+        return insight
+

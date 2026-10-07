@@ -11,6 +11,7 @@ from .views import (
     ClassUtilizationAnalyticsView,
     StaffPerformanceAnalyticsView,
     AtRiskSummaryView,
+    ExecutiveKPIDashboardView,
 )
 
 router = DefaultRouter()
@@ -21,6 +22,7 @@ router.register(r'triggers', RetentionCampaignTriggerViewSet, basename='retentio
 urlpatterns = [
     path('clients/<uuid:client_id>/timeline/', ClientActivityTimelineView.as_view(), name='retention-client-timeline'),
     path('dashboard/overview/', RetentionOverviewDashboardView.as_view(), name='retention-dashboard-overview'),
+    path('dashboard/executive/', ExecutiveKPIDashboardView.as_view(), name='retention-dashboard-executive'),
 
     # Phase 2 Analytics Endpoints
     path('analytics/funnel/', CustomerJourneyFunnelView.as_view(), name='retention-analytics-funnel'),

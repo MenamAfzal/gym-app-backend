@@ -111,8 +111,7 @@ def run_no_show_marking_job():
                 if session.status == 'scheduled':
                     session.status = 'completed'
                     session.save(update_fields=['status'])
-
-                # Find bookings that were not checked in
+ 
                 bookings = Booking.objects.select_for_update().filter(
                     session=session,
                     status='booked',
