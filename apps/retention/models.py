@@ -114,6 +114,35 @@ class ClientRetentionMetrics(TenantAwareModel):
         default=ChurnRiskLevel.LOW
     )
     risk_factors = models.JSONField(default=list, blank=True)
+ 
+    estimated_monthly_value = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0.00,
+        help_text="Projected monthly recurring or package value for this client"
+    )
+    at_risk_revenue = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0.00,
+        help_text="Revenue at stake if this client is HIGH or CRITICAL risk"
+    )
+    is_high_value = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Big Spender / High-Value customer flag"
+    )
+    failed_payments_last_90d = models.PositiveIntegerField(
+        default=0,
+        help_text="Count of failed payment attempts in the last 90 days"
+    )
+    ai_risk_summary = models.TextField(
+        blank=True,
+        default="",
+        help_text="AI-generated plain-language explanation of churn risk and recommended staff action"
+    )
+    ai_evaluated_at = models.DateTimeField(null=True, blank=True)
+
     last_calculated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
@@ -122,6 +151,7 @@ class ClientRetentionMetrics(TenantAwareModel):
         indexes = [
             models.Index(fields=['tenant', 'risk_level', 'days_since_last_visit'], name='ret_metric_tenant_risk_idx'),
             models.Index(fields=['tenant', 'churn_risk_score'], name='ret_metric_tenant_score_idx'),
+            models.Index(fields=['tenant', 'is_high_value'], name='ret_metric_high_val_idx'),
         ]
 
     def __str__(self):

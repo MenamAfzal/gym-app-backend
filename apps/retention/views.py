@@ -2,7 +2,7 @@ import logging
 from datetime import timedelta
 from decimal import Decimal
 
-from django.db.models import Avg, Count, Q, Value
+from django.db.models import Avg, Count, Q, Sum, Value
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 from rest_framework import status, viewsets
@@ -17,13 +17,17 @@ from apps.scheduling.models import Booking, FacilityAccessLog, Package, Payment
 from apps.scheduling.permissions import IsOwnerOrManager
 from apps.scheduling.views import StandardResultsSetPagination
 from apps.users.models import ClientLifecycleStatus, User, UserRole
-from .models import ClientRetentionMetrics, SavedSegment, TenantRetentionDailySnapshot
+from .models import ChurnRiskLevel, ClientRetentionMetrics, SavedSegment, TenantRetentionDailySnapshot
 from .serializers import (
     ClientRetentionMetricsSerializer,
     SavedSegmentSerializer,
     TenantRetentionDailySnapshotSerializer,
 )
-from .services import RetentionMetricsService, SegmentQueryService
+from .services import (
+    CohortAnalyticsService, FunnelAnalyticsService,
+    OperationalAnalyticsService, RetentionMetricsService, SegmentQueryService
+)
+from .ai_service import RetentionAIService
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,7 @@ class ClientRetentionMetricsViewSet(viewsets.ReadOnlyModelViewSet):
     """
     API endpoint for viewing and recalculating client retention metrics.
     Supports filtering by risk level, trend, expiring packages, unused credits,
-    and assigned trainer.
+    failed payments, and assigned trainer.
     """
     queryset = ClientRetentionMetrics.objects.all().select_related('client', 'client__profile', 'tenant')
     serializer_class = ClientRetentionMetricsSerializer
@@ -54,7 +58,7 @@ class ClientRetentionMetricsViewSet(viewsets.ReadOnlyModelViewSet):
         if client_id:
             qs = qs.filter(client_id=client_id)
 
-        # Wire query params through SegmentQueryService for comprehensive Phase 1 filtering
+        # Wire query params through SegmentQueryService for comprehensive Phase 1 & 2 filtering
         criteria = {}
         for key in [
             'lifecycle_status', 'risk_level', 'attendance_trend',
@@ -66,7 +70,9 @@ class ClientRetentionMetricsViewSet(viewsets.ReadOnlyModelViewSet):
             'min_credit_utilization_rate', 'max_credit_utilization_rate',
             'package_expiring_within_days', 'expiring_within_days',
             'min_cancellation_rate', 'min_no_show_rate',
-            'tags', 'tag', 'assigned_trainer_id', 'trainer_id'
+            'tags', 'tag', 'assigned_trainer_id', 'trainer_id',
+            'is_high_value', 'min_at_risk_revenue', 'min_lifetime_value',
+            'has_failed_payments'
         ]:
             val = self.request.query_params.get(key)
             if val is not None:
@@ -103,6 +109,26 @@ class ClientRetentionMetricsViewSet(viewsets.ReadOnlyModelViewSet):
             "message": f"Successfully recalculated retention metrics for {processed} clients.",
             "processed_count": processed
         }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='analyze-risk')
+    def analyze_risk(self, request, pk=None):
+        """
+        Evaluates or refreshes the AI churn risk summary and staff action recommendation
+        for a specific client metrics record.
+        """
+        instance = self.get_object()
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        if tenant and instance.tenant_id != tenant.id:
+            return Response(
+                {"detail": "Forbidden across tenant boundary."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        insight = RetentionAIService.generate_client_risk_insight(
+            tenant=tenant or instance.tenant,
+            metrics=instance
+        )
+        return Response(insight, status=status.HTTP_200_OK)
 
 
 class SavedSegmentViewSet(viewsets.ModelViewSet):
@@ -644,3 +670,151 @@ class RetentionOverviewDashboardView(APIView):
         }
 
         return Response(payload, status=status.HTTP_200_OK)
+
+
+class CustomerJourneyFunnelView(APIView):
+    """
+    Customer Journey Funnel & 1st-to-2nd Visit Conversion API.
+    Exposed at GET /api/v1/retention/analytics/funnel/?days=90
+    """
+    permission_classes = [IsAuthenticated, IsOwnerOrManager]
+    permission_app = 'retention'
+    permission_resource = 'analytics'
+
+    def get(self, request):
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        if not tenant:
+            return Response({"detail": "Tenant context required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        days_param = request.query_params.get('days', 90)
+        data = FunnelAnalyticsService.get_customer_journey_funnel(tenant=tenant, days=days_param)
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class CohortRetentionMatrixView(APIView):
+    """
+    Cohort Retention Matrix API.
+    Exposed at GET /api/v1/retention/analytics/cohorts/?months=6
+    """
+    permission_classes = [IsAuthenticated, IsOwnerOrManager]
+    permission_app = 'retention'
+    permission_resource = 'analytics'
+
+    def get(self, request):
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        if not tenant:
+            return Response({"detail": "Tenant context required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            months = int(request.query_params.get('months', 6))
+            months = max(1, min(months, 36))
+        except (ValueError, TypeError):
+            months = 6
+
+        data = CohortAnalyticsService.get_cohort_retention_matrix(tenant=tenant, months=months)
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class ClassUtilizationAnalyticsView(APIView):
+    """
+    Studio Class Utilization Analytics API.
+    Exposed at GET /api/v1/retention/analytics/class-utilization/?days=30
+    """
+    permission_classes = [IsAuthenticated, IsOwnerOrManager]
+    permission_app = 'retention'
+    permission_resource = 'analytics'
+
+    def get(self, request):
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        if not tenant:
+            return Response({"detail": "Tenant context required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            days = int(request.query_params.get('days', 30))
+            days = max(1, min(days, 365))
+        except (ValueError, TypeError):
+            days = 30
+
+        data = OperationalAnalyticsService.get_class_utilization(tenant=tenant, days=days)
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class StaffPerformanceAnalyticsView(APIView):
+    """
+    Staff / Trainer Retention & Performance Analytics API.
+    Exposed at GET /api/v1/retention/analytics/staff-performance/?days=30
+    """
+    permission_classes = [IsAuthenticated, IsOwnerOrManager]
+    permission_app = 'retention'
+    permission_resource = 'analytics'
+
+    def get(self, request):
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        if not tenant:
+            return Response({"detail": "Tenant context required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            days = int(request.query_params.get('days', 30))
+            days = max(1, min(days, 365))
+        except (ValueError, TypeError):
+            days = 30
+
+        data = OperationalAnalyticsService.get_staff_performance(tenant=tenant, days=days)
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class AtRiskSummaryView(APIView):
+    """
+    Studio-wide At-Risk Revenue and Churn Vulnerability Summary API.
+    Exposed at GET /api/v1/retention/at-risk/summary/
+    """
+    permission_classes = [IsAuthenticated, IsOwnerOrManager]
+    permission_app = 'retention'
+    permission_resource = 'metrics'
+
+    def get(self, request):
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        if not tenant:
+            return Response({"detail": "Tenant context required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        with bypass_tenant_isolation():
+            at_risk_qs = ClientRetentionMetrics.all_objects.filter(
+                tenant=tenant,
+                risk_level__in=[ChurnRiskLevel.HIGH, ChurnRiskLevel.CRITICAL]
+            )
+            total_at_risk_count = at_risk_qs.count()
+            total_at_risk_revenue = at_risk_qs.aggregate(
+                total=Coalesce(Sum('at_risk_revenue'), Value(Decimal('0.00')))
+            )['total']
+            high_count = at_risk_qs.filter(risk_level=ChurnRiskLevel.HIGH).count()
+            crit_count = at_risk_qs.filter(risk_level=ChurnRiskLevel.CRITICAL).count()
+            high_val_at_risk = at_risk_qs.filter(is_high_value=True).count()
+
+            tot_est_monthly = ClientRetentionMetrics.all_objects.filter(
+                tenant=tenant
+            ).aggregate(
+                total=Coalesce(Sum('estimated_monthly_value'), Value(Decimal('0.00')))
+            )['total']
+
+            factor_counts = {}
+            for factors in at_risk_qs.values_list('risk_factors', flat=True):
+                if isinstance(factors, list):
+                    for f in factors:
+                        factor_counts[f] = factor_counts.get(f, 0) + 1
+
+            top_risk_factors = [
+                {"factor": f, "count": cnt}
+                for f, cnt in sorted(factor_counts.items(), key=lambda x: x[1], reverse=True)
+            ]
+
+        return Response({
+            "total_at_risk_clients_count": total_at_risk_count,
+            "total_at_risk_revenue": float(total_at_risk_revenue),
+            "risk_level_breakdown": {
+                "high": high_count,
+                "critical": crit_count,
+            },
+            "high_value_at_risk_count": high_val_at_risk,
+            "top_risk_factors": top_risk_factors,
+            "estimated_monthly_value_total": float(tot_est_monthly),
+        }, status=status.HTTP_200_OK)

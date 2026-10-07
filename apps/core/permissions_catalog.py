@@ -204,6 +204,10 @@ PERMISSION_CATALOG = {
             'segments': {
                 'label': 'Saved Segments',
                 'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'analytics': {
+                'label': 'Retention & Operational Analytics',
+                'actions': ['view']
             }
         }
     }
