@@ -150,6 +150,10 @@ CELERY_BEAT_SCHEDULE = {
         'task': 'retention.recalculate_all_tenants_metrics',
         'schedule': crontab(hour=2, minute=0),
     },
+    'evaluate-retention-triggers-hourly': {
+        'task': 'retention.evaluate_all_retention_triggers',
+        'schedule': crontab(minute=0),  # Every hour
+    },
 }
 
 # Session Configuration

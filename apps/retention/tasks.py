@@ -71,3 +71,45 @@ def recalculate_single_client_metrics(tenant_id, client_id):
     except Exception as e:
         logger.exception(f"Error recalculating metrics for client {client_id} in tenant {tenant_id}: {str(e)}")
         return 0
+
+
+@shared_task(name='retention.evaluate_all_retention_triggers')
+def evaluate_all_retention_triggers():
+    """
+    Hourly scheduled Celery job scanning and evaluating automated retention triggers across all tenants.
+    """
+    from .automation_service import RetentionAutomationService
+    return RetentionAutomationService.evaluate_all_triggers_across_tenants()
+
+
+@shared_task(name='retention.attribute_conversion_task')
+def attribute_conversion_task(tenant_id, client_id, event_type, object_id=None):
+    """
+    Asynchronous attribution task executed upon booking check-in or package purchase.
+    """
+    from apps.users.models import User
+    from apps.scheduling.models import Booking, Payment
+    from apps.core.tenants.models import Tenant
+    from apps.core.tenants.context import bypass_tenant_isolation
+    from .services import AttributionService
+
+    try:
+        with bypass_tenant_isolation():
+            tenant = Tenant.objects.get(id=tenant_id)
+            client = User.objects.get(id=client_id)
+            related_object = None
+            if object_id:
+                if 'booking' in event_type:
+                    related_object = Booking.all_objects.filter(id=object_id).first()
+                elif 'payment' in event_type or 'package' in event_type:
+                    related_object = Payment.all_objects.filter(id=object_id).first()
+
+            return AttributionService.attribute_conversion(
+                tenant=tenant,
+                client=client,
+                event_type=event_type,
+                related_object=related_object
+            )
+    except Exception as e:
+        logger.exception(f"Error in attribute_conversion_task for client {client_id}: {e}")
+        return None

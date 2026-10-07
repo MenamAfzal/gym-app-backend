@@ -231,3 +231,100 @@ class RetentionAIService:
                     return parsed
 
         raise RuntimeError("LLM synthesis did not return expected response structure.")
+
+    @classmethod
+    def generate_personalized_winback_copy(
+        cls,
+        metrics: Optional[ClientRetentionMetrics] = None,
+        client=None,
+        trigger=None,
+        use_llm: bool = True
+    ) -> str:
+        """
+        Generates personalized, high-conversion win-back copy tailored to a client's
+        specific risk factors, attendance lapse, or billing issues.
+        Uses Gemini/Kimi if configured, otherwise falls back to a deterministic synthesizer.
+        """
+        if metrics is None and client is not None:
+            metrics = getattr(client, 'retention_metrics', None)
+            if metrics is None:
+                metrics = ClientRetentionMetrics.all_objects.filter(client=client).first()
+
+        client_user = client or (metrics.client if metrics else None)
+        first_name = (client_user.first_name if client_user else "") or "there"
+        studio_name = trigger.tenant.name if (trigger and getattr(trigger, 'tenant', None)) else "our studio"
+
+        gemini_key = os.environ.get("GEMINI_API_KEY")
+        kimi_key = os.environ.get("KIMI_API_KEY")
+
+        if use_llm and (gemini_key or kimi_key):
+            try:
+                prompt = (
+                    "You are a retention and member experience specialist for a boutique fitness studio.\n"
+                    f"Write a warm, concise, and compelling 2-sentence winback message for a client named {first_name}.\n"
+                    f"Studio name: {studio_name}.\n"
+                    f"Client metrics:\n"
+                    f"- Days inactive: {metrics.days_since_last_visit if metrics else 'Unknown'}\n"
+                    f"- Failed payments: {metrics.failed_payments_last_90d if metrics else 0}\n"
+                    f"- Risk factors: {metrics.risk_factors if metrics else []}\n"
+                    f"- Active packages: {metrics.active_packages_count if metrics else 0}\n"
+                    "Keep the tone encouraging, empathetic, and action-oriented. Return plain text only."
+                )
+                if gemini_key:
+                    import requests
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_key}"
+                    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+                    res = requests.post(url, json=payload, timeout=5)
+                    if res.status_code == 200:
+                        text = res.json()['candidates'][0]['content']['parts'][0]['text'].strip()
+                        if text:
+                            return text
+                elif kimi_key:
+                    import requests
+                    url = "https://api.moonshot.cn/v1/chat/completions"
+                    headers = {"Authorization": f"Bearer {kimi_key}", "Content-Type": "application/json"}
+                    payload = {
+                        "model": "moonshot-v1-8k",
+                        "messages": [
+                            {"role": "system", "content": "You write personalized customer win-back messages."},
+                            {"role": "user", "content": prompt}
+                        ]
+                    }
+                    res = requests.post(url, headers=headers, json=payload, timeout=5)
+                    if res.status_code == 200:
+                        text = res.json()['choices'][0]['message']['content'].strip()
+                        if text:
+                            return text
+            except Exception as e:
+                logger.warning(f"RetentionAIService winback LLM synthesis fallback: {e}")
+
+        # Deterministic high-performance synthesizer fallback
+        days_inactive = metrics.days_since_last_visit if metrics else 0
+        failed_pay = metrics.failed_payments_last_90d if metrics else 0
+        factors = metrics.risk_factors if metrics else []
+
+        if failed_pay > 0 or any("payment" in str(f).lower() for f in factors):
+            return (
+                f"Hi {first_name}, we noticed an issue processing your latest membership payment at {studio_name}. "
+                "To ensure uninterrupted booking access and keep your momentum going, please update your payment details or reach out to our front desk team."
+            )
+        elif days_inactive and days_inactive >= 30:
+            return (
+                f"Hi {first_name}, it's been {days_inactive} days since your last workout at {studio_name}, and your community misses your energy! "
+                "Let's get back into rhythm—book your next class today and take that next step toward your goals."
+            )
+        elif days_inactive and days_inactive >= 14:
+            return (
+                f"Hi {first_name}, we've missed seeing you at {studio_name} over the past couple weeks! "
+                "Your favorite instructors and classes are ready for you—reserve your spot today and reignite your routine."
+            )
+        elif metrics and metrics.nearest_package_expiry_at:
+            return (
+                f"Hi {first_name}, your class package at {studio_name} has credits that are expiring soon! "
+                "Don't let your hard work go to waste—check our upcoming schedule and reserve your sessions now."
+            )
+        else:
+            return (
+                f"Hi {first_name}, we'd love to see you back on the floor at {studio_name}! "
+                "Check out the latest schedule and book your next session with us today."
+            )

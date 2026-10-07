@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     ClientRetentionMetricsViewSet,
     SavedSegmentViewSet,
+    RetentionCampaignTriggerViewSet,
     ClientActivityTimelineView,
     RetentionOverviewDashboardView,
     CustomerJourneyFunnelView,
@@ -15,6 +16,7 @@ from .views import (
 router = DefaultRouter()
 router.register(r'metrics', ClientRetentionMetricsViewSet, basename='retention-metrics')
 router.register(r'segments', SavedSegmentViewSet, basename='retention-segments')
+router.register(r'triggers', RetentionCampaignTriggerViewSet, basename='retention-triggers')
 
 urlpatterns = [
     path('clients/<uuid:client_id>/timeline/', ClientActivityTimelineView.as_view(), name='retention-client-timeline'),

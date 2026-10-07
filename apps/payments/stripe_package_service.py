@@ -176,7 +176,7 @@ class StripePackageService:
 
             # Create Payment record
             amount_total = session.get('amount_total', 0)
-            Payment.objects.create(
+            payment = Payment.objects.create(
                 tenant_id=tenant_id,
                 client=client,
                 amount=amount_total / 100.0,
@@ -190,8 +190,9 @@ class StripePackageService:
             logger.info(f"Created Package {package.id} and Payment for checkout session {session.get('id')}")
 
             try:
-                from apps.retention.tasks import recalculate_single_client_metrics
+                from apps.retention.tasks import recalculate_single_client_metrics, attribute_conversion_task
                 recalculate_single_client_metrics.delay(str(tenant_id), str(client_id))
+                attribute_conversion_task.delay(str(tenant_id), str(client_id), 'package_purchase', str(payment.id))
             except Exception:
                 pass
 

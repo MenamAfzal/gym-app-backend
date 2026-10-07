@@ -1,5 +1,8 @@
 from rest_framework import serializers
-from .models import ClientRetentionMetrics, SavedSegment, TenantRetentionDailySnapshot
+from .models import (
+    ClientRetentionMetrics, RetentionCampaignActionLog, RetentionCampaignTrigger,
+    RetentionConversionAttribution, SavedSegment, TenantRetentionDailySnapshot
+)
 from apps.users.serializers import UserSerializer
 
 
@@ -99,6 +102,80 @@ class TenantRetentionDailySnapshotSerializer(serializers.ModelSerializer):
             'expiring_packages_next_7d',
             'created_at',
             'updated_at',
+        ]
+        read_only_fields = fields
+
+
+class RetentionCampaignTriggerSerializer(serializers.ModelSerializer):
+    target_segment_name = serializers.CharField(source='target_segment.name', read_only=True)
+    total_actions_sent = serializers.IntegerField(read_only=True, default=0)
+
+    class Meta:
+        model = RetentionCampaignTrigger
+        fields = [
+            'id',
+            'name',
+            'is_active',
+            'trigger_type',
+            'trigger_value',
+            'target_segment',
+            'target_segment_name',
+            'channel',
+            'template_subject',
+            'template_body',
+            'use_ai_personalization',
+            'total_actions_sent',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'target_segment_name', 'total_actions_sent']
+
+
+class RetentionCampaignActionLogSerializer(serializers.ModelSerializer):
+    client_email = serializers.CharField(source='client.email', read_only=True)
+    client_name = serializers.CharField(source='client.full_name', read_only=True)
+    trigger_name = serializers.CharField(source='trigger.name', read_only=True)
+
+    class Meta:
+        model = RetentionCampaignActionLog
+        fields = [
+            'id',
+            'client',
+            'client_email',
+            'client_name',
+            'trigger',
+            'trigger_name',
+            'action_type',
+            'sent_at',
+            'converted_at',
+            'conversion_booking',
+            'ai_generated_body',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+
+class RetentionConversionAttributionSerializer(serializers.ModelSerializer):
+    client_email = serializers.CharField(source='client.email', read_only=True)
+    client_name = serializers.CharField(source='client.full_name', read_only=True)
+    trigger_name = serializers.CharField(source='action_log.trigger.name', read_only=True)
+
+    class Meta:
+        model = RetentionConversionAttribution
+        fields = [
+            'id',
+            'action_log',
+            'campaign',
+            'client',
+            'client_email',
+            'client_name',
+            'trigger_name',
+            'booking',
+            'payment',
+            'conversion_event',
+            'attributed_revenue',
+            'converted_at',
+            'created_at',
         ]
         read_only_fields = fields
 

@@ -208,6 +208,10 @@ PERMISSION_CATALOG = {
             'analytics': {
                 'label': 'Retention & Operational Analytics',
                 'actions': ['view']
+            },
+            'triggers': {
+                'label': 'Retention Campaign Triggers',
+                'actions': ['view', 'create', 'edit', 'delete']
             }
         }
     }

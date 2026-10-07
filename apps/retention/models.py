@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from core_models.base_models import TenantAwareModel
 
@@ -226,4 +227,167 @@ class TenantRetentionDailySnapshot(TenantAwareModel):
 
     def __str__(self):
         return f"{self.tenant.name} Snapshot - {self.snapshot_date}"
+
+
+class RetentionTriggerType(models.TextChoices):
+    INACTIVITY = 'inactivity', _('Inactivity')
+    FAILED_PAYMENT = 'failed_payment', _('Failed Payment')
+    PACKAGE_EXPIRY = 'package_expiry', _('Package Expiry')
+    CUSTOM_SEGMENT = 'custom_segment', _('Custom Segment')
+
+
+class RetentionChannel(models.TextChoices):
+    EMAIL = 'email', _('Email')
+    PUSH = 'push', _('Push')
+    SMS = 'sms', _('SMS')
+
+
+class RetentionActionType(models.TextChoices):
+    SENT = 'sent', _('Sent')
+    CLICKED = 'clicked', _('Clicked')
+    CONVERTED = 'converted', _('Converted')
+
+
+class RetentionCampaignTrigger(TenantAwareModel):
+    """
+    Automated retention intervention trigger rules (e.g. 14 days inactive, failed billing, pass expiry).
+    """
+    name = models.CharField(max_length=255)
+    is_active = models.BooleanField(default=True, db_index=True)
+    trigger_type = models.CharField(
+        max_length=30,
+        choices=RetentionTriggerType.choices,
+        default=RetentionTriggerType.INACTIVITY
+    )
+    trigger_value = models.IntegerField(
+        default=0,
+        help_text="Milestone or offset value (e.g. 14 for days inactive, or 7 for days before expiry)"
+    )
+    target_segment = models.ForeignKey(
+        'retention.SavedSegment',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='triggers'
+    )
+    channel = models.CharField(
+        max_length=20,
+        choices=RetentionChannel.choices,
+        default=RetentionChannel.EMAIL
+    )
+    template_subject = models.CharField(max_length=255, blank=True, default='')
+    template_body = models.TextField()
+    use_ai_personalization = models.BooleanField(
+        default=False,
+        help_text="Whether to generate LLM-synthesized winback copy tailored to individual risk factors"
+    )
+
+    class Meta:
+        verbose_name = _('Retention Campaign Trigger')
+        verbose_name_plural = _('Retention Campaign Triggers')
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['tenant', 'is_active', 'trigger_type'], name='ret_trig_tenant_active_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.name} ({self.trigger_type} - {self.channel})"
+
+
+class RetentionCampaignActionLog(TenantAwareModel):
+    """
+    Audit log of dispatched automated retention touchpoints and client response lifecycle.
+    """
+    client = models.ForeignKey(
+        'users.User',
+        on_delete=models.CASCADE,
+        related_name='retention_action_logs'
+    )
+    trigger = models.ForeignKey(
+        'retention.RetentionCampaignTrigger',
+        on_delete=models.CASCADE,
+        related_name='action_logs'
+    )
+    action_type = models.CharField(
+        max_length=20,
+        choices=RetentionActionType.choices,
+        default=RetentionActionType.SENT
+    )
+    sent_at = models.DateTimeField(default=timezone.now, db_index=True)
+    converted_at = models.DateTimeField(null=True, blank=True)
+    conversion_booking = models.ForeignKey(
+        'scheduling.Booking',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='retention_action_logs'
+    )
+    ai_generated_body = models.TextField(blank=True, default='')
+
+    class Meta:
+        verbose_name = _('Retention Campaign Action Log')
+        verbose_name_plural = _('Retention Campaign Action Logs')
+        ordering = ['-sent_at']
+        indexes = [
+            models.Index(fields=['tenant', 'client', 'trigger', 'action_type'], name='ret_act_cl_trig_idx'),
+            models.Index(fields=['tenant', 'sent_at'], name='ret_act_sent_idx'),
+        ]
+
+    def __str__(self):
+        return f"ActionLog {self.action_type} for Client {self.client_id} (Trigger: {self.trigger.name})"
+
+
+class RetentionConversionAttribution(TenantAwareModel):
+    """
+    Attribution tracking record connecting retention campaigns or automated action logs
+    to concrete revenue or attendance actions (class check-ins, package purchases).
+    """
+    action_log = models.ForeignKey(
+        'retention.RetentionCampaignActionLog',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='attributions'
+    )
+    campaign = models.ForeignKey(
+        'notifications.NotificationCampaign',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='retention_attributions'
+    )
+    client = models.ForeignKey(
+        'users.User',
+        on_delete=models.CASCADE,
+        related_name='retention_attributions'
+    )
+    booking = models.ForeignKey(
+        'scheduling.Booking',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='retention_attributions'
+    )
+    payment = models.ForeignKey(
+        'scheduling.Payment',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='retention_attributions'
+    )
+    conversion_event = models.CharField(max_length=50, default='booking_checkin')
+    attributed_revenue = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    converted_at = models.DateTimeField(default=timezone.now, db_index=True)
+
+    class Meta:
+        verbose_name = _('Retention Conversion Attribution')
+        verbose_name_plural = _('Retention Conversion Attributions')
+        ordering = ['-converted_at']
+        indexes = [
+            models.Index(fields=['tenant', 'client', 'converted_at'], name='ret_attr_cl_conv_idx'),
+            models.Index(fields=['tenant', 'action_log'], name='ret_attr_act_log_idx'),
+        ]
+
+    def __str__(self):
+        return f"Attribution for Client {self.client_id} ({self.conversion_event} - ${self.attributed_revenue})"
 

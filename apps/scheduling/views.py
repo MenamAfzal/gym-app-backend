@@ -1218,10 +1218,11 @@ class BookingViewSet(viewsets.ModelViewSet):
             # Reward failures must never break core check-in flow
             pass
 
-        # Trigger retention recalculation hook
+        # Trigger retention recalculation and attribution hooks
         try:
-            from apps.retention.tasks import recalculate_single_client_metrics
+            from apps.retention.tasks import recalculate_single_client_metrics, attribute_conversion_task
             recalculate_single_client_metrics.delay(str(booking.tenant_id), str(booking.client_id))
+            attribute_conversion_task.delay(str(booking.tenant_id), str(booking.client_id), 'booking_checkin', str(booking.id))
         except Exception:
             pass
 

@@ -16,7 +16,8 @@ from apps.scheduling.models import (
 from apps.users.models import ClientLifecycleStatus, User, UserRole
 from .models import (
     AttendanceTrend, ChurnRiskLevel, ClientRetentionMetrics,
-    TenantRetentionDailySnapshot
+    RetentionActionType, RetentionCampaignActionLog, RetentionCampaignTrigger,
+    RetentionConversionAttribution, TenantRetentionDailySnapshot
 )
 
 logger = logging.getLogger(__name__)
@@ -1513,5 +1514,113 @@ class OperationalAnalyticsService:
                 "period_days": days,
                 "staff_performance": results
             }
+
+
+class AttributionService:
+    """
+    Service for end-to-end attribution of client actions (bookings, check-ins, package purchases)
+    to automated retention campaigns or marketing broadcast campaigns within an attribution window.
+    """
+
+    ATTRIBUTION_WINDOW_DAYS = 7
+
+    @classmethod
+    def attribute_conversion(
+        cls,
+        tenant,
+        client,
+        event_type: str,
+        related_object=None
+    ) -> Optional[RetentionConversionAttribution]:
+        """
+        Connects a client conversion event (booking, check-in, package payment) to a recent
+        retention intervention action log or notification campaign within a 7-day window.
+
+        Args:
+            tenant: Tenant instance or UUID
+            client: User instance
+            event_type: 'booking_checkin', 'package_purchase', 'booking', etc.
+            related_object: Booking or Payment model instance
+        """
+        now = timezone.now()
+        window_start = now - timedelta(days=cls.ATTRIBUTION_WINDOW_DAYS)
+
+        tenant_id = getattr(tenant, 'id', tenant)
+
+        with bypass_tenant_isolation():
+            # 1. Check for a recent RetentionCampaignActionLog (action_type='sent')
+            recent_log = RetentionCampaignActionLog.all_objects.filter(
+                tenant_id=tenant_id,
+                client=client,
+                action_type=RetentionActionType.SENT,
+                sent_at__gte=window_start
+            ).order_by('-sent_at').first()
+
+            # 2. Check for a recent NotificationCampaign if no trigger log was found
+            recent_campaign = None
+            if not recent_log:
+                try:
+                    from apps.notifications.models import NotificationInbox
+                    recent_inbox = NotificationInbox.all_objects.filter(
+                        tenant_id=tenant_id,
+                        recipient=client,
+                        campaign__isnull=False,
+                        created_at__gte=window_start
+                    ).select_related('campaign').order_by('-created_at').first()
+                    if recent_inbox:
+                        recent_campaign = recent_inbox.campaign
+                except Exception as e:
+                    logger.warning(f"Error querying notification inbox for attribution: {e}")
+
+            # If no recent retention intervention was sent, no attribution is made
+            if not recent_log and not recent_campaign:
+                return None
+
+            # Determine booking, payment, and attributed revenue
+            booking_obj = None
+            payment_obj = None
+            attributed_revenue = Decimal('0.00')
+
+            if isinstance(related_object, Booking):
+                booking_obj = related_object
+                pkg = getattr(booking_obj, 'credit_source', None) or getattr(booking_obj, 'package', None)
+                if pkg and getattr(pkg, 'price', None):
+                    attributed_revenue = Decimal(str(pkg.price))
+                elif hasattr(booking_obj, 'session') and booking_obj.session and hasattr(booking_obj.session, 'template') and booking_obj.session.template:
+                    price = getattr(booking_obj.session.template, 'price', None)
+                    if price:
+                        attributed_revenue = Decimal(str(price))
+            elif isinstance(related_object, Payment):
+                payment_obj = related_object
+                if payment_obj.amount:
+                    attributed_revenue = Decimal(str(payment_obj.amount))
+
+            # Mark the action log as converted
+            if recent_log:
+                recent_log.converted_at = now
+                if booking_obj:
+                    recent_log.conversion_booking = booking_obj
+                recent_log.save(update_fields=['converted_at', 'conversion_booking'])
+
+            # Create the attribution record
+            attribution = RetentionConversionAttribution.objects.create(
+                tenant_id=tenant_id,
+                action_log=recent_log,
+                campaign=recent_campaign,
+                client=client,
+                booking=booking_obj,
+                payment=payment_obj,
+                conversion_event=event_type,
+                attributed_revenue=attributed_revenue,
+                converted_at=now,
+            )
+
+            logger.info(
+                f"Attributed conversion ({event_type}) for client {client.id} in tenant {tenant_id}: "
+                f"ActionLog={recent_log.id if recent_log else 'None'}, "
+                f"Revenue=${attributed_revenue}"
+            )
+            return attribution
+
 
 

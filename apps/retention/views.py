@@ -17,17 +17,25 @@ from apps.scheduling.models import Booking, FacilityAccessLog, Package, Payment
 from apps.scheduling.permissions import IsOwnerOrManager
 from apps.scheduling.views import StandardResultsSetPagination
 from apps.users.models import ClientLifecycleStatus, User, UserRole
-from .models import ChurnRiskLevel, ClientRetentionMetrics, SavedSegment, TenantRetentionDailySnapshot
+from .models import (
+    AttendanceTrend, ChurnRiskLevel, ClientRetentionMetrics,
+    RetentionActionType, RetentionCampaignActionLog, RetentionCampaignTrigger,
+    RetentionConversionAttribution, SavedSegment, TenantRetentionDailySnapshot
+)
 from .serializers import (
     ClientRetentionMetricsSerializer,
+    RetentionCampaignActionLogSerializer,
+    RetentionCampaignTriggerSerializer,
+    RetentionConversionAttributionSerializer,
     SavedSegmentSerializer,
     TenantRetentionDailySnapshotSerializer,
 )
 from .services import (
-    CohortAnalyticsService, FunnelAnalyticsService,
+    AttributionService, CohortAnalyticsService, FunnelAnalyticsService,
     OperationalAnalyticsService, RetentionMetricsService, SegmentQueryService
 )
 from .ai_service import RetentionAIService
+from .automation_service import RetentionAutomationService
 
 logger = logging.getLogger(__name__)
 
@@ -818,3 +826,128 @@ class AtRiskSummaryView(APIView):
             "top_risk_factors": top_risk_factors,
             "estimated_monthly_value_total": float(tot_est_monthly),
         }, status=status.HTTP_200_OK)
+
+
+class RetentionCampaignTriggerViewSet(viewsets.ModelViewSet):
+    """
+    CRUD API for automated retention campaign triggers and intervention rules.
+    Includes performance tracking endpoint linking sent actions to converted bookings and revenue.
+    """
+    queryset = RetentionCampaignTrigger.objects.all().select_related('target_segment', 'tenant')
+    serializer_class = RetentionCampaignTriggerSerializer
+    pagination_class = StandardResultsSetPagination
+    permission_classes = [IsAuthenticated, IsOwnerOrManager]
+    permission_app = 'retention'
+    permission_resource = 'triggers'
+
+    def get_queryset(self):
+        user = self.request.user
+        if not user.is_authenticated:
+            return RetentionCampaignTrigger.objects.none()
+
+        tenant = getattr(self.request, 'tenant', None) or getattr(user, 'tenant', None)
+        qs = RetentionCampaignTrigger.objects.filter(tenant=tenant).select_related('target_segment', 'tenant')
+        return qs.annotate(
+            total_actions_sent=Count('action_logs', filter=Q(action_logs__action_type=RetentionActionType.SENT))
+        )
+
+    def perform_create(self, serializer):
+        tenant = getattr(self.request, 'tenant', None) or getattr(self.request.user, 'tenant', None)
+        serializer.save(tenant=tenant)
+
+    @action(detail=True, methods=['get'], url_path='performance')
+    def performance(self, request, pk=None):
+        """
+        Returns funnel metrics and attributed ROI for a specific retention trigger:
+        - Total sent, clicked, and converted
+        - Conversion rate %
+        - Total attributed revenue and average revenue per converted client
+        - Recent conversion details
+        """
+        trigger = self.get_object()
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+
+        with bypass_tenant_isolation():
+            action_logs = RetentionCampaignActionLog.all_objects.filter(
+                tenant=tenant,
+                trigger=trigger
+            )
+            total_sent = action_logs.filter(action_type=RetentionActionType.SENT).count()
+            total_clicked = action_logs.filter(action_type=RetentionActionType.CLICKED).count()
+            total_converted = action_logs.filter(converted_at__isnull=False).count()
+
+            conversion_rate = round(total_converted / total_sent * 100.0, 2) if total_sent > 0 else 0.0
+ 
+            attributions = RetentionConversionAttribution.all_objects.filter(
+                tenant=tenant,
+                action_log__trigger=trigger
+            ).select_related('client', 'booking', 'payment')
+
+            total_revenue = attributions.aggregate(
+                total=Coalesce(Sum('attributed_revenue'), Value(Decimal('0.00')))
+            )['total']
+
+            avg_revenue = round(total_revenue / Decimal(str(total_converted)), 2) if total_converted > 0 else Decimal('0.00')
+
+            recent_attributions = attributions.order_by('-converted_at')[:20]
+            conversions_data = [
+                {
+                    "id": str(attr.id),
+                    "client_id": str(attr.client_id),
+                    "client_name": attr.client.full_name or attr.client.email,
+                    "conversion_event": attr.conversion_event,
+                    "attributed_revenue": float(attr.attributed_revenue),
+                    "converted_at": attr.converted_at.isoformat() if attr.converted_at else None,
+                    "booking_id": str(attr.booking_id) if attr.booking_id else None,
+                    "payment_id": str(attr.payment_id) if attr.payment_id else None,
+                }
+                for attr in recent_attributions
+            ]
+
+        return Response({
+            "trigger_id": str(trigger.id),
+            "name": trigger.name,
+            "trigger_type": trigger.trigger_type,
+            "channel": trigger.channel,
+            "is_active": trigger.is_active,
+            "use_ai_personalization": trigger.use_ai_personalization,
+            "funnel": {
+                "sent": total_sent,
+                "clicked": total_clicked,
+                "converted": total_converted,
+                "conversion_rate_percent": conversion_rate,
+            },
+            "revenue": {
+                "total_attributed_revenue": float(total_revenue),
+                "average_revenue_per_conversion": float(avg_revenue),
+            },
+            "recent_conversions": conversions_data,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='execute-now')
+    def execute_now(self, request, pk=None):
+        """
+        Manually triggers evaluation of this specific trigger immediately.
+        """
+        trigger = self.get_object()
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        executed_count = 0
+
+        if trigger.trigger_type == 'inactivity':
+            logs = RetentionAutomationService.evaluate_inactivity_triggers(tenant=tenant)
+            executed_count = len(logs)
+        elif trigger.trigger_type == 'failed_payment':
+            logs = RetentionAutomationService.evaluate_failed_payment_triggers(tenant=tenant)
+            executed_count = len(logs)
+        elif trigger.trigger_type == 'package_expiry':
+            logs = RetentionAutomationService.evaluate_expiry_triggers(tenant=tenant)
+            executed_count = len(logs)
+        elif trigger.trigger_type == 'custom_segment':
+            logs = RetentionAutomationService.evaluate_custom_segment_triggers(tenant=tenant)
+            executed_count = len(logs)
+
+        return Response({
+            "detail": f"Trigger '{trigger.name}' executed.",
+            "dispatched_interventions_count": executed_count,
+        }, status=status.HTTP_200_OK)
+
