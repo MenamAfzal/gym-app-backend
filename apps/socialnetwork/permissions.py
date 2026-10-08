@@ -49,3 +49,13 @@ class IsOwnerOrAdmin(permissions.BasePermission):
                 return obj_tenant_id == user_tenant_id
             return True 
         return getattr(obj, 'user_id', None) == user.id
+
+
+class IsAdminOrModerator(permissions.BasePermission):
+    """
+    Permission class allowing access only to users with admin/moderation privileges
+    (Gym Owner, Gym Manager, Platform Admin, and staff/superusers).
+    """
+    def has_permission(self, request, view):
+        return bool(request.user and request.user.is_authenticated and is_admin_user(request.user))
+

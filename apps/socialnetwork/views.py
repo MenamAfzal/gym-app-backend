@@ -980,9 +980,12 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import AccessToken
 from .serializers import PollDetailSerializer, UserMinimalSerializer
 from .models import CommentReaction
-from .permissions import is_admin_user, IsOwnerOrAdmin
+from .permissions import is_admin_user, IsOwnerOrAdmin, IsAdminOrModerator
 from apps.socialnetwork.helper_functions import handle_file_response
-from apps.socialnetwork.models import Comment, Like, Photo, Poll, PollOption, Video, Vote, Post, SocialPost, PostMedia
+from apps.socialnetwork.models import (
+    Comment, Like, Photo, Poll, PollOption, Video, Vote, Post, SocialPost, PostMedia,
+    UserBlock, PostReport
+)
 from apps.socialnetwork.serializers import (
     CommentSerializer,
     MediaListSerializer,
@@ -999,6 +1002,13 @@ from apps.socialnetwork.serializers import (
     SocialPostSerializer,
     SocialPostDetailSerializer,
     PostMediaSerializer,
+    UserBlockSerializer,
+    AdminUserBlockSerializer,
+    PostReportSerializer,
+    PostReportCreateSerializer,
+    PostReportUpdateSerializer,
+    AdminPostReportSerializer,
+    AdminReportActionSerializer,
 )
 
 import logging
@@ -1345,11 +1355,15 @@ class PollAPIView(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         from apps.users.models import UserRole
-        if user.is_authenticated and (user.is_staff or is_admin_user(user) or user.role != UserRole.CLIENT):
-            return Poll.objects.all().order_by('-created_at')
+        qs = Poll.objects.all()
         if user.is_authenticated:
-            return Poll.objects.filter(Q(visible_to_clients=True) | Q(user=user)).order_by('-created_at')
-        return Poll.objects.filter(visible_to_clients=True).order_by('-created_at')
+            blocked_ids = UserBlock.get_blocked_user_ids_for(user)
+            if blocked_ids:
+                qs = qs.exclude(user_id__in=blocked_ids)
+            if user.is_staff or is_admin_user(user) or user.role != UserRole.CLIENT:
+                return qs.order_by('-created_at')
+            return qs.filter(Q(visible_to_clients=True) | Q(user=user)).order_by('-created_at')
+        return qs.filter(visible_to_clients=True).order_by('-created_at')
 
     def get_serializer_class(self):
         if self.action == 'retrieve':
@@ -1486,38 +1500,56 @@ class MediaViewSet(viewsets.ModelViewSet):
     }
 
     def _find_media_object(self, pk, media_type=None):
+        def _check_not_blocked(item):
+            if not item:
+                return None
+            request = getattr(self, 'request', None)
+            if request and request.user.is_authenticated:
+                blocked_ids = UserBlock.get_blocked_user_ids_for(request.user)
+                if getattr(item, 'user_id', None) in blocked_ids:
+                    return None
+            return item
+
         if media_type and media_type in self.media_types:
             model = self.media_types[media_type]['model']
             obj = model.objects.filter(pk=pk).first()
+            obj = _check_not_blocked(obj)
             if obj:
                 return obj, media_type
 
-        social_post = SocialPost.objects.filter(pk=pk).first()
+        social_post = _check_not_blocked(SocialPost.objects.filter(pk=pk).first())
         if social_post:
             return social_post, 'post'
 
-        photo = Photo.objects.filter(pk=pk).first()
+        photo = _check_not_blocked(Photo.objects.filter(pk=pk).first())
         if photo:
             return photo, 'photo'
 
-        video = Video.objects.filter(pk=pk).first()
+        video = _check_not_blocked(Video.objects.filter(pk=pk).first())
         if video:
             return video, 'video'
 
-        poll = Poll.objects.filter(pk=pk).first()
+        poll = _check_not_blocked(Poll.objects.filter(pk=pk).first())
         if poll:
             return poll, 'poll'
 
         post_media = PostMedia.objects.filter(pk=pk).select_related('post').first()
         if post_media and post_media.post:
-            return post_media.post, 'post'
+            post_obj = _check_not_blocked(post_media.post)
+            if post_obj:
+                return post_obj, 'post'
 
         return None, None
 
     def get_queryset(self):
         media_type = self.request.query_params.get('type') or self.request.data.get('media_type')
         if media_type in self.media_types:
-            return self.media_types[media_type]['model'].objects.all()
+            qs = self.media_types[media_type]['model'].objects.all()
+            if self.request.user.is_authenticated:
+                blocked_ids = UserBlock.get_blocked_user_ids_for(self.request.user)
+                if blocked_ids:
+                    qs = qs.exclude(user_id__in=blocked_ids)
+            return qs
         return Photo.objects.none()
 
     def get_serializer_class(self):
@@ -1967,6 +1999,11 @@ class UnifiedFeedAPIView(APIView):
         items = []
         user_cache = {}
 
+        # Collect blocked user IDs (mutual blocking like Instagram)
+        blocked_user_ids = set()
+        if request.user.is_authenticated:
+            blocked_user_ids = UserBlock.get_blocked_user_ids_for(request.user)
+
         def add_items(qs, serializer_class, media_type):
             for obj in qs.order_by('-created_at'):
                 user = obj.user
@@ -1984,20 +2021,25 @@ class UnifiedFeedAPIView(APIView):
                 items.append(data)
 
         # PHOTOS
+        photo_qs = Photo.objects.select_related('user__profile')
+        if blocked_user_ids:
+            photo_qs = photo_qs.exclude(user_id__in=blocked_user_ids)
         add_items(
-            Photo.objects.select_related('user__profile').all(),
+            photo_qs.all(),
             PhotoSerializer,
             media_type='photo'
         )
 
         # VIDEOS
+        video_qs = Video.objects.select_related('user__profile')
+        if blocked_user_ids:
+            video_qs = video_qs.exclude(user_id__in=blocked_user_ids)
         add_items(
-            Video.objects.select_related('user__profile').all(),
+            video_qs.all(),
             VideoSerializer,
             media_type='video'
         )
         from django.db import models
- 
 
         # POLLS (apply visibility)
         poll_qs = Poll.objects.select_related('user__profile').filter(
@@ -2011,6 +2053,9 @@ class UnifiedFeedAPIView(APIView):
         else:
             poll_qs = poll_qs.filter(visible_to_clients=True)
 
+        if blocked_user_ids:
+            poll_qs = poll_qs.exclude(user_id__in=blocked_user_ids)
+
         add_items(poll_qs, PollSerializer, media_type='poll')
 
         post_qs = SocialPost.objects.select_related('user__profile').prefetch_related('media_items')
@@ -2020,6 +2065,9 @@ class UnifiedFeedAPIView(APIView):
             post_qs = post_qs.filter(models.Q(visible_to_clients=True) | models.Q(user=request.user))
         else:
             post_qs = post_qs.filter(visible_to_clients=True)
+
+        if blocked_user_ids:
+            post_qs = post_qs.exclude(user_id__in=blocked_user_ids)
 
         for obj in post_qs.order_by('-created_at'):
             user = obj.user
@@ -2086,9 +2134,12 @@ class PostViewSet(viewsets.ModelViewSet):
         user = self.request.user
         qs = SocialPost.objects.select_related('user__profile').prefetch_related('media_items')
         from apps.users.models import UserRole
-        if user.is_authenticated and (user.is_staff or is_admin_user(user) or user.role != UserRole.CLIENT):
-            return qs.order_by('-created_at')
         if user.is_authenticated:
+            blocked_ids = UserBlock.get_blocked_user_ids_for(user)
+            if blocked_ids:
+                qs = qs.exclude(user_id__in=blocked_ids)
+            if user.is_staff or is_admin_user(user) or user.role != UserRole.CLIENT:
+                return qs.order_by('-created_at')
             return qs.filter(Q(visible_to_clients=True) | Q(user=user)).order_by('-created_at')
         return qs.filter(visible_to_clients=True).order_by('-created_at')
 
@@ -2096,6 +2147,15 @@ class PostViewSet(viewsets.ModelViewSet):
         if self.action == 'retrieve':
             return SocialPostDetailSerializer
         return SocialPostSerializer
+
+    def retrieve(self, request, *args, **kwargs):
+        post = self.get_object()
+        if request.user.is_authenticated:
+            blocked_ids = UserBlock.get_blocked_user_ids_for(request.user)
+            if post.user_id in blocked_ids:
+                return format_error_response("Post not found.", status_code=status.HTTP_404_NOT_FOUND)
+        serializer = self.get_serializer(post)
+        return Response(serializer.data)
 
     def create(self, request, *args, **kwargs):
         return create_social_post(request, request.user)
@@ -2120,6 +2180,10 @@ class PostViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def like(self, request, pk=None):
         post = self.get_object()
+        if request.user.is_authenticated:
+            blocked_ids = UserBlock.get_blocked_user_ids_for(request.user)
+            if post.user_id in blocked_ids:
+                return format_error_response("Post not found.", status_code=status.HTTP_404_NOT_FOUND)
         content_type = ContentType.objects.get_for_model(SocialPost)
         like, created = Like.objects.get_or_create(
             user=request.user,
@@ -2146,6 +2210,10 @@ class PostViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def unlike(self, request, pk=None):
         post = self.get_object()
+        if request.user.is_authenticated:
+            blocked_ids = UserBlock.get_blocked_user_ids_for(request.user)
+            if post.user_id in blocked_ids:
+                return format_error_response("Post not found.", status_code=status.HTTP_404_NOT_FOUND)
         content_type = ContentType.objects.get_for_model(SocialPost)
         like = Like.objects.filter(
             user=request.user,
@@ -2160,6 +2228,10 @@ class PostViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
     def comment(self, request, pk=None):
         post = self.get_object()
+        if request.user.is_authenticated:
+            blocked_ids = UserBlock.get_blocked_user_ids_for(request.user)
+            if post.user_id in blocked_ids:
+                return format_error_response("Post not found.", status_code=status.HTTP_404_NOT_FOUND)
         if not post.comments_enabled:
             return format_error_response('Comments are disabled for this post', status_code=status.HTTP_403_FORBIDDEN)
         serializer = CommentSerializer(data=request.data)
@@ -2200,12 +2272,20 @@ class PostViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['get'], permission_classes=[AllowAny])
     def comments(self, request, pk=None):
         post = self.get_object()
+        if request.user.is_authenticated:
+            blocked_ids = UserBlock.get_blocked_user_ids_for(request.user)
+            if post.user_id in blocked_ids:
+                return format_error_response("Post not found.", status_code=status.HTTP_404_NOT_FOUND)
         content_type = ContentType.objects.get_for_model(SocialPost)
         top_comments = Comment.objects.filter(
             content_type=content_type,
             object_id=post.id,
             parent=None
         ).select_related('user__profile').prefetch_related('replies__user__profile')
+        if request.user.is_authenticated:
+            blocked_ids = UserBlock.get_blocked_user_ids_for(request.user)
+            if blocked_ids:
+                top_comments = top_comments.exclude(user_id__in=blocked_ids)
         results = []
         for c in top_comments:
             results.append({
@@ -2213,6 +2293,36 @@ class PostViewSet(viewsets.ModelViewSet):
                 'user': UserMinimalSerializer(c.user, context={'request': request}).data
             })
         return Response(results)
+
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def report(self, request, pk=None):
+        post = self.get_object()
+        if post.user_id == request.user.id:
+            return format_error_response("You cannot report your own post.")
+
+        existing = PostReport.objects.filter(
+            reporter=request.user,
+            post=post,
+            status__in=[PostReport.ReportStatus.PENDING, PostReport.ReportStatus.UNDER_REVIEW]
+        ).first()
+        if existing:
+            return format_error_response("You have already reported this post. Your report is currently under review.")
+
+        report_data = {'post_id': str(post.id), **request.data}
+        serializer = PostReportCreateSerializer(data=report_data, context={'request': request})
+        if not serializer.is_valid():
+            return format_error_response("Invalid report data", serializer.errors)
+
+        tenant = getattr(request.user, 'tenant', None) or getattr(post, 'tenant', None)
+        report = PostReport.objects.create(
+            reporter=request.user,
+            reported_user=post.user,
+            post=post,
+            reason=serializer.validated_data.get('reason', PostReport.ReportReason.OTHER),
+            description=serializer.validated_data.get('description', ''),
+            tenant=tenant
+        )
+        return Response(PostReportSerializer(report, context={'request': request}).data, status=status.HTTP_201_CREATED)
     
 class CommentViewSet(mixins.DestroyModelMixin, viewsets.GenericViewSet):
     queryset = Comment.all_objects.all()
@@ -2275,3 +2385,410 @@ class CommentViewSet(mixins.DestroyModelMixin, viewsets.GenericViewSet):
         comment.likes_count = comment.reactions.filter(reaction_type='LIKE').count()
         comment.dislikes_count = comment.reactions.filter(reaction_type='DISLIKE').count()
         comment.save(update_fields=['likes_count', 'dislikes_count'])
+
+
+class UserBlockViewSet(viewsets.ModelViewSet):
+    """
+    CRUD API for clients and staff to manage their blocked users.
+    - list: GET /api/v1/socialnetwork/blocks/ (list users blocked by current user)
+    - retrieve: GET /api/v1/socialnetwork/blocks/<id>/
+    - create: POST /api/v1/socialnetwork/blocks/ (body: {"blocked_user_id": "<uuid>", "reason": "..."})
+    - destroy: DELETE /api/v1/socialnetwork/blocks/<id>/ (unblock)
+    - unblock: POST /api/v1/socialnetwork/blocks/unblock/ (body: {"blocked_user_id": "<uuid>"})
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = UserBlockSerializer
+
+    def get_queryset(self):
+        return UserBlock.objects.filter(blocker=self.request.user).select_related('blocked__profile')
+
+    def create(self, request, *args, **kwargs):
+        blocked_user_id = (
+            request.data.get('blocked_user_id')
+            or request.data.get('user_id')
+            or request.data.get('blocked')
+        )
+        if not blocked_user_id:
+            return format_error_response("blocked_user_id is required")
+
+        if str(blocked_user_id) == str(request.user.id):
+            return format_error_response("You cannot block yourself.")
+
+        target_user = User.objects.filter(id=blocked_user_id).first()
+        if not target_user:
+            return format_error_response("User not found.", status_code=status.HTTP_404_NOT_FOUND)
+
+        existing = UserBlock.all_objects.filter(blocker=request.user, blocked=target_user).first()
+        if existing:
+            return format_error_response("You have already blocked this user.", status_code=status.HTTP_400_BAD_REQUEST)
+
+        tenant = getattr(request.user, 'tenant', None) or getattr(target_user, 'tenant', None)
+        block = UserBlock.objects.create(
+            blocker=request.user,
+            blocked=target_user,
+            reason=request.data.get('reason'),
+            tenant=tenant
+        )
+        serializer = self.get_serializer(block)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    def destroy(self, request, *args, **kwargs):
+        block = self.get_object()
+        if block.blocker_id != request.user.id and not is_admin_user(request.user):
+            return format_error_response("You do not have permission to delete this block.", status_code=status.HTTP_403_FORBIDDEN)
+        block.delete()
+        return Response({"message": "User unblocked successfully."}, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='unblock')
+    def unblock_by_user(self, request):
+        blocked_user_id = (
+            request.data.get('blocked_user_id')
+            or request.data.get('user_id')
+            or request.data.get('blocked')
+        )
+        if not blocked_user_id:
+            return format_error_response("blocked_user_id is required")
+
+        block = UserBlock.all_objects.filter(blocker=request.user, blocked_id=blocked_user_id).first()
+        if not block:
+            return format_error_response("Block record not found.", status_code=status.HTTP_404_NOT_FOUND)
+
+        block.delete()
+        return Response({"message": "User unblocked successfully."}, status=status.HTTP_200_OK)
+
+
+class UserBlockActionView(APIView):
+    """
+    Direct endpoint to block a user:
+    POST /api/v1/socialnetwork/users/<user_id>/block/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, user_id):
+        if str(user_id) == str(request.user.id):
+            return format_error_response("You cannot block yourself.")
+
+        target_user = User.objects.filter(id=user_id).first()
+        if not target_user:
+            return format_error_response("User not found.", status_code=status.HTTP_404_NOT_FOUND)
+
+        existing = UserBlock.all_objects.filter(blocker=request.user, blocked=target_user).first()
+        if existing:
+            return format_error_response("You have already blocked this user.", status_code=status.HTTP_400_BAD_REQUEST)
+
+        tenant = getattr(request.user, 'tenant', None) or getattr(target_user, 'tenant', None)
+        block = UserBlock.objects.create(
+            blocker=request.user,
+            blocked=target_user,
+            reason=request.data.get('reason'),
+            tenant=tenant
+        )
+        serializer = UserBlockSerializer(block, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class UserUnblockActionView(APIView):
+    """
+    Direct endpoint to unblock a user:
+    POST or DELETE /api/v1/socialnetwork/users/<user_id>/unblock/
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _unblock(self, request, user_id):
+        block = UserBlock.all_objects.filter(blocker=request.user, blocked_id=user_id).first()
+        if not block:
+            return format_error_response("Block record not found.", status_code=status.HTTP_404_NOT_FOUND)
+        block.delete()
+        return Response({"message": "User unblocked successfully."}, status=status.HTTP_200_OK)
+
+    def post(self, request, user_id):
+        return self._unblock(request, user_id)
+
+    def delete(self, request, user_id):
+        return self._unblock(request, user_id)
+
+
+class AdminUserBlockViewSet(viewsets.ModelViewSet):
+    """
+    Admin CRUD for gym owners, managers, and platform admins to oversee blocks.
+    - list: GET /api/v1/socialnetwork/admin/blocks/
+    - retrieve: GET /api/v1/socialnetwork/admin/blocks/<id>/
+    - create: POST /api/v1/socialnetwork/admin/blocks/
+    - update: PATCH /api/v1/socialnetwork/admin/blocks/<id>/
+    - destroy: DELETE /api/v1/socialnetwork/admin/blocks/<id>/
+    """
+    permission_classes = [IsAdminOrModerator]
+    serializer_class = AdminUserBlockSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        from apps.users.models import UserRole
+        if user.role == UserRole.PLATFORM_ADMIN or user.is_superuser:
+            qs = UserBlock.all_objects.select_related('blocker__profile', 'blocked__profile', 'tenant')
+        else:
+            qs = UserBlock.objects.select_related('blocker__profile', 'blocked__profile', 'tenant')
+
+        blocker_id = self.request.query_params.get('blocker_id')
+        if blocker_id:
+            qs = qs.filter(blocker_id=blocker_id)
+
+        blocked_id = self.request.query_params.get('blocked_id')
+        if blocked_id:
+            qs = qs.filter(blocked_id=blocked_id)
+
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(blocker__email__icontains=search) |
+                Q(blocked__email__icontains=search) |
+                Q(reason__icontains=search)
+            )
+
+        return qs.order_by('-created_at')
+
+    def create(self, request, *args, **kwargs):
+        blocker_id = request.data.get('blocker_id') or request.user.id
+        blocked_user_id = (
+            request.data.get('blocked_user_id')
+            or request.data.get('user_id')
+            or request.data.get('blocked')
+        )
+
+        if not blocked_user_id:
+            return format_error_response("blocked_user_id is required")
+
+        if str(blocker_id) == str(blocked_user_id):
+            return format_error_response("Blocker and blocked user cannot be the same user.")
+
+        blocker = User.objects.filter(id=blocker_id).first()
+        blocked = User.objects.filter(id=blocked_user_id).first()
+        if not blocker or not blocked:
+            return format_error_response("Blocker or blocked user not found.", status_code=status.HTTP_404_NOT_FOUND)
+
+        existing = UserBlock.all_objects.filter(blocker=blocker, blocked=blocked).first()
+        if existing:
+            return format_error_response("This block relationship already exists.", status_code=status.HTTP_400_BAD_REQUEST)
+
+        tenant = getattr(blocker, 'tenant', None) or getattr(blocked, 'tenant', None) or getattr(request.user, 'tenant', None)
+        block = UserBlock.objects.create(
+            blocker=blocker,
+            blocked=blocked,
+            reason=request.data.get('reason'),
+            tenant=tenant
+        )
+        return Response(AdminUserBlockSerializer(block, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        block = self.get_object()
+        serializer = self.get_serializer(block, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return format_error_response("Invalid update data", serializer.errors)
+        serializer.save()
+        return Response(serializer.data)
+
+    def destroy(self, request, *args, **kwargs):
+        block = self.get_object()
+        block.delete()
+        return Response({"message": "Block removed successfully by admin."}, status=status.HTTP_200_OK)
+
+
+class PostReportViewSet(viewsets.ModelViewSet):
+    """
+    CRUD API for clients and staff to submit and manage reports on posts.
+    - list: GET /api/v1/socialnetwork/reports/ (reports submitted by current user)
+    - retrieve: GET /api/v1/socialnetwork/reports/<id>/
+    - create: POST /api/v1/socialnetwork/reports/ (payload: post_id, reason, description)
+    - update: PATCH /api/v1/socialnetwork/reports/<id>/ (update pending report)
+    - destroy: DELETE /api/v1/socialnetwork/reports/<id>/ (cancel pending report)
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        qs = PostReport.objects.filter(reporter=self.request.user).select_related(
+            'reporter__profile', 'reported_user__profile', 'post'
+        )
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param.lower())
+        reason_param = self.request.query_params.get('reason')
+        if reason_param:
+            qs = qs.filter(reason=reason_param.lower())
+        return qs.order_by('-created_at')
+
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return PostReportCreateSerializer
+        if self.action in ['update', 'partial_update']:
+            return PostReportUpdateSerializer
+        return PostReportSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = PostReportCreateSerializer(data=request.data, context={'request': request})
+        if not serializer.is_valid():
+            return format_error_response("Invalid report data", serializer.errors)
+
+        post = SocialPost.objects.filter(id=serializer.validated_data['post_id']).first()
+        if not post:
+            return format_error_response("Post not found.", status_code=status.HTTP_404_NOT_FOUND)
+
+        tenant = getattr(request.user, 'tenant', None) or getattr(post, 'tenant', None)
+        report = PostReport.objects.create(
+            reporter=request.user,
+            reported_user=post.user,
+            post=post,
+            reason=serializer.validated_data.get('reason', PostReport.ReportReason.OTHER),
+            description=serializer.validated_data.get('description', ''),
+            tenant=tenant
+        )
+        return Response(PostReportSerializer(report, context={'request': request}).data, status=status.HTTP_201_CREATED)
+
+    def update(self, request, *args, **kwargs):
+        report = self.get_object()
+        if report.reporter_id != request.user.id and not is_admin_user(request.user):
+            return format_error_response("You do not have permission to edit this report.", status_code=status.HTTP_403_FORBIDDEN)
+        if report.status != PostReport.ReportStatus.PENDING:
+            return format_error_response("Cannot modify a report that is already under review or resolved.")
+
+        serializer = PostReportUpdateSerializer(report, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return format_error_response("Invalid update data", serializer.errors)
+        serializer.save()
+        return Response(PostReportSerializer(report, context={'request': request}).data)
+
+    def destroy(self, request, *args, **kwargs):
+        report = self.get_object()
+        if report.reporter_id != request.user.id and not is_admin_user(request.user):
+            return format_error_response("You do not have permission to withdraw this report.", status_code=status.HTTP_403_FORBIDDEN)
+        if report.status != PostReport.ReportStatus.PENDING:
+            return format_error_response("Cannot withdraw a report that is already under review or resolved.")
+        report.delete()
+        return Response({"message": "Report withdrawn successfully."}, status=status.HTTP_200_OK)
+
+
+class AdminPostReportViewSet(viewsets.ModelViewSet):
+    """
+    Complete moderation CRUD and action API for gym admins & platform staff.
+    - list: GET /api/v1/socialnetwork/admin/reports/ (filter by status, reason, post, user)
+    - retrieve: GET /api/v1/socialnetwork/admin/reports/<id>/
+    - update/patch: PATCH /api/v1/socialnetwork/admin/reports/<id>/ (update status, notes, action)
+    - destroy: DELETE /api/v1/socialnetwork/admin/reports/<id>/
+    - take_action: POST /api/v1/socialnetwork/admin/reports/<id>/action/
+    """
+    permission_classes = [IsAdminOrModerator]
+    serializer_class = AdminPostReportSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        from apps.users.models import UserRole
+        if user.role == UserRole.PLATFORM_ADMIN or user.is_superuser:
+            qs = PostReport.all_objects.select_related(
+                'reporter__profile', 'reported_user__profile', 'post', 'reviewed_by__profile', 'tenant'
+            )
+        else:
+            qs = PostReport.objects.select_related(
+                'reporter__profile', 'reported_user__profile', 'post', 'reviewed_by__profile', 'tenant'
+            )
+
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            qs = qs.filter(status=status_param.lower())
+
+        reason_param = self.request.query_params.get('reason')
+        if reason_param:
+            qs = qs.filter(reason=reason_param.lower())
+
+        post_id = self.request.query_params.get('post_id')
+        if post_id:
+            qs = qs.filter(post_id=post_id)
+
+        reported_user_id = self.request.query_params.get('reported_user_id')
+        if reported_user_id:
+            qs = qs.filter(reported_user_id=reported_user_id)
+
+        reporter_id = self.request.query_params.get('reporter_id')
+        if reporter_id:
+            qs = qs.filter(reporter_id=reporter_id)
+
+        search = self.request.query_params.get('search')
+        if search:
+            qs = qs.filter(
+                Q(reporter__email__icontains=search) |
+                Q(reported_user__email__icontains=search) |
+                Q(description__icontains=search) |
+                Q(admin_notes__icontains=search)
+            )
+
+        return qs.order_by('-created_at')
+
+    def update(self, request, *args, **kwargs):
+        report = self.get_object()
+        serializer = self.get_serializer(report, data=request.data, partial=True)
+        if not serializer.is_valid():
+            return format_error_response("Invalid update data", serializer.errors)
+        serializer.save(
+            reviewed_by=request.user,
+            reviewed_at=timezone.now()
+        )
+        return Response(serializer.data)
+
+    def destroy(self, request, *args, **kwargs):
+        report = self.get_object()
+        report.delete()
+        return Response({"message": "Report deleted successfully by admin."}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='action')
+    def take_action(self, request, pk=None):
+        report = self.get_object()
+        serializer = AdminReportActionSerializer(data=request.data)
+        if not serializer.is_valid():
+            return format_error_response("Invalid action data", serializer.errors)
+
+        action_type = serializer.validated_data['action']
+        admin_notes = serializer.validated_data.get('admin_notes', '')
+
+        if admin_notes:
+            timestamp_str = timezone.now().strftime('%Y-%m-%d %H:%M')
+            if report.admin_notes:
+                report.admin_notes += f"\n[{timestamp_str}] {admin_notes}"
+            else:
+                report.admin_notes = f"[{timestamp_str}] {admin_notes}"
+
+        report.reviewed_by = request.user
+        report.reviewed_at = timezone.now()
+
+        if action_type == 'delete_post':
+            if report.post:
+                report.post.delete()
+                report.post = None
+            report.status = PostReport.ReportStatus.RESOLVED
+            report.action_taken = PostReport.ReportAction.POST_DELETED
+
+        elif action_type == 'hide_post':
+            if report.post:
+                report.post.visible_to_clients = False
+                report.post.visible_to_staff = False
+                report.post.save(update_fields=['visible_to_clients', 'visible_to_staff'])
+            report.status = PostReport.ReportStatus.RESOLVED
+            report.action_taken = PostReport.ReportAction.POST_HIDDEN
+
+        elif action_type == 'dismiss':
+            report.status = PostReport.ReportStatus.DISMISSED
+            report.action_taken = PostReport.ReportAction.DISMISSED
+
+        elif action_type == 'warn_user':
+            report.status = PostReport.ReportStatus.RESOLVED
+            report.action_taken = PostReport.ReportAction.USER_WARNED
+
+        elif action_type == 'block_user':
+            if report.reported_user:
+                tenant = report.tenant or getattr(request.user, 'tenant', None)
+                UserBlock.objects.get_or_create(
+                    blocker=request.user,
+                    blocked=report.reported_user,
+                    defaults={'reason': f'Blocked via report #{report.id}', 'tenant': tenant}
+                )
+            report.status = PostReport.ReportStatus.RESOLVED
+            report.action_taken = PostReport.ReportAction.USER_BLOCKED
+
+        report.save()
+        return Response(AdminPostReportSerializer(report, context={'request': request}).data, status=status.HTTP_200_OK)

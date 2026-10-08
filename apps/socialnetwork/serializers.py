@@ -5,7 +5,8 @@ from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from apps.socialnetwork.models import (
-    Photo, Video, Poll, PollOption, Vote, Comment, Like, SocialPost, PostMedia
+    Photo, Video, Poll, PollOption, Vote, Comment, Like, SocialPost, PostMedia,
+    UserBlock, PostReport
 )
 
 User = get_user_model()
@@ -633,11 +634,22 @@ class SocialPostDetailSerializer(SocialPostSerializer):
             object_id=obj.id,
             parent=None
         ).order_by('-created_at')
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            blocked_ids = UserBlock.get_blocked_user_ids_for(request.user)
+            if blocked_ids:
+                comments = comments.exclude(user_id__in=blocked_ids)
         return CommentSerializer(comments, many=True, context=self.context).data
 
     def get_liked_by(self, obj):
         content_type = ContentType.objects.get_for_model(SocialPost)
-        likes = Like.objects.filter(content_type=content_type, object_id=obj.id).select_related('user__profile')[:10]
+        likes = Like.objects.filter(content_type=content_type, object_id=obj.id).select_related('user__profile')
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            blocked_ids = UserBlock.get_blocked_user_ids_for(request.user)
+            if blocked_ids:
+                likes = likes.exclude(user_id__in=blocked_ids)
+        likes = likes.order_by('-created_at')[:10]
         return [
             {
                 'id': str(like.user.id),
@@ -648,3 +660,155 @@ class SocialPostDetailSerializer(SocialPostSerializer):
             }
             for like in likes
         ]
+
+
+class UserBlockSerializer(serializers.ModelSerializer):
+    blocker = UserMinimalSerializer(read_only=True)
+    blocked = UserMinimalSerializer(read_only=True)
+    blocked_user_id = serializers.UUIDField(write_only=True, required=False)
+
+    class Meta:
+        model = UserBlock
+        fields = [
+            'id', 'blocker', 'blocked', 'blocked_user_id',
+            'reason', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'blocker', 'blocked', 'created_at', 'updated_at']
+
+    def validate_blocked_user_id(self, value):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated and str(request.user.id) == str(value):
+            raise serializers.ValidationError("You cannot block yourself.")
+        if not User.objects.filter(id=value).exists():
+            raise serializers.ValidationError("User to block does not exist.")
+        return value
+
+
+class AdminUserBlockSerializer(serializers.ModelSerializer):
+    blocker = UserMinimalSerializer(read_only=True)
+    blocked = UserMinimalSerializer(read_only=True)
+    blocker_id = serializers.UUIDField(write_only=True, required=False)
+    blocked_user_id = serializers.UUIDField(write_only=True, required=False)
+    tenant_name = serializers.CharField(source='tenant.name', read_only=True)
+
+    class Meta:
+        model = UserBlock
+        fields = [
+            'id', 'blocker', 'blocked', 'blocker_id', 'blocked_user_id',
+            'tenant', 'tenant_name', 'reason', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'blocker', 'blocked', 'tenant', 'tenant_name', 'created_at', 'updated_at']
+
+    def validate(self, attrs):
+        blocker_id = attrs.get('blocker_id')
+        blocked_user_id = attrs.get('blocked_user_id')
+        if blocker_id and blocked_user_id and str(blocker_id) == str(blocked_user_id):
+            raise serializers.ValidationError("Blocker and blocked user cannot be the same user.")
+        return attrs
+
+
+class PostReportSerializer(serializers.ModelSerializer):
+    reporter = UserMinimalSerializer(read_only=True)
+    reported_user = UserMinimalSerializer(read_only=True)
+    post = SocialPostSerializer(read_only=True)
+    post_id = serializers.UUIDField(write_only=True, required=False)
+    reason_display = serializers.CharField(source='get_reason_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    action_taken_display = serializers.CharField(source='get_action_taken_display', read_only=True)
+
+    class Meta:
+        model = PostReport
+        fields = [
+            'id', 'reporter', 'reported_user', 'post', 'post_id',
+            'post_snapshot', 'reason', 'reason_display', 'description',
+            'status', 'status_display', 'action_taken', 'action_taken_display',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'reporter', 'reported_user', 'post', 'post_snapshot',
+            'status', 'status_display', 'action_taken', 'action_taken_display',
+            'created_at', 'updated_at'
+        ]
+
+
+class PostReportCreateSerializer(serializers.ModelSerializer):
+    post_id = serializers.UUIDField(required=True)
+    reason = serializers.ChoiceField(
+        choices=PostReport.ReportReason.choices,
+        default=PostReport.ReportReason.OTHER
+    )
+    description = serializers.CharField(required=False, allow_blank=True, default='')
+
+    class Meta:
+        model = PostReport
+        fields = ['post_id', 'reason', 'description']
+
+    def validate_post_id(self, value):
+        post = SocialPost.objects.filter(id=value).first()
+        if not post:
+            raise serializers.ValidationError("Post does not exist.")
+        request = self.context.get('request')
+        if request and request.user.is_authenticated and post.user_id == request.user.id:
+            raise serializers.ValidationError("You cannot report your own post.")
+        return value
+
+    def validate(self, attrs):
+        post_id = attrs.get('post_id')
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            existing = PostReport.objects.filter(
+                reporter=request.user,
+                post_id=post_id,
+                status__in=[PostReport.ReportStatus.PENDING, PostReport.ReportStatus.UNDER_REVIEW]
+            ).first()
+            if existing:
+                raise serializers.ValidationError(
+                    "You have already reported this post. Your report is currently under review."
+                )
+        return attrs
+
+
+class PostReportUpdateSerializer(serializers.ModelSerializer):
+    reason = serializers.ChoiceField(choices=PostReport.ReportReason.choices, required=False)
+    description = serializers.CharField(required=False, allow_blank=True)
+
+    class Meta:
+        model = PostReport
+        fields = ['reason', 'description']
+
+
+class AdminPostReportSerializer(serializers.ModelSerializer):
+    reporter = UserMinimalSerializer(read_only=True)
+    reported_user = UserMinimalSerializer(read_only=True)
+    post = SocialPostSerializer(read_only=True)
+    reviewed_by = UserMinimalSerializer(read_only=True)
+    reason_display = serializers.CharField(source='get_reason_display', read_only=True)
+    status_display = serializers.CharField(source='get_status_display', read_only=True)
+    action_taken_display = serializers.CharField(source='get_action_taken_display', read_only=True)
+    tenant_name = serializers.CharField(source='tenant.name', read_only=True)
+
+    class Meta:
+        model = PostReport
+        fields = [
+            'id', 'tenant', 'tenant_name', 'reporter', 'reported_user',
+            'post', 'post_snapshot', 'reason', 'reason_display',
+            'description', 'status', 'status_display',
+            'admin_notes', 'action_taken', 'action_taken_display',
+            'reviewed_by', 'reviewed_at', 'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'tenant', 'tenant_name', 'reporter', 'reported_user',
+            'post', 'post_snapshot', 'reviewed_by', 'reviewed_at',
+            'created_at', 'updated_at'
+        ]
+
+
+class AdminReportActionSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=[
+        ('delete_post', 'Delete Post'),
+        ('hide_post', 'Hide Post'),
+        ('dismiss', 'Dismiss Report'),
+        ('warn_user', 'Warn User'),
+        ('block_user', 'Block User'),
+    ])
+    admin_notes = serializers.CharField(required=False, allow_blank=True, default='')

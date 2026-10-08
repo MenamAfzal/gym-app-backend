@@ -164,3 +164,153 @@ class MediaGroup(TenantAwareModel):
     def __str__(self):
         return f"MediaGroup {self.id} by {self.user.email}"
 
+
+class UserBlock(TenantAwareModel):
+    """
+    Model representing a user blocking another user (same as Instagram).
+    Mutual blocking: neither party can view each other's content, comments,
+    or posts in their feeds.
+    """
+    blocker = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='blocked_users_set'
+    )
+    blocked = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='blocked_by_set'
+    )
+    reason = models.CharField(max_length=255, blank=True, null=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        unique_together = ('blocker', 'blocked')
+
+    def __str__(self):
+        return f"{self.blocker.email} blocked {self.blocked.email}"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.blocker_id and self.blocked_id and self.blocker_id == self.blocked_id:
+            raise ValidationError("A user cannot block themselves.")
+
+    @classmethod
+    def get_blocked_user_ids_for(cls, user):
+        """
+        Returns a set of user IDs representing:
+        1. Users blocked by `user`
+        2. Users who blocked `user`
+        Mutual blocking just like Instagram: neither party can view each other's content.
+        """
+        if not user or not user.is_authenticated:
+            return set()
+        blocked_by_user = cls.all_objects.filter(blocker=user).values_list('blocked_id', flat=True)
+        users_blocking_user = cls.all_objects.filter(blocked=user).values_list('blocker_id', flat=True)
+        return set(blocked_by_user).union(set(users_blocking_user))
+
+
+class PostReport(TenantAwareModel):
+    """
+    Model representing a report filed against a social post by a user,
+    for review and action by gym admins and staff.
+    """
+    class ReportReason(models.TextChoices):
+        SPAM = 'spam', 'Spam'
+        INAPPROPRIATE = 'inappropriate', 'Inappropriate or Offensive'
+        HARASSMENT = 'harassment', 'Harassment or Bullying'
+        HATE_SPEECH = 'hate_speech', 'Hate Speech'
+        VIOLENCE = 'violence', 'Violence or Dangerous Content'
+        FALSE_INFORMATION = 'false_information', 'False Information'
+        SCAM = 'scam', 'Scam or Fraud'
+        OTHER = 'other', 'Other'
+
+    class ReportStatus(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        UNDER_REVIEW = 'under_review', 'Under Review'
+        RESOLVED = 'resolved', 'Resolved'
+        DISMISSED = 'dismissed', 'Dismissed'
+
+    class ReportAction(models.TextChoices):
+        NONE = 'none', 'No Action Taken'
+        POST_HIDDEN = 'post_hidden', 'Post Hidden'
+        POST_DELETED = 'post_deleted', 'Post Deleted'
+        USER_WARNED = 'user_warned', 'User Warned'
+        USER_BLOCKED = 'user_blocked', 'User Blocked'
+        DISMISSED = 'dismissed', 'Report Dismissed'
+
+    reporter = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='submitted_post_reports'
+    )
+    reported_user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='received_post_reports'
+    )
+    post = models.ForeignKey(
+        SocialPost,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reports'
+    )
+    post_snapshot = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Snapshot of post details when report was filed or acted upon"
+    )
+    reason = models.CharField(
+        max_length=50,
+        choices=ReportReason.choices,
+        default=ReportReason.OTHER
+    )
+    description = models.TextField(blank=True, default='')
+    status = models.CharField(
+        max_length=30,
+        choices=ReportStatus.choices,
+        default=ReportStatus.PENDING,
+        db_index=True
+    )
+    admin_notes = models.TextField(blank=True, default='')
+    action_taken = models.CharField(
+        max_length=50,
+        choices=ReportAction.choices,
+        default=ReportAction.NONE
+    )
+    reviewed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_post_reports'
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def save(self, *args, **kwargs):
+        if not self.reported_user_id and self.post and self.post.user:
+            self.reported_user = self.post.user
+        if self.post and not self.post_snapshot:
+            first_media = self.post.media_items.first()
+            self.post_snapshot = {
+                'post_id': str(self.post.id),
+                'caption': self.post.caption,
+                'user_id': str(self.post.user_id),
+                'user_email': getattr(self.post.user, 'email', ''),
+                'created_at': self.post.created_at.isoformat() if self.post.created_at else None,
+                'media_count': self.post.media_items.count(),
+                'sample_media_type': first_media.media_type if first_media else None,
+            }
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        post_id = self.post_id or (self.post_snapshot.get('post_id') if isinstance(self.post_snapshot, dict) else 'N/A')
+        return f"Report #{self.id} on Post {post_id} by {self.reporter.email} ({self.status})"
+
+
