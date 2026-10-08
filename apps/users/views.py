@@ -18,6 +18,7 @@ from django.utils import timezone
 from apps.users.serializers import (
     ChangePasswordSerializer,
     CustomTokenObtainPairSerializer,
+    CustomTokenRefreshSerializer,
     RegistrationInitSerializer,
     UserSerializer, 
     CreateUserSerializer, 
@@ -36,10 +37,25 @@ from apps.users.serializers import (
 from apps.users.services import AuthService, UserService
 from apps.users.models import OTPPurpose, UserRole, UserProfile, StaffRegistrationRequest, StaffRequestStatus
 from apps.core.permissions import TenantFeaturePermission
-from rest_framework_simplejwt.views import TokenObtainPairView 
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from rest_framework.views import APIView 
 from rest_framework import parsers
 from .models import User
+
+
+def is_admin_or_manager(user):
+    """Check if the user is Gym Owner, Gym Manager, Platform Admin, or staff/superuser."""
+    if not user or not user.is_authenticated:
+        return False
+    if user.is_staff or user.is_superuser:
+        return True
+    return getattr(user, 'role', None) in [
+        UserRole.GYM_OWNER,
+        UserRole.GYM_MANAGER,
+        UserRole.PLATFORM_ADMIN,
+    ]
+
+
 class UserViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing users within a tenant.
@@ -54,7 +70,9 @@ class UserViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         # Enforce Tenant Isolation via Manager
         # Or explicitly filter if using standard objects manager
-        return self.request.user.tenant.users.select_related('profile').all()
+        if getattr(self.request.user, 'tenant', None):
+            return self.request.user.tenant.users.select_related('profile').all()
+        return User.objects.select_related('profile').all()
 
     @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrManager])
     def create_staff(self, request):
@@ -397,63 +415,159 @@ class UserViewSet(viewsets.ModelViewSet):
             
         return Response(serializer.data)
 
-    @action(detail=True, methods=['post'], url_path='deactivate', permission_classes=[IsOwnerOrManager])
+    @action(detail=False, methods=['post'], url_path='deactivate', url_name='self-deactivate', permission_classes=[permissions.IsAuthenticated])
+    def self_deactivate(self, request):
+        """
+        POST: Self-deactivation for Client and Staff tokens (no target ID needed).
+        Gym Admin / Gym Manager can deactivate self, or pass 'user_id' / 'id' in request body to deactivate another user.
+        Clients and Staff cannot target other users or activate/reactivate themselves.
+        """
+        target_id = request.data.get('user_id') or request.data.get('id')
+        is_admin_mgr = is_admin_or_manager(request.user)
+
+        if target_id and str(target_id) != str(request.user.id):
+            if not is_admin_mgr:
+                return Response(
+                    {"detail": "You do not have permission to deactivate or manage another user's account."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            from django.shortcuts import get_object_or_404
+            target_user = get_object_or_404(self.get_queryset(), id=target_id)
+        else:
+            target_user = request.user
+
+        # Non-admin users cannot activate/reactivate
+        if not target_user.is_active:
+            if not is_admin_mgr:
+                return Response(
+                    {"detail": "Clients and staff cannot activate or reactivate accounts. Please contact a gym administrator."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            # Admin toggle reactivation
+            UserService.activate_user(target_user)
+            return Response({
+                "detail": "User activated successfully.",
+                "is_active": True,
+                "cancelled_bookings_count": 0
+            }, status=status.HTTP_200_OK)
+
+        cancelled_count = UserService.deactivate_user(target_user)
+        return Response({
+            "detail": "User deactivated successfully.",
+            "is_active": False,
+            "cancelled_bookings_count": cancelled_count
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='activate', url_name='activate-list', permission_classes=[permissions.IsAuthenticated])
+    def activate_user_list(self, request):
+        """
+        POST /api/v1/users/profiles/activate/
+        Activate a user by ID in request body (Gym Admin / Gym Manager only).
+        """
+        if not is_admin_or_manager(request.user):
+            return Response(
+                {"detail": "Clients and staff cannot activate or reactivate accounts. Please contact a gym administrator."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        target_id = request.data.get('user_id') or request.data.get('id')
+        if not target_id:
+            return Response(
+                {"detail": "Target user ID is required to activate an account."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        from django.shortcuts import get_object_or_404
+        target_user = get_object_or_404(self.get_queryset(), id=target_id)
+
+        if not target_user.is_active:
+            UserService.activate_user(target_user)
+            return Response({
+                "detail": "User activated successfully.",
+                "is_active": True,
+                "cancelled_bookings_count": 0
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                "detail": "User is already active.",
+                "is_active": True,
+                "cancelled_bookings_count": 0
+            }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='deactivate', url_name='deactivate', permission_classes=[permissions.IsAuthenticated])
     def deactivate(self, request, pk=None):
         """
-        POST: Toggle deactivation/activation of a client or staff member.
-        If deactivating and user is a client, cancel all active bookings and refund credits.
+        POST: Deactivate account with target ID in URL.
+        - Client and Staff can only target themselves ('me' or their own ID).
+        - Gym Admin / Gym Manager can target any user within their tenant (and toggle reactivate).
         """
-        from django.db import transaction
-        
-        with transaction.atomic():
-            user = self.get_object()
-            
-            if user.is_active:
-                # Deactivate
-                user.is_active = False
-                user.save()
-                
-                from apps.scheduling.models import Booking, Package
-                from apps.scheduling.tasks import process_waitlist_promotion_job
-                
-                active_bookings = Booking.objects.filter(client=user, status='booked').select_for_update()
-                cancelled_count = active_bookings.count()
-                
-                now = timezone.now()
-                for booking in active_bookings:
-                    booking.status = 'cancelled'
-                    booking.is_late_cancel = False
-                    booking.cancelled_at = now
-                    booking.cancellation_reason = 'User account deactivated'
-                    booking.save()
-                    
-                    # Refund credit if a package was used
-                    if booking.credit_source:
-                        pkg = Package.objects.select_for_update().get(id=booking.credit_source.id)
-                        pkg.credits_remaining += 1
-                        pkg.save()
-                    
-                    # Trigger waitlist promotion
-                    try:
-                        process_waitlist_promotion_job.delay(str(booking.session.id))
-                    except Exception:
-                        pass
-                    
-                return Response({
-                    "detail": "User deactivated successfully.",
-                    "is_active": False,
-                    "cancelled_bookings_count": cancelled_count
-                }, status=status.HTTP_200_OK)
-            else:
-                # Reactivate
-                user.is_active = True
-                user.save()
-                
-                return Response({
-                    "detail": "User activated successfully.",
-                    "is_active": True,
-                    "cancelled_bookings_count": 0
-                }, status=status.HTTP_200_OK)
+        is_admin_mgr = is_admin_or_manager(request.user)
+        is_self = (str(pk).lower() == 'me' or str(pk) == str(request.user.id))
+
+        if not is_self and not is_admin_mgr:
+            return Response(
+                {"detail": "You do not have permission to deactivate or manage another user's account."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if is_self:
+            target_user = request.user
+        else:
+            target_user = self.get_object()
+
+        # Non-admin users cannot activate/reactivate
+        if not target_user.is_active:
+            if not is_admin_mgr:
+                return Response(
+                    {"detail": "Clients and staff cannot activate or reactivate accounts. Please contact a gym administrator."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            # Admin toggle reactivation
+            UserService.activate_user(target_user)
+            return Response({
+                "detail": "User activated successfully.",
+                "is_active": True,
+                "cancelled_bookings_count": 0
+            }, status=status.HTTP_200_OK)
+
+        cancelled_count = UserService.deactivate_user(target_user)
+        return Response({
+            "detail": "User deactivated successfully.",
+            "is_active": False,
+            "cancelled_bookings_count": cancelled_count
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='activate', url_name='activate', permission_classes=[permissions.IsAuthenticated])
+    def activate(self, request, pk=None):
+        """
+        POST: Explicitly activate a user account.
+        - Restricted to Gym Admin / Gym Manager only.
+        - Clients and Staff are forbidden from activating/reactivating accounts.
+        """
+        if not is_admin_or_manager(request.user):
+            return Response(
+                {"detail": "Clients and staff cannot activate or reactivate accounts. Please contact a gym administrator."},
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        if str(pk).lower() == 'me' or str(pk) == str(request.user.id):
+            target_user = request.user
+        else:
+            target_user = self.get_object()
+
+        if not target_user.is_active:
+            UserService.activate_user(target_user)
+            return Response({
+                "detail": "User activated successfully.",
+                "is_active": True,
+                "cancelled_bookings_count": 0
+            }, status=status.HTTP_200_OK)
+        else:
+            return Response({
+                "detail": "User is already active.",
+                "is_active": True,
+                "cancelled_bookings_count": 0
+            }, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'], url_path='clients-detailed-nutrition', permission_classes=[IsGymStaffOrOwner])
     def clients_detailed_nutrition(self, request):
@@ -727,6 +841,13 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     Login View: Returns JWT Access/Refresh tokens + User Profile Data.
     """
     serializer_class = CustomTokenObtainPairSerializer
+
+
+class CustomTokenRefreshView(TokenRefreshView):
+    """
+    Refresh View: Returns new access token only if the user is currently active.
+    """
+    serializer_class = CustomTokenRefreshSerializer
 
 
 class UserRegistrationView(APIView):

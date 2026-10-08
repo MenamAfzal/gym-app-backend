@@ -1,11 +1,12 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from rest_framework_simplejwt.views import TokenRefreshView, TokenVerifyView
+from rest_framework_simplejwt.views import TokenVerifyView
 from apps.users.views import (
     ChangePasswordView,
     RegistrationInitView,
     UserViewSet, 
-    CustomTokenObtainPairView, 
+    CustomTokenObtainPairView,
+    CustomTokenRefreshView,
     UserRegistrationView,
     VerifyOTPAndRegisterView,
     ForgotPasswordInitView,
@@ -34,13 +35,18 @@ urlpatterns = [
     path('auth/forgot-password/init/', ForgotPasswordInitView.as_view(), name='forgot_password_init'),
     path('auth/forgot-password/verify/', ForgotPasswordVerifyView.as_view(), name='forgot_password_verify'),
     
-    path('auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
-    path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh_alt'),
+    path('auth/refresh/', CustomTokenRefreshView.as_view(), name='token_refresh'),
+    path('auth/token/refresh/', CustomTokenRefreshView.as_view(), name='token_refresh_alt'),
     path('auth/verify/', TokenVerifyView.as_view(), name='token_verify'),
     path('auth/token/verify/', TokenVerifyView.as_view(), name='token_verify_alt'),
 
     path('auth/change-password/', ChangePasswordView.as_view(), name='change_password'),
     
+    path('profiles/deactivate/', UserViewSet.as_view({'post': 'self_deactivate'}), name='users-self-deactivate'),
+    path('profiles/me/deactivate/', UserViewSet.as_view({'post': 'self_deactivate'}), name='users-me-deactivate'),
+    path('profiles/activate/', UserViewSet.as_view({'post': 'activate_user_list'}), name='users-activate-list'),
+    path('profiles/me/activate/', UserViewSet.as_view({'post': 'activate'}), name='users-me-activate'),
+
     path('booking-preferences/', ClientBookingPreferenceView.as_view(), name='user-booking-preferences'),
     path('permissions/catalog/', UserViewSet.as_view({'get': 'permissions_catalog'}), name='permissions-catalog'),
     path('managers/my-permissions/', UserViewSet.as_view({'get': 'my_permissions'}), name='my-permissions'),

@@ -895,3 +895,165 @@ class StaffRegistrationRequestAPITest(TestCase):
         self.assertFalse(User.objects.filter(email="reject_me@fitgym.com").exists())
 
 
+class ClientStaffDeactivationAndLockdownAPITest(TestCase):
+    def setUp(self):
+        self.tenant = Tenant.objects.create(name="Apex Fitness", subdomain="apex")
+        self.owner = User.objects.create_user(
+            email="owner@apex.com", password="Password123!", role=UserRole.GYM_OWNER, tenant=self.tenant
+        )
+        self.manager = User.objects.create_user(
+            email="manager@apex.com", password="Password123!", role=UserRole.GYM_MANAGER, tenant=self.tenant
+        )
+        self.trainer = User.objects.create_user(
+            email="trainer@apex.com", password="Password123!", role=UserRole.TRAINER, tenant=self.tenant
+        )
+        self.client_user = User.objects.create_user(
+            email="client@apex.com", password="Password123!", role=UserRole.CLIENT, tenant=self.tenant
+        )
+        self.other_client = User.objects.create_user(
+            email="other_client@apex.com", password="Password123!", role=UserRole.CLIENT, tenant=self.tenant
+        )
+        self.api_client = APIClient()
+
+    def test_client_self_deactivation_without_id(self):
+        self.api_client.force_authenticate(user=self.client_user)
+        url = reverse('users-self-deactivate')
+        response = self.api_client.post(url, HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['is_active'])
+        self.client_user.refresh_from_db()
+        self.assertFalse(self.client_user.is_active)
+
+    def test_staff_self_deactivation_without_id(self):
+        self.api_client.force_authenticate(user=self.trainer)
+        url = reverse('users-self-deactivate')
+        response = self.api_client.post(url, HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['is_active'])
+        self.trainer.refresh_from_db()
+        self.assertFalse(self.trainer.is_active)
+
+    def test_client_self_deactivation_me_url(self):
+        self.api_client.force_authenticate(user=self.client_user)
+        url = reverse('users-me-deactivate')
+        response = self.api_client.post(url, HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertFalse(response.data['is_active'])
+        self.client_user.refresh_from_db()
+        self.assertFalse(self.client_user.is_active)
+
+    def test_client_cannot_deactivate_other_user(self):
+        self.api_client.force_authenticate(user=self.client_user)
+        # Attempt via URL pk
+        url = reverse('users-deactivate', kwargs={'pk': self.other_client.id})
+        response = self.api_client.post(url, HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.other_client.refresh_from_db()
+        self.assertTrue(self.other_client.is_active)
+
+        # Attempt via request body
+        self_url = reverse('users-self-deactivate')
+        response_body = self.api_client.post(self_url, {'user_id': str(self.other_client.id)}, HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(response_body.status_code, status.HTTP_403_FORBIDDEN)
+        self.other_client.refresh_from_db()
+        self.assertTrue(self.other_client.is_active)
+
+    def test_staff_cannot_deactivate_other_user(self):
+        self.api_client.force_authenticate(user=self.trainer)
+        url = reverse('users-deactivate', kwargs={'pk': self.client_user.id})
+        response = self.api_client.post(url, HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.client_user.refresh_from_db()
+        self.assertTrue(self.client_user.is_active)
+
+    def test_client_and_staff_cannot_reactivate_themselves(self):
+        # Deactivate client first
+        self.client_user.is_active = False
+        self.client_user.save()
+
+        self.api_client.force_authenticate(user=self.client_user)
+        # Attempt to reactivate via self deactivate
+        url = reverse('users-self-deactivate')
+        res1 = self.api_client.post(url, HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res1.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Attempt to call activate endpoint
+        act_url = reverse('users-activate-list')
+        res2 = self.api_client.post(act_url, {'user_id': str(self.client_user.id)}, HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res2.status_code, status.HTTP_403_FORBIDDEN)
+
+        detail_act_url = reverse('users-activate', kwargs={'pk': self.client_user.id})
+        res3 = self.api_client.post(detail_act_url, HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res3.status_code, status.HTTP_403_FORBIDDEN)
+
+        self.client_user.refresh_from_db()
+        self.assertFalse(self.client_user.is_active)
+
+    def test_full_deactivation_lockdown_and_admin_reactivation(self):
+        # 1. Login through normal auth flow to get real JWT access and refresh tokens
+        login_url = reverse('auth_login')
+        login_res = self.client.post(login_url, {
+            'email': 'client@apex.com',
+            'password': 'Password123!',
+            'tenant_id': str(self.tenant.id)
+        }, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(login_res.status_code, status.HTTP_200_OK)
+        access_token = login_res.data['access']
+        refresh_token = login_res.data['refresh']
+
+        # Verify access token works
+        me_url = reverse('users-me')
+        me_res = self.client.get(me_url, HTTP_AUTHORIZATION=f'Bearer {access_token}', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(me_res.status_code, status.HTTP_200_OK)
+
+        # 2. Client self-deactivates using their Bearer token
+        deact_url = reverse('users-self-deactivate')
+        deact_res = self.client.post(deact_url, HTTP_AUTHORIZATION=f'Bearer {access_token}', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(deact_res.status_code, status.HTTP_200_OK)
+        self.assertFalse(deact_res.data['is_active'])
+
+        self.client_user.refresh_from_db()
+        self.assertFalse(self.client_user.is_active)
+
+        # 3. Access with existing access token MUST fail (401)
+        me_res_after = self.client.get(me_url, HTTP_AUTHORIZATION=f'Bearer {access_token}', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(me_res_after.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # 4. Token refresh MUST fail (401)
+        refresh_url = reverse('token_refresh')
+        refresh_res = self.client.post(refresh_url, {'refresh': refresh_token}, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(refresh_res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # 5. Logging in again MUST fail (401)
+        relogin_res = self.client.post(login_url, {
+            'email': 'client@apex.com',
+            'password': 'Password123!',
+            'tenant_id': str(self.tenant.id)
+        }, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(relogin_res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # 6. Gym Manager reactivates the client account
+        self.api_client.force_authenticate(user=self.manager)
+        act_url = reverse('users-activate', kwargs={'pk': self.client_user.id})
+        act_res = self.api_client.post(act_url, HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(act_res.status_code, status.HTTP_200_OK)
+        self.assertTrue(act_res.data['is_active'])
+
+        self.client_user.refresh_from_db()
+        self.assertTrue(self.client_user.is_active)
+
+        # 7. Now client can log in again and access the platform
+        relogin_success = self.client.post(login_url, {
+            'email': 'client@apex.com',
+            'password': 'Password123!',
+            'tenant_id': str(self.tenant.id)
+        }, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(relogin_success.status_code, status.HTTP_200_OK)
+        new_access = relogin_success.data['access']
+
+        me_res_restored = self.client.get(me_url, HTTP_AUTHORIZATION=f'Bearer {new_access}', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(me_res_restored.status_code, status.HTTP_200_OK)
+        self.assertEqual(me_res_restored.data['email'], 'client@apex.com')
+
+
+

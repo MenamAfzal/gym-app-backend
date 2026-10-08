@@ -1,12 +1,13 @@
 """
 User Serializers
 """
-from rest_framework import serializers
+from rest_framework import serializers, exceptions
 from apps.users.models import (
     User, UserProfile, UserRole, OTPPurpose, GenderChoices,
     ManagerPermissionPolicy, StaffRegistrationRequest, StaffRequestStatus
 )
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
+from rest_framework_simplejwt.settings import api_settings
 from apps.core.tenants.models import Tenant
 from apps.users.services import UserService
 
@@ -99,7 +100,17 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         
         return token
 
-    def validate(self, attrs):
+    def validate(self, attrs): 
+        email = attrs.get(self.username_field)
+        password = attrs.get('password')
+        if email and password:
+            candidate = User.objects.filter(email__iexact=email).first()
+            if candidate and candidate.check_password(password) and not candidate.is_active:
+                raise exceptions.AuthenticationFailed(
+                    "This account has been deactivated. Please contact your gym administrator to reactivate your account.",
+                    code="account_deactivated"
+                )
+
         # 1. Authenticate email + password credentials
         data = super().validate(attrs)
 
@@ -166,6 +177,24 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             data['user']['tenant_subdomain'] = self.user.tenant.subdomain
             
         return data
+
+
+class CustomTokenRefreshSerializer(TokenRefreshSerializer):
+    """
+    Custom TokenRefreshSerializer that verifies the user is still active in the database.
+    If the user has been deactivated, refresh attempts are rejected.
+    """
+    def validate(self, attrs):
+        refresh = self.token_class(attrs["refresh"])
+        user_id = refresh.payload.get(api_settings.USER_ID_CLAIM)
+        if user_id:
+            candidate = User.objects.filter(id=user_id).first()
+            if candidate and not candidate.is_active:
+                raise exceptions.AuthenticationFailed(
+                    "This account has been deactivated. Please contact your gym administrator.",
+                    code="user_inactive"
+                )
+        return super().validate(attrs)
 
 
 class RegistrationInitSerializer(serializers.Serializer):

@@ -155,7 +155,77 @@ class UserService:
         # Hard delete cascades to UserProfile and PendingRegistrations
         user.delete()
         return True
-    
+
+    @staticmethod
+    @transaction.atomic
+    def deactivate_user(user):
+        """
+        Deactivates a user account.
+        - Sets is_active = False and lifecycle_status = INACTIVE.
+        - Cancels active bookings and refunds credits if the user is a client.
+        - Triggers waitlist promotion.
+        - Blacklists all outstanding JWT tokens for this user.
+        """
+        import logging
+        from apps.users.models import ClientLifecycleStatus
+        from apps.scheduling.models import Booking, Package
+        from apps.scheduling.tasks import process_waitlist_promotion_job
+
+        logger = logging.getLogger(__name__)
+
+        user.is_active = False
+        user.lifecycle_status = ClientLifecycleStatus.INACTIVE
+        user.save(update_fields=['is_active', 'lifecycle_status'])
+
+        active_bookings = Booking.objects.filter(client=user, status='booked').select_for_update()
+        cancelled_count = active_bookings.count()
+
+        now = timezone.now()
+        for booking in active_bookings:
+            booking.status = 'cancelled'
+            booking.is_late_cancel = False
+            booking.cancelled_at = now
+            booking.cancellation_reason = 'User account deactivated'
+            booking.save(update_fields=['status', 'is_late_cancel', 'cancelled_at', 'cancellation_reason'])
+
+            # Refund credit if a package was used
+            if booking.credit_source:
+                pkg = Package.objects.select_for_update().get(id=booking.credit_source.id)
+                pkg.credits_remaining += 1
+                pkg.save(update_fields=['credits_remaining'])
+
+            # Trigger waitlist promotion
+            try:
+                process_waitlist_promotion_job.delay(str(booking.session.id))
+            except Exception:
+                pass
+
+        # Invalidate all outstanding JWT tokens for this user
+        try:
+            from rest_framework_simplejwt.token_blacklist.models import OutstandingToken, BlacklistedToken
+            for token in OutstandingToken.objects.filter(user=user):
+                BlacklistedToken.objects.get_or_create(token=token)
+        except Exception as e:
+            logger.warning(f"Failed to blacklist tokens for user {user.id}: {e}")
+
+        return cancelled_count
+
+    @staticmethod
+    @transaction.atomic
+    def activate_user(user):
+        """
+        Activates a user account.
+        - Sets is_active = True and lifecycle_status = ACTIVE.
+        - Sets reactivated_at to current timestamp.
+        """
+        from apps.users.models import ClientLifecycleStatus
+
+        user.is_active = True
+        user.lifecycle_status = ClientLifecycleStatus.ACTIVE
+        user.reactivated_at = timezone.now()
+        user.save(update_fields=['is_active', 'lifecycle_status', 'reactivated_at'])
+        return user
+
 
 class AuthService:
     """
