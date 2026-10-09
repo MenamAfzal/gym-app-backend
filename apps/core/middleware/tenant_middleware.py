@@ -44,7 +44,7 @@ class TenantMiddleware(MiddlewareMixin):
                 try:
                     # We decode purely to read the claim. 
                     # DRF will verify signature/expiry later in the view.
-                    payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+                    payload = jwt.decode(token, options={"verify_signature": False})
                     tenant_id = payload.get('tenant_id')
                     
                     if tenant_id:

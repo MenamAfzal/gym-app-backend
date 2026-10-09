@@ -29,9 +29,11 @@ class Command(BaseCommand):
 
         if tenant_ident:
             try:
-                if "-" in tenant_ident:
-                    tenants = [Tenant.objects.get(id=tenant_ident)]
-                else:
+                import uuid
+                try:
+                    tenant_uuid = uuid.UUID(str(tenant_ident))
+                    tenants = [Tenant.objects.get(id=tenant_uuid)]
+                except (ValueError, AttributeError):
                     tenants = [Tenant.objects.get(subdomain=tenant_ident)]
             except Tenant.DoesNotExist:
                 raise CommandError(f"Tenant '{tenant_ident}' does not exist.")

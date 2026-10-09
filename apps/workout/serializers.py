@@ -1323,8 +1323,14 @@ class ExerciseUpdateSerializer(serializers.ModelSerializer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["tags"].queryset = WorkoutTag.objects.all()
-        self.fields["equipment"].queryset = Equipment.objects.all()
+        tags_qs = WorkoutTag.objects.all()
+        equipment_qs = Equipment.objects.all()
+        self.fields["tags"].queryset = tags_qs
+        if hasattr(self.fields["tags"], "child_relation"):
+            self.fields["tags"].child_relation.queryset = tags_qs
+        self.fields["equipment"].queryset = equipment_qs
+        if hasattr(self.fields["equipment"], "child_relation"):
+            self.fields["equipment"].child_relation.queryset = equipment_qs
 
     class Meta:
         model = Exercise
@@ -1366,8 +1372,14 @@ class ExerciseSaveSerializer(serializers.ModelSerializer):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["tags"].queryset = WorkoutTag.objects.all()
-        self.fields["equipment"].queryset = Equipment.objects.all()
+        tags_qs = WorkoutTag.objects.all()
+        equipment_qs = Equipment.objects.all()
+        self.fields["tags"].queryset = tags_qs
+        if hasattr(self.fields["tags"], "child_relation"):
+            self.fields["tags"].child_relation.queryset = tags_qs
+        self.fields["equipment"].queryset = equipment_qs
+        if hasattr(self.fields["equipment"], "child_relation"):
+            self.fields["equipment"].child_relation.queryset = equipment_qs
 
     class Meta:
         model = Exercise
@@ -1385,6 +1397,11 @@ class ExerciseSaveSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         tags = validated_data.pop("tags", [])
         equipment = validated_data.pop("equipment", [])
+        request = self.context.get("request")
+        if request:
+            tenant = getattr(request, "tenant", None) or getattr(getattr(request, "user", None), "tenant", None)
+            if tenant and "tenant" not in validated_data:
+                validated_data["tenant"] = tenant
         exercise = Exercise.objects.create(**validated_data)
         exercise.tags.set(tags)
         exercise.equipment.set(equipment)

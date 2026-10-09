@@ -1521,6 +1521,10 @@ class createExerice(APIView):
 class WorkoutExerciseUpdateCreate(APIView):
     permission_classes = [IsAuthenticated, IsStaffUser]
     def _update_exercise(self, request, pk, partial=False):
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        if tenant:
+            from apps.core.tenants.context import set_current_tenant
+            set_current_tenant(tenant)
         exercise = get_object_or_404(Exercise, pk=pk)
         serializer = ExerciseUpdateSerializer(
             exercise,
@@ -1547,7 +1551,11 @@ class WorkoutExerciseUpdateCreate(APIView):
             return Response(response_data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
     def _create_exercise(self, request):
-        serializer = ExerciseSaveSerializer(data=request.data)
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        if tenant:
+            from apps.core.tenants.context import set_current_tenant
+            set_current_tenant(tenant)
+        serializer = ExerciseSaveSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             video_file = request.FILES.get("video_file")
             exercise = serializer.save(video_file=None)
