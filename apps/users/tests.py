@@ -781,6 +781,7 @@ class TenantLoginIsolationAPITests(TestCase):
         }
         response = self.client.post(self.login_url, payload, format='json')
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(response.data.get('detail'), "Invalid email or password.")
 
 
 class StaffRegistrationRequestAPITest(TestCase):
@@ -1031,6 +1032,10 @@ class ClientStaffDeactivationAndLockdownAPITest(TestCase):
             'tenant_id': str(self.tenant.id)
         }, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
         self.assertEqual(relogin_res.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertEqual(
+            relogin_res.data.get('detail'),
+            "This account has been deactivated. Please contact your gym administrator to reactivate your account."
+        )
 
         # 6. Gym Manager reactivates the client account
         self.api_client.force_authenticate(user=self.manager)

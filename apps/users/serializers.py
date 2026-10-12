@@ -87,6 +87,10 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     """
     tenant_id = serializers.UUIDField(required=False, allow_null=True)
 
+    default_error_messages = {
+        'no_active_account': 'Invalid email or password.'
+    }
+
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
@@ -107,12 +111,20 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             candidate = User.objects.filter(email__iexact=email).first()
             if candidate and candidate.check_password(password) and not candidate.is_active:
                 raise exceptions.AuthenticationFailed(
-                    "Your password is incorrect or your account has been deactivated. Please contact your gym administrator to reactivate your account.",
+                    "This account has been deactivated. Please contact your gym administrator to reactivate your account.",
                     code="account_deactivated"
                 )
 
         # 1. Authenticate email + password credentials
-        data = super().validate(attrs)
+        try:
+            data = super().validate(attrs)
+        except exceptions.AuthenticationFailed as exc:
+            if getattr(exc, 'detail', None) and getattr(exc.detail, 'code', None) == 'no_active_account':
+                raise exceptions.AuthenticationFailed(
+                    "Invalid email or password.",
+                    code="invalid_credentials"
+                )
+            raise
 
         # 2. Extract tenant_id from serializer attrs, request data, header, or context
         request = self.context.get('request')
