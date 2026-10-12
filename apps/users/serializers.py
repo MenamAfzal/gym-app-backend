@@ -107,7 +107,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             candidate = User.objects.filter(email__iexact=email).first()
             if candidate and candidate.check_password(password) and not candidate.is_active:
                 raise exceptions.AuthenticationFailed(
-                    "This account has been deactivated. Please contact your gym administrator to reactivate your account.",
+                    "Your password is incorrect or your account has been deactivated. Please contact your gym administrator to reactivate your account.",
                     code="account_deactivated"
                 )
 
