@@ -71,8 +71,26 @@ class UserViewSet(viewsets.ModelViewSet):
         # Enforce Tenant Isolation via Manager
         # Or explicitly filter if using standard objects manager
         if getattr(self.request.user, 'tenant', None):
-            return self.request.user.tenant.users.select_related('profile').all()
-        return User.objects.select_related('profile').all()
+            qs = self.request.user.tenant.users.select_related('profile').all()
+        else:
+            qs = User.objects.select_related('profile').all()
+
+        role = self.request.query_params.get('role')
+        if role:
+            if role.lower() == 'staff':
+                qs = qs.exclude(role=UserRole.CLIENT)
+            else:
+                qs = qs.filter(role=role)
+
+        location_param = self.request.query_params.get('location') or self.request.query_params.get('location_id')
+        if location_param:
+            from django.db.models import Q
+            qs = qs.filter(
+                Q(staff_locations__location_id=location_param) |
+                Q(profile__primary_location_id=location_param)
+            ).distinct()
+
+        return qs
 
     @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrManager])
     def create_staff(self, request):
@@ -284,19 +302,50 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = ClientDetailedSchedulingSerializer(queryset, many=True)
         return Response(serializer.data)
 
-    @action(detail=False, methods=['get'], url_path='staff-detailed-scheduling', permission_classes=[IsOwnerOrManager])
+    @action(detail=False, methods=['get'], url_path='staff', permission_classes=[permissions.IsAuthenticated])
+    def staff_list(self, request):
+        """
+        Alias for staff-detailed-scheduling: List all staff for the tenant.
+        Can be consumed by clients, staff, and gym admins, with optional location filter.
+        """
+        return self.staff_detailed_scheduling(request)
+
+    @action(detail=False, methods=['get'], url_path='staff-detailed-scheduling', permission_classes=[permissions.IsAuthenticated])
     def staff_detailed_scheduling(self, request):
         """
         GET: Paginated list of staff members with complete scheduling, locations, availabilities.
+        Can be consumed by clients, staff, and gym admins, with optional location and role filters.
         """
-        # Filter for staff under the owner's active tenant (role != client)
-        queryset = self.request.user.tenant.users.exclude(role=UserRole.CLIENT).select_related('profile')
-        
+        # Filter for staff under the user's active tenant (role != client)
+        if getattr(self.request.user, 'tenant', None):
+            queryset = self.request.user.tenant.users.exclude(role=UserRole.CLIENT).select_related('profile')
+        else:
+            queryset = User.objects.exclude(role=UserRole.CLIENT).select_related('profile')
+
+        # If requested by a Client, only show active staff by default
+        if getattr(request.user, 'role', None) == UserRole.CLIENT:
+            queryset = queryset.filter(is_active=True)
+        elif request.query_params.get('is_active') is not None:
+            is_active_val = str(request.query_params.get('is_active')).lower() in ['true', '1']
+            queryset = queryset.filter(is_active=is_active_val)
+
         # Filter by specific ID if provided in query params
         user_id = request.query_params.get('id')
         if user_id:
             queryset = queryset.filter(id=user_id)
-        
+ 
+        location_param = request.query_params.get('location') or request.query_params.get('location_id')
+        if location_param:
+            from django.db.models import Q
+            queryset = queryset.filter(
+                Q(staff_locations__location_id=location_param) |
+                Q(profile__primary_location_id=location_param)
+            ).distinct()
+ 
+        role_param = request.query_params.get('role')
+        if role_param:
+            queryset = queryset.filter(role=role_param)
+
         # Support search
         search_query = request.query_params.get('search')
         if search_query:
@@ -378,10 +427,11 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = StaffDetailedSchedulingSerializer(queryset, many=True)
         return Response(serializer.data)
 
-    @action(detail=True, methods=['get'], url_path='detailed-scheduling', permission_classes=[IsGymStaffOrOwner])
+    @action(detail=True, methods=['get'], url_path='detailed-scheduling', permission_classes=[permissions.IsAuthenticated])
     def detailed_scheduling(self, request, pk=None):
         """
         GET: Complete detailed scheduling summary for a single client or staff member by ID.
+        Clients can view their own profile and any staff member's profile.
         """
         user = self.get_object()
         
@@ -391,6 +441,11 @@ class UserViewSet(viewsets.ModelViewSet):
         Appointment.auto_complete_past_appointments()
         
         if user.role == UserRole.CLIENT:
+            if request.user.role == UserRole.CLIENT and request.user.id != user.id:
+                return Response(
+                    {"detail": "You do not have permission to view other clients' details."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
             user.prefetched_bookings = list(Booking.objects.filter(client=user).select_related(
                 'session', 'session__template', 'session__template__location', 'session__room', 'session__staff', 'session__staff__profile'
             ))

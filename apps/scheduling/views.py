@@ -337,10 +337,21 @@ class RoomLayoutViewSet(viewsets.ModelViewSet):
 class StaffLocationViewSet(viewsets.ModelViewSet):
     queryset = StaffLocation.all_objects.all()
     serializer_class = StaffLocationSerializer
-    permission_classes = [IsOwnerOrManager]
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve']:
+            return [permissions.IsAuthenticated()]
+        return [IsOwnerOrManager()]
 
     def get_queryset(self):
-        return StaffLocation.objects.select_related('staff', 'staff__profile', 'location')
+        qs = StaffLocation.objects.select_related('staff', 'staff__profile', 'location')
+        location_id = self.request.query_params.get('location') or self.request.query_params.get('location_id')
+        if location_id:
+            qs = qs.filter(location_id=location_id)
+        staff_id = self.request.query_params.get('staff') or self.request.query_params.get('staff_id')
+        if staff_id:
+            qs = qs.filter(staff_id=staff_id)
+        return qs
 
 
 class StaffAvailabilityViewSet(viewsets.ModelViewSet):

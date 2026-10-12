@@ -324,6 +324,48 @@ class StaffDetailedSchedulingAPITest(TestCase):
         self.assertEqual(response_detail.data['id'], str(self.trainer.id))
         self.assertEqual(response_detail.data['stats']['total_upcoming_classes'], 1)
 
+        # Test location filter
+        other_location = Location.objects.create(
+            tenant=self.tenant,
+            name="Uptown Studio",
+            address="456 Avenue",
+            timezone="America/New_York"
+        )
+        response_loc = self.api_client.get(url + f"?location={location.id}", HTTP_HOST='padel.testserver')
+        self.assertEqual(response_loc.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response_loc.data['results']), 1)
+        self.assertEqual(response_loc.data['results'][0]['id'], str(self.trainer.id))
+
+        response_loc_id = self.api_client.get(url + f"?location_id={location.id}", HTTP_HOST='padel.testserver')
+        self.assertEqual(response_loc_id.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response_loc_id.data['results']), 1)
+
+        response_other_loc = self.api_client.get(url + f"?location={other_location.id}", HTTP_HOST='padel.testserver')
+        self.assertEqual(response_other_loc.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(response_other_loc.data['results']), 0)
+
+        # Test client consuming the list all staff API
+        self.api_client.force_authenticate(user=self.client_user)
+        client_response = self.api_client.get(url, HTTP_HOST='padel.testserver')
+        self.assertEqual(client_response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(client_response.data['results']), 2)
+
+        client_response_loc = self.api_client.get(url + f"?location={location.id}", HTTP_HOST='padel.testserver')
+        self.assertEqual(client_response_loc.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(client_response_loc.data['results']), 1)
+        self.assertEqual(client_response_loc.data['results'][0]['id'], str(self.trainer.id))
+
+        # Test alias endpoint /profiles/staff/
+        alias_url = reverse('users-staff-list')
+        alias_res = self.api_client.get(alias_url + f"?location={location.id}", HTTP_HOST='padel.testserver')
+        self.assertEqual(alias_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(alias_res.data['results']), 1)
+
+        # Test client consuming single staff detailed-scheduling
+        client_detail_res = self.api_client.get(detail_url, HTTP_HOST='padel.testserver')
+        self.assertEqual(client_detail_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(client_detail_res.data['id'], str(self.trainer.id))
+
     def test_user_deactivate_toggle(self):
         from apps.scheduling.models import Booking, Package, PackageType
         
