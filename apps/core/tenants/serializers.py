@@ -1,7 +1,8 @@
 from rest_framework import serializers
 from apps.core.tenants.models import (
     Tenant, Plan, Feature, PlanEntitlement, 
-    TenantSubscription, TenantEntitlementOverride, ReferralReward
+    TenantSubscription, TenantEntitlementOverride, ReferralReward,
+    AffiliatePartner, AffiliatePointsTransaction
 )
 from django.db import transaction
 from apps.core.tenants.services import TenantEntitlementService
@@ -102,6 +103,7 @@ class OnboardTenantSerializer(serializers.Serializer):
     logo = serializers.ImageField(required=False)
     branding = serializers.JSONField(required=False, default=dict)
     referred_by_id = serializers.UUIDField(required=False, allow_null=True)
+    affiliate_code = serializers.CharField(required=False, allow_null=True, allow_blank=True)
 
 class TenantSerializer(serializers.ModelSerializer):
     current_subscription = serializers.SerializerMethodField()
@@ -191,4 +193,78 @@ class ReferralRewardSerializer(serializers.ModelSerializer):
             'subscription', 'plan_name', 
             'reward_amount', 'status', 'created_at'
         ]
+
+
+class AffiliateRegistrationSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=8)
+    first_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
+    last_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
+    code = serializers.CharField(max_length=50, required=False, allow_blank=True, allow_null=True)
+    company_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
+    website_or_social = serializers.URLField(required=False, allow_blank=True, default="")
+
+
+class AffiliatePartnerSerializer(serializers.ModelSerializer):
+    email = serializers.ReadOnlyField(source='user.email')
+    first_name = serializers.ReadOnlyField(source='user.first_name')
+    last_name = serializers.ReadOnlyField(source='user.last_name')
+    total_gyms_referred = serializers.SerializerMethodField()
+    active_gyms_referred = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AffiliatePartner
+        fields = [
+            'id', 'email', 'first_name', 'last_name',
+            'code', 'company_name', 'website_or_social',
+            'points_balance', 'lifetime_points_earned',
+            'is_active', 'total_gyms_referred', 'active_gyms_referred',
+            'created_at'
+        ]
+        read_only_fields = ['id', 'points_balance', 'lifetime_points_earned', 'created_at']
+
+    def get_total_gyms_referred(self, obj):
+        return obj.referred_tenants.count()
+
+    def get_active_gyms_referred(self, obj):
+        return obj.referred_tenants.filter(is_active=True).count()
+
+
+class AffiliatePointsTransactionSerializer(serializers.ModelSerializer):
+    gym_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AffiliatePointsTransaction
+        fields = [
+            'id', 'points', 'transaction_type', 'description',
+            'gym_name', 'tenant', 'subscription', 'metadata',
+            'created_at'
+        ]
+
+    def get_gym_name(self, obj):
+        if obj.tenant:
+            return obj.tenant.name
+        return obj.metadata.get('gym_name', 'Unknown Gym')
+
+
+class AffiliateReferredGymSerializer(serializers.ModelSerializer):
+    plan_name = serializers.SerializerMethodField()
+    subscription_status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Tenant
+        fields = ['id', 'name', 'subdomain', 'logo', 'is_active', 'plan_name', 'subscription_status', 'created_at']
+
+    def get_plan_name(self, obj):
+        sub = obj.subscriptions.filter(status='active').select_related('plan').first()
+        return sub.plan.name if sub and sub.plan else None
+
+    def get_subscription_status(self, obj):
+        sub = obj.subscriptions.filter(status='active').first()
+        return sub.status if sub else 'none'
+
+
+class AffiliatePointsAdjustmentSerializer(serializers.Serializer):
+    points = serializers.IntegerField(help_text="Points to add (positive) or deduct (negative)")
+    reason = serializers.CharField(max_length=255, required=True)
         

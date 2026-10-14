@@ -20,7 +20,9 @@ class PlatformSettings(BaseModel):
 
     @classmethod
     def get_settings(cls):
-        settings, _ = cls.objects.get_or_create(id=1)
+        settings = cls.objects.first()
+        if not settings:
+            settings = cls.objects.create()
         return settings
 
 

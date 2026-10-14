@@ -72,7 +72,8 @@ class PlatformTenantViewSet(viewsets.ModelViewSet):
                 initial_plan_id=data.get('initial_plan_id'),
                 logo=data.get('logo'),
                 branding=data.get('branding'),
-                referred_by_id=data.get('referred_by_id')
+                referred_by_id=data.get('referred_by_id'),
+                affiliate_code=data.get('affiliate_code')
             )
             return Response(
                 TenantSerializer(tenant).data, 

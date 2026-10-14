@@ -7,6 +7,7 @@ from apps.core.views.platform_views import (
     PlatformFeatureViewSet,
     PlatformReferralRewardViewSet
 )
+from apps.core.tenants.affiliate_views import PlatformAffiliateViewSet
 from apps.core.views.webhook_views import StripeWebhookView
 from apps.core.views.tenant_analytics import TenantAnalyticsListView
 from apps.core.views.finance_views import PlatformFinanceSummaryAPIView, PlatformTransactionListView
@@ -17,6 +18,7 @@ router.register(r'plans', PlatformPlanViewSet, basename='platform-plans')
 router.register(r'features', PlatformFeatureViewSet, basename='platform-features')
 router.register(r'billing', BillingViewSet, basename='tenant-billing')
 router.register(r'referrals', PlatformReferralRewardViewSet, basename='platform-referral-rewards')
+router.register(r'affiliates', PlatformAffiliateViewSet, basename='platform-affiliates')
 
 urlpatterns = [
 

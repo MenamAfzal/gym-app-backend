@@ -47,6 +47,7 @@ urlpatterns = [
     ])),
 
     path('api/v1/platform/', include('apps.core.urls')), 
+    path('api/v1/affiliates/', include('apps.core.tenants.affiliate_urls')),
     path('api/v1/users/', include('apps.users.urls')),
 
     path('api/v1/scheduling/', include('apps.scheduling.urls')),  

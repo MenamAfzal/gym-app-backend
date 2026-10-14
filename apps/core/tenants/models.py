@@ -6,6 +6,8 @@ features, and entitlements. These models form the backbone of the multi-tenant
 SaaS architecture.
 """
 from django.db import models
+from django.conf import settings
+from django.utils.translation import gettext_lazy as _
 from django.core.validators import MinValueValidator
 from core_models.mixins.uuid_mixin import UUIDMixin
 from core_models.mixins.timestamps import TimestampMixin
@@ -60,6 +62,14 @@ class Tenant(UUIDMixin, TimestampMixin):
         blank=True, 
         related_name='referrals',
         help_text="Which tenant referred this tenant"
+    )
+    affiliate = models.ForeignKey(
+        'AffiliatePartner',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='referred_tenants',
+        help_text="External affiliate partner who referred this gym tenant"
     )
 
     class Meta:
@@ -319,4 +329,118 @@ class ReferralReward(UUIDMixin, TimestampMixin):
 
     def __str__(self):
         return f"Reward for {self.referrer.name} referring {self.referred_tenant.name}: ${self.reward_amount}"
+
+
+class AffiliatePartner(UUIDMixin, TimestampMixin):
+    """
+    Represents an external partner/affiliate who refers gym tenants to the platform.
+    External affiliates are non-gym users earning recurring points for referring gym owners.
+    """
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='affiliate_partner',
+        help_text="The external user account for this affiliate"
+    )
+    code = models.CharField(
+        max_length=50,
+        unique=True,
+        db_index=True,
+        help_text="Unique referral code/slug (e.g. 'alexfit', 'AFF-89AB12CD')"
+    )
+    company_name = models.CharField(
+        max_length=150,
+        blank=True,
+        default="",
+        help_text="Company or brand name"
+    )
+    website_or_social = models.URLField(
+        blank=True,
+        default="",
+        help_text="Website, blog, or primary social link"
+    )
+    points_balance = models.PositiveIntegerField(
+        default=0,
+        help_text="Current available reward points"
+    )
+    lifetime_points_earned = models.PositiveIntegerField(
+        default=0,
+        help_text="Total historical points earned"
+    )
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Whether this affiliate is active"
+    )
+    metadata = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Flexible metadata (e.g. promotional channels, notes)"
+    )
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Affiliate Partner'
+        verbose_name_plural = 'Affiliate Partners'
+
+    def __str__(self):
+        return f"{self.user.email} ({self.code}) - {self.points_balance} pts"
+
+
+class AffiliatePointsTransaction(UUIDMixin, TimestampMixin):
+    """
+    Immutable audit ledger of points awarded to or deducted from an affiliate.
+    """
+    class TransactionType(models.TextChoices):
+        INITIAL_SUBSCRIPTION = 'initial_subscription', _('Initial Subscription')
+        SUBSCRIPTION_RENEWAL = 'subscription_renewal', _('Subscription Renewal')
+        MANUAL_ADJUSTMENT = 'manual_adjustment', _('Manual Adjustment')
+
+    affiliate = models.ForeignKey(
+        AffiliatePartner,
+        on_delete=models.CASCADE,
+        related_name='point_transactions',
+        help_text="Affiliate who owns this transaction"
+    )
+    tenant = models.ForeignKey(
+        'Tenant',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='affiliate_point_transactions',
+        help_text="The gym tenant that triggered this points event"
+    )
+    subscription = models.ForeignKey(
+        'TenantSubscription',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='affiliate_point_transactions',
+        help_text="The tenant subscription linked to this points event"
+    )
+    points = models.IntegerField(
+        help_text="Points awarded (positive) or deducted (negative)"
+    )
+    transaction_type = models.CharField(
+        max_length=30,
+        choices=TransactionType.choices,
+        default=TransactionType.INITIAL_SUBSCRIPTION,
+        db_index=True
+    )
+    description = models.CharField(
+        max_length=255,
+        help_text="Human-readable ledger description"
+    )
+    metadata = models.JSONField(
+        default=dict,
+        blank=True
+    )
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Affiliate Points Transaction'
+        verbose_name_plural = 'Affiliate Points Transactions'
+
+    def __str__(self):
+        sign = "+" if self.points >= 0 else ""
+        return f"{self.affiliate.code}: {sign}{self.points} pts ({self.transaction_type})"
 

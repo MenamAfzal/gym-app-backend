@@ -261,6 +261,12 @@ def _handle_subscription_updated(subscription_obj):
     except TenantSubscription.DoesNotExist:
         logger.warning(f"Subscription {stripe_sub_id} not found in local DB.")
 
+    try:
+        from apps.payments.stripe_package_service import StripePackageService
+        StripePackageService.handle_subscription_updated(subscription_obj)
+    except Exception as exc:
+        logger.exception("Error handling package subscription update in stripe_webhook: %s", exc)
+
 def _handle_subscription_deleted(subscription_obj):
     def _get(obj, key, default=None):
         if isinstance(obj, dict):
@@ -282,6 +288,12 @@ def _handle_subscription_deleted(subscription_obj):
     except TenantSubscription.DoesNotExist:
         pass
 
+    try:
+        from apps.payments.stripe_package_service import StripePackageService
+        StripePackageService.handle_subscription_deleted(subscription_obj)
+    except Exception as exc:
+        logger.exception("Error handling package subscription delete in stripe_webhook: %s", exc)
+
 def _handle_invoice_payment_succeeded(invoice_obj):
     # Depending on the billing architecture, you might record this as a ledger charge.
     def _get(obj, key, default=None):
@@ -298,6 +310,11 @@ def _handle_invoice_payment_succeeded(invoice_obj):
     invoice_id = _get(invoice_obj, 'id')
     amount_paid = _get(invoice_obj, 'amount_paid', 0)
     logger.info(f"Invoice {invoice_id} paid for amount {amount_paid}")
+    try:
+        from apps.payments.stripe_package_service import StripePackageService
+        StripePackageService.handle_invoice_payment_succeeded(invoice_obj)
+    except Exception as exc:
+        logger.exception("Error handling package invoice payment in stripe_webhook: %s", exc)
 
 
 class BillingFeatureListView(APIView):
@@ -777,6 +794,13 @@ def stripe_checkout_webhook(request):
             logger.info("customer.subscription.deleted handled in checkout webhook.")
         except Exception as exc:
             logger.exception("Error handling subscription.deleted in checkout webhook: %s", exc)
+    elif event_type == 'invoice.payment_succeeded':
+        try:
+            from apps.payments.stripe_package_service import StripePackageService
+            StripePackageService.handle_invoice_payment_succeeded(data_object)
+            logger.info("invoice.payment_succeeded handled in checkout webhook.")
+        except Exception as exc:
+            logger.exception("Error handling invoice.payment_succeeded in checkout webhook: %s", exc)
     else:
         logger.info("Checkout webhook: unhandled event type '%s'", event_type)
 

@@ -197,29 +197,136 @@ class StripePackageService:
                 pass
 
     @staticmethod
+    def handle_invoice_payment_succeeded(invoice) -> None:
+        """
+        Handles successful invoice payment for packages (especially recurring monthly renewals).
+        Refills client credits, advances expiration date, and records the renewal payment.
+        """
+        if not isinstance(invoice, dict):
+            invoice = invoice.to_dict() if hasattr(invoice, 'to_dict') else dict(invoice)
+
+        subscription_id = invoice.get('subscription')
+        if not subscription_id:
+            return
+
+        invoice_id = invoice.get('id')
+        billing_reason = invoice.get('billing_reason') 
+
+        from apps.scheduling.models import Package, Payment
+        from django.utils import timezone
+        from datetime import timedelta, datetime, timezone as dt_timezone
+        from decimal import Decimal
+
+        with bypass_tenant_isolation():
+            try:
+                package = Package.objects.select_related('package_type', 'client', 'tenant').get(
+                    stripe_subscription_id=subscription_id
+                )
+            except Package.DoesNotExist:
+                return
+
+            pkg_type = package.package_type
+            if not pkg_type:
+                logger.warning(f"Package {package.id} has no package_type associated.")
+                return
+ 
+            if invoice_id and Payment.objects.filter(idempotency_key=invoice_id).exists():
+                logger.info(f"Invoice {invoice_id} for package {package.id} already processed.")
+                return
+ 
+            if billing_reason == 'subscription_create':
+                if package.status != 'active':
+                    package.status = 'active'
+                    package.save(update_fields=['status'])
+                return
+ 
+            now = timezone.now()
+ 
+            lines = invoice.get('lines', {}).get('data', [])
+            period_end_timestamp = None
+            if lines and isinstance(lines, list) and len(lines) > 0 and isinstance(lines[0], dict):
+                period_end_timestamp = lines[0].get('period', {}).get('end')
+
+            if period_end_timestamp:
+                calculated_end = datetime.fromtimestamp(period_end_timestamp, tz=dt_timezone.utc)
+                if calculated_end > now:
+                    new_expires_at = calculated_end
+                else:
+                    new_expires_at = now + timedelta(days=pkg_type.validity_days)
+            else:
+                base_date = package.expires_at if package.expires_at and package.expires_at > now else now
+                new_expires_at = base_date + timedelta(days=pkg_type.validity_days)
+ 
+            package.credits_remaining = pkg_type.credit_count
+            package.total_credits_allocated = pkg_type.credit_count
+            package.expires_at = new_expires_at
+            package.status = 'active'
+            package.save(update_fields=['credits_remaining', 'total_credits_allocated', 'expires_at', 'status'])
+            logger.info(f"Renewed Package {package.id} for client {package.client_id}: +{pkg_type.credit_count} credits, expires_at={new_expires_at}")
+ 
+            amount_paid = invoice.get('amount_paid', 0)
+            payment_amount = Decimal(str(round(amount_paid / 100.0, 2))) if amount_paid else Decimal(str(pkg_type.price or 0.0))
+            idempotency_key = invoice_id or f"pkg_renew_{package.id}_{int(now.timestamp())}"
+
+            payment = Payment.objects.create(
+                tenant=package.tenant,
+                client=package.client,
+                amount=payment_amount,
+                type='package_purchase',
+                package=package,
+                package_type=pkg_type,
+                status='completed',
+                provider_ref=invoice_id or subscription_id,
+                idempotency_key=idempotency_key
+            )
+            logger.info(f"Created renewal Payment {payment.id} for package {package.id}")
+
+            try:
+                from apps.retention.tasks import recalculate_single_client_metrics, attribute_conversion_task
+                recalculate_single_client_metrics.delay(str(package.tenant_id), str(package.client_id))
+                attribute_conversion_task.delay(str(package.tenant_id), str(package.client_id), 'package_purchase', str(payment.id))
+            except Exception:
+                pass
+
+    @staticmethod
     def handle_subscription_updated(subscription) -> None:
         """
         Handles package subscription renewals or status updates.
         """
         if not isinstance(subscription, dict):
-            subscription = subscription.to_dict()
+            subscription = subscription.to_dict() if hasattr(subscription, 'to_dict') else dict(subscription)
 
         subscription_id = subscription.get('id')
         status = subscription.get('status')
         cancel_at_period_end = subscription.get('cancel_at_period_end', False)
+        current_period_end = subscription.get('current_period_end')
 
         from apps.scheduling.models import Package, Payment
-        
+        from django.utils import timezone
+        from datetime import datetime, timedelta, timezone as dt_timezone
+
         with bypass_tenant_isolation():
             try:
-                package = Package.objects.get(stripe_subscription_id=subscription_id)
-                package.status = 'active' if status == 'active' else 'past_due' if status in ['past_due', 'unpaid'] else 'canceled'
+                package = Package.objects.select_related('package_type').get(stripe_subscription_id=subscription_id)
+                new_status = 'active' if status == 'active' else 'past_due' if status in ['past_due', 'unpaid'] else 'canceled'
+                update_fields = ['status', 'cancel_at_period_end']
+                package.status = new_status
                 package.cancel_at_period_end = cancel_at_period_end
-                package.save(update_fields=['status', 'cancel_at_period_end'])
-                logger.info(f"Updated Package {package.id} status to {package.status}")
 
-                # If this is a renewal (a new invoice was paid), we need to top up credits.
-                # However, invoice.payment_succeeded is better for that. We'll handle basic status here.
+                # Secondary renewal safeguard: if current_period_end advanced past current expires_at
+                if current_period_end and status == 'active':
+                    new_expires_at = datetime.fromtimestamp(current_period_end, tz=dt_timezone.utc)
+                    if not package.expires_at or new_expires_at > package.expires_at:
+                        package.expires_at = new_expires_at
+                        update_fields.append('expires_at')
+                        if package.package_type:
+                            package.credits_remaining = package.package_type.credit_count
+                            package.total_credits_allocated = package.package_type.credit_count
+                            update_fields.extend(['credits_remaining', 'total_credits_allocated'])
+                            logger.info(f"Safeguard renewal: Extended Package {package.id} to {new_expires_at} with {package.package_type.credit_count} credits")
+
+                package.save(update_fields=update_fields)
+                logger.info(f"Updated Package {package.id} status to {package.status}")
             except Package.DoesNotExist:
                 pass
 

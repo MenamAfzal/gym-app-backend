@@ -21,6 +21,7 @@ class UserRole(models.TextChoices):
     FRONT_DESK = 'front_desk', _('Front Desk')
     TRAINER = 'trainer', _('Trainer')
     CLIENT = 'client', _('Client')
+    AFFILIATE = 'affiliate', _('Affiliate')
 
 
 class ClientLifecycleStatus(models.TextChoices):

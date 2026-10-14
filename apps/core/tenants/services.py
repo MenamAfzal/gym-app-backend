@@ -216,9 +216,10 @@ class TenantAdministrationService:
 
     @staticmethod
     @transaction.atomic
-    def onboard_tenant(gym_name, subdomain, owner_email, owner_password, initial_plan_id=None, logo=None, branding=None, referred_by_id=None):
+    def onboard_tenant(gym_name, subdomain, owner_email, owner_password, initial_plan_id=None, logo=None, branding=None, referred_by_id=None, affiliate_code=None):
         """
         Creates Tenant (with branding), Plan, and Owner.
+        Supports linking to referring tenant or external affiliate partner.
         """
         if Tenant.objects.filter(subdomain=subdomain).exists():
             raise ValidationError(f"Subdomain '{subdomain}' is already taken.")
@@ -233,12 +234,20 @@ class TenantAdministrationService:
             except Tenant.DoesNotExist:
                 raise ValidationError("Referring Tenant does not exist.")
 
+        affiliate = None
+        if affiliate_code:
+            from apps.core.tenants.affiliate_service import AffiliateService
+            affiliate = AffiliateService.resolve_affiliate(affiliate_code)
+            if not affiliate:
+                logger.warning(f"Affiliate code '{affiliate_code}' not found during onboarding for '{gym_name}'")
+
         tenant = Tenant.objects.create(
             name=gym_name, 
             subdomain=subdomain,
             logo=logo,
             branding=branding_data,
-            referred_by=referred_by
+            referred_by=referred_by,
+            affiliate=affiliate
         )
 
         if initial_plan_id:
@@ -306,8 +315,11 @@ class TenantAdministrationService:
                     reward_amount=reward_amount,
                     status='pending' if trial_ends_at else 'paid'
                 )
-        
-        # Signals will automatically invalidate cache (Priority 2 Impl)
+
+        if getattr(tenant, 'affiliate', None) and not trial_ends_at:
+            from apps.core.tenants.affiliate_service import AffiliateService
+            AffiliateService.award_initial_subscription_points(tenant, subscription)
+         
         return subscription
 
     @staticmethod

@@ -24,6 +24,8 @@ def process_stripe_event(event_type, data):
             _handle_subscription_deleted(data)
         elif event_type == 'invoice.payment_failed':
             _handle_payment_failed(data)
+        elif event_type == 'invoice.payment_succeeded':
+            _handle_invoice_payment_succeeded(data)
             
     except Exception as e:
         # Celery will log the stack trace. 
@@ -75,6 +77,9 @@ def _handle_checkout_completed(session):
     # Also update any pending referral rewards to paid
     from apps.core.tenants.models import ReferralReward
     ReferralReward.objects.filter(subscription=subscription, status='pending').update(status='paid')
+
+    from apps.core.tenants.affiliate_service import AffiliateService
+    AffiliateService.award_initial_subscription_points(tenant, subscription)
     
     logger.info(f"Provisioned Plan {plan.name} for Tenant {tenant.name}")
 
@@ -94,6 +99,10 @@ def _handle_subscription_updated(subscription_data):
             # Also update referral rewards to paid
             from apps.core.tenants.models import ReferralReward
             ReferralReward.objects.filter(subscription=sub, status='pending').update(status='paid')
+ 
+            if getattr(sub.tenant, 'affiliate', None):
+                from apps.core.tenants.affiliate_service import AffiliateService
+                AffiliateService.award_initial_subscription_points(sub.tenant, sub)
         elif status in ['past_due', 'unpaid']:
             sub.status = 'past_due'
         elif status == 'canceled':
@@ -116,6 +125,12 @@ def _handle_subscription_updated(subscription_data):
         FeatureBillingService.handle_subscription_updated(subscription_data)
     except Exception as e:
         logger.error(f"Failed to forward subscription updated to FeatureBillingService: {e}")
+ 
+    try:
+        from apps.payments.stripe_package_service import StripePackageService
+        StripePackageService.handle_subscription_updated(subscription_data)
+    except Exception as e:
+        logger.error(f"Failed to forward subscription updated to StripePackageService: {e}")
 
 def _handle_subscription_deleted(subscription_data):
     """
@@ -130,13 +145,18 @@ def _handle_subscription_deleted(subscription_data):
         logger.info(f"Canceled subscription {stripe_id}")
     except TenantSubscription.DoesNotExist:
         pass
-
-    # Forward to FeatureBillingService for Phase 2 billing
+ 
     from apps.payments.billing_service import FeatureBillingService
     try:
         FeatureBillingService.handle_subscription_deleted(subscription_data)
     except Exception as e:
         logger.error(f"Failed to forward subscription deleted to FeatureBillingService: {e}")
+ 
+    try:
+        from apps.payments.stripe_package_service import StripePackageService
+        StripePackageService.handle_subscription_deleted(subscription_data)
+    except Exception as e:
+        logger.error(f"Failed to forward subscription deleted to StripePackageService: {e}")
 
 def _handle_payment_failed(invoice):
     """
@@ -150,6 +170,39 @@ def _handle_payment_failed(invoice):
             sub.save()
         except TenantSubscription.DoesNotExist:
             pass
+
+
+def _handle_invoice_payment_succeeded(invoice_data):
+    """
+    Occurs when an invoice is successfully paid (e.g. recurring renewals or initial sub).
+    """
+    stripe_subscription_id = invoice_data.get('subscription')
+    billing_reason = invoice_data.get('billing_reason') # 'subscription_cycle', 'subscription_create'
+    invoice_id = invoice_data.get('id')
+
+    if not stripe_subscription_id:
+        return
+
+    try:
+        sub = TenantSubscription.objects.select_related('tenant', 'tenant__affiliate').get(
+            stripe_subscription_id=stripe_subscription_id
+        )
+        if sub.tenant and getattr(sub.tenant, 'affiliate', None):
+            from apps.core.tenants.affiliate_service import AffiliateService
+            if billing_reason == 'subscription_cycle':
+                AffiliateService.award_renewal_subscription_points(sub.tenant, sub, invoice_id=invoice_id)
+            elif billing_reason == 'subscription_create':
+                AffiliateService.award_initial_subscription_points(sub.tenant, sub)
+    except TenantSubscription.DoesNotExist:
+        logger.info(f"Subscription {stripe_subscription_id} not found as TenantSubscription, checking Packages.")
+    except Exception as e:
+        logger.error(f"Failed to process affiliate reward on invoice payment: {e}")
+
+    try:
+        from apps.payments.stripe_package_service import StripePackageService
+        StripePackageService.handle_invoice_payment_succeeded(invoice_data)
+    except Exception as e:
+        logger.error(f"Failed to forward invoice payment succeeded to StripePackageService: {e}")
 
 
 @shared_task
