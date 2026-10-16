@@ -179,15 +179,22 @@ class WorkoutCreateWithExercisesSerializer(serializers.ModelSerializer):
             }
             if hasattr(workout, 'tenant') and workout.tenant:
                 defaults['tenant'] = workout.tenant
+            defaults['session'] = workout.session
             assignment, created = WorkoutAssignment.objects.get_or_create(
                 workout=workout,
                 user=workout.assigned_user,
-                session=workout.session,
                 defaults=defaults
             )
-            if not created and selected_date and assignment.date != selected_date:
-                assignment.date = selected_date
-                assignment.save(update_fields=['date'])
+            if not created:
+                updated_fields = []
+                if workout.session and assignment.session != workout.session:
+                    assignment.session = workout.session
+                    updated_fields.append('session')
+                if selected_date and assignment.date != selected_date:
+                    assignment.date = selected_date
+                    updated_fields.append('date')
+                if updated_fields:
+                    assignment.save(update_fields=updated_fields)
 
         group_objects = {}
         for group_data in groups_data:
@@ -240,8 +247,12 @@ class WorkoutSerializer(serializers.ModelSerializer):
     assigned_user = serializers.PrimaryKeyRelatedField(read_only=True)
     assigned_user_details = serializers.SerializerMethodField()
     is_assigned = serializers.SerializerMethodField()
-    session = serializers.PrimaryKeyRelatedField(read_only=True)
-    session_id = serializers.CharField(source="session.id", read_only=True)
+    session = serializers.SerializerMethodField()
+    session_id = serializers.SerializerMethodField()
+    session_name = serializers.SerializerMethodField()
+    session_details = serializers.SerializerMethodField()
+    session_start_time = serializers.SerializerMethodField()
+    session_end_time = serializers.SerializerMethodField()
     is_custom = serializers.BooleanField(read_only=True)
     
     class Meta:
@@ -252,8 +263,82 @@ class WorkoutSerializer(serializers.ModelSerializer):
             "tags", "equipment", "exercises", "groups", "created_by", "created_at",
             "start_date", "end_date", "deck_config", "is_completed",
             "assigned_user", "assigned_user_details", "is_assigned",
-            "session", "session_id", "is_custom"
+            "session", "session_id", "session_name", "session_details",
+            "session_start_time", "session_end_time", "is_custom"
         ]
+
+    def _resolve_session(self, obj):
+        if getattr(obj, "session", None):
+            return obj.session
+        request = self.context.get("request")
+        user = request.user if request and request.user and request.user.is_authenticated else None
+        user_id = self.context.get("user_id") or (user.id if user else None) or getattr(obj, "assigned_user_id", None)
+        if hasattr(obj, "assignments"):
+            if user_id:
+                assignment = obj.assignments.filter(user_id=user_id, session__isnull=False).select_related("session", "session__template", "session__room").first()
+                if assignment and assignment.session:
+                    return assignment.session
+            assignment = obj.assignments.filter(session__isnull=False).select_related("session", "session__template", "session__room").first()
+            if assignment and assignment.session:
+                return assignment.session
+        session_id = self.context.get("session_id")
+        if session_id and Session:
+            sess_mgr = getattr(Session, "all_objects", getattr(Session, "objects", None))
+            if sess_mgr:
+                try:
+                    return sess_mgr.filter(id=session_id).select_related("template", "room").first()
+                except Exception:
+                    pass
+        return None
+
+    def get_session(self, obj):
+        sess = self._resolve_session(obj)
+        return sess.id if sess else None
+
+    def get_session_id(self, obj):
+        sess = self._resolve_session(obj)
+        if sess:
+            return sess.id
+        return self.context.get("session_id")
+
+    def get_session_name(self, obj):
+        sess = self._resolve_session(obj)
+        if sess:
+            return getattr(sess, "name", "") or (sess.template.name if getattr(sess, "template", None) else str(sess))
+        return obj.session_type or ""
+
+    def get_session_details(self, obj):
+        sess = self._resolve_session(obj)
+        if not sess:
+            return None
+        try:
+            return {
+                "id": str(sess.id),
+                "name": getattr(sess, "name", "") or (sess.template.name if getattr(sess, "template", None) else ""),
+                "start_at": sess.start_at.isoformat() if getattr(sess, "start_at", None) else None,
+                "end_at": sess.end_at.isoformat() if getattr(sess, "end_at", None) else None,
+                "start_time": sess.start_at.isoformat() if getattr(sess, "start_at", None) else None,
+                "end_time": sess.end_at.isoformat() if getattr(sess, "end_at", None) else None,
+                "room": getattr(sess.room, "name", None) if getattr(sess, "room", None) else None,
+                "status": getattr(sess, "status", None),
+            }
+        except Exception:
+            return {
+                "id": str(sess.id),
+                "name": str(sess),
+            }
+
+    def get_session_start_time(self, obj):
+        sess = self._resolve_session(obj)
+        if sess and getattr(sess, "start_at", None):
+            return sess.start_at.isoformat() if hasattr(sess.start_at, "isoformat") else str(sess.start_at)
+        return None
+
+    def get_session_end_time(self, obj):
+        sess = self._resolve_session(obj)
+        if sess and getattr(sess, "end_at", None):
+            return sess.end_at.isoformat() if hasattr(sess.end_at, "isoformat") else str(sess.end_at)
+        return None
 
     def get_created_by(self, obj):
         if obj.created_by:
@@ -567,12 +652,10 @@ class WorkoutUpdateSerializer(serializers.ModelSerializer):
                 'session_type': instance.session_type,
                 'date': selected_date,
             }
-            if hasattr(instance, 'tenant') and instance.tenant:
-                defaults['tenant'] = instance.tenant
+            defaults['session'] = instance.session
             assignment, created = WorkoutAssignment.objects.get_or_create(
                 workout=instance,
                 user=instance.assigned_user,
-                session=instance.session,
                 defaults=defaults
             )
             if not created:
@@ -1459,16 +1542,34 @@ class WorkoutAssignmentSerializer(serializers.ModelSerializer):
     user_email = serializers.EmailField(source="user.email", read_only=True)
     user_name = serializers.SerializerMethodField()
     assigned_by_name = serializers.SerializerMethodField()
+    session = serializers.SerializerMethodField()
+    session_id = serializers.SerializerMethodField()
     session_name = serializers.SerializerMethodField()
+    session_details = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkoutAssignment
         fields = [
             "id", "workout", "workout_details", "user", "user_email", "user_name",
-            "assigned_by", "assigned_by_name", "session", "session_name",
-            "session_type", "date", "notes", "created_at", "updated_at"
+            "assigned_by", "assigned_by_name", "session", "session_id", "session_name",
+            "session_details", "session_type", "date", "notes", "created_at", "updated_at"
         ]
         read_only_fields = ["id", "assigned_by", "created_at", "updated_at"]
+
+    def _resolve_session(self, obj):
+        if getattr(obj, 'session', None):
+            return obj.session
+        if getattr(obj, 'workout', None) and getattr(obj.workout, 'session', None):
+            return obj.workout.session
+        return None
+
+    def get_session(self, obj):
+        sess = self._resolve_session(obj)
+        return sess.id if sess else None
+
+    def get_session_id(self, obj):
+        sess = self._resolve_session(obj)
+        return sess.id if sess else None
 
     def get_user_name(self, obj):
         if obj.user:
@@ -1491,9 +1592,31 @@ class WorkoutAssignmentSerializer(serializers.ModelSerializer):
         return None
 
     def get_session_name(self, obj):
-        if obj.session:
-            return getattr(obj.session, 'name', '') or str(obj.session)
+        sess = self._resolve_session(obj)
+        if sess:
+            return getattr(sess, 'name', '') or (sess.template.name if getattr(sess, 'template', None) else str(sess))
         return obj.session_type or ''
+
+    def get_session_details(self, obj):
+        sess = self._resolve_session(obj)
+        if not sess:
+            return None
+        try:
+            return {
+                "id": str(sess.id),
+                "name": getattr(sess, 'name', '') or (sess.template.name if getattr(sess, 'template', None) else ''),
+                "start_at": sess.start_at.isoformat() if getattr(sess, 'start_at', None) else None,
+                "end_at": sess.end_at.isoformat() if getattr(sess, 'end_at', None) else None,
+                "start_time": sess.start_at.isoformat() if getattr(sess, 'start_at', None) else None,
+                "end_time": sess.end_at.isoformat() if getattr(sess, 'end_at', None) else None,
+                "room": getattr(sess.room, 'name', None) if getattr(sess, 'room', None) else None,
+                "status": getattr(sess, 'status', None),
+            }
+        except Exception:
+            return {
+                "id": str(sess.id),
+                "name": str(sess),
+            }
 
 
 class WorkoutAssignCreateSerializer(serializers.Serializer):
@@ -1502,7 +1625,11 @@ class WorkoutAssignCreateSerializer(serializers.Serializer):
     user_id = serializers.CharField(required=False)
     user = serializers.CharField(required=False)
     client_id = serializers.CharField(required=False)
+    client = serializers.CharField(required=False)
     session_id = serializers.CharField(required=False, allow_null=True)
+    session = serializers.CharField(required=False, allow_null=True)
+    class_session = serializers.CharField(required=False, allow_null=True)
+    class_session_id = serializers.CharField(required=False, allow_null=True)
     session_type = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     date = serializers.DateField(required=False, allow_null=True)
     notes = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -1511,7 +1638,7 @@ class WorkoutAssignCreateSerializer(serializers.Serializer):
         w_id = attrs.get('workout_id') or attrs.get('workout')
         if not w_id:
             raise serializers.ValidationError({"workout_id": "This field is required."})
-        u_id = attrs.get('user_id') or attrs.get('user') or attrs.get('client_id')
+        u_id = attrs.get('user_id') or attrs.get('user') or attrs.get('client_id') or attrs.get('client')
         if not u_id:
             raise serializers.ValidationError({"user_id": "This field is required."})
 
@@ -1525,12 +1652,14 @@ class WorkoutAssignCreateSerializer(serializers.Serializer):
         except (User.DoesNotExist, ValueError):
             raise serializers.ValidationError({"user_id": "User not found."})
 
-        sess_id = attrs.get('session_id')
+        sess_id = attrs.get('session_id') or attrs.get('session') or attrs.get('class_session') or attrs.get('class_session_id')
         attrs['session_obj'] = None
         if sess_id and Session:
-            try:
-                attrs['session_obj'] = Session.objects.filter(id=sess_id).first()
-            except Exception:
-                pass
+            sess_mgr = getattr(Session, 'all_objects', getattr(Session, 'objects', None))
+            if sess_mgr:
+                try:
+                    attrs['session_obj'] = sess_mgr.filter(id=sess_id).first()
+                except Exception:
+                    pass
 
         return attrs

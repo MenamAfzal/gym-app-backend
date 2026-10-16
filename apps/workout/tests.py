@@ -1062,13 +1062,18 @@ class WorkoutMatchingTestCase(TestCase):
             tenant=self.tenant,
             template=template,
             room=self.room,
-            start_at=timezone.now(),
-            end_at=timezone.now() + timedelta(hours=1),
+            start_at=datetime(2026, 10, 2, 9, 0, tzinfo=dt_timezone.utc),
+            end_at=datetime(2026, 10, 2, 10, 0, tzinfo=dt_timezone.utc),
             capacity=10
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            session=session,
+            status="booked"
         )
         ex = Exercise.objects.create(tenant=self.tenant, name="Deadlift")
 
-        # Create workout configured only for October 2nd, 2026
         create_req = self.factory.post(
             "/api/v1/workout/create/",
             {
@@ -1076,7 +1081,7 @@ class WorkoutMatchingTestCase(TestCase):
                 "session_type": "Solo",
                 "movement_level": "Stability",
                 "user_id": str(self.client_user.id),
-                "session_id": session.id,
+                "session_id": str(session.id),
                 "start_date": "2026-10-02",
                 "end_date": "2026-10-02",
                 "workout_type": 1,
@@ -1221,10 +1226,28 @@ class WorkoutMatchingTestCase(TestCase):
         self.assertEqual(resp_oct3.status_code, 404)
 
     def test_today_workout_api_multi_day_date_range(self):
-        """
-        Verify that a workout configured with a multi-day range (e.g. 2026-10-02 to 2026-10-04)
-        is returned for dates within the range and rejected outside the range.
-        """
+        template = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Solo - 09:00 AM",
+            duration_min=60
+        )
+        for d_int in [2, 3, 4]:
+            s_date = datetime(2026, 10, d_int, 9, 0, 0, tzinfo=dt_timezone.utc)
+            sess = ClassSession.objects.create(
+                tenant=self.tenant,
+                template=template,
+                room=self.room,
+                start_at=s_date,
+                end_at=s_date + timedelta(hours=1),
+                capacity=10
+            )
+            Booking.objects.create(
+                tenant=self.tenant,
+                client=self.client_user,
+                session=sess,
+                status="booked"
+            )
         ex = Exercise.objects.create(tenant=self.tenant, name="Pull Up")
         workout = Workout.objects.create(
             tenant=self.tenant,
@@ -1247,12 +1270,10 @@ class WorkoutMatchingTestCase(TestCase):
             assigned_by=self.trainer
         )
 
-        # Before range: 2026-10-01 -> 404
         req_before = self.factory.get("/api/v1/workout/today/?date=2026-10-01")
         force_authenticate(req_before, user=self.client_user)
         self.assertEqual(TodayWorkoutAPIView.as_view()(req_before).status_code, 404)
 
-        # Within range: 2026-10-02, 2026-10-03, 2026-10-04 -> 200
         for in_date in ["2026-10-02", "2026-10-03", "2026-10-04"]:
             req_in = self.factory.get(f"/api/v1/workout/today/?date={in_date}")
             force_authenticate(req_in, user=self.client_user)
@@ -1260,9 +1281,245 @@ class WorkoutMatchingTestCase(TestCase):
             self.assertEqual(resp_in.status_code, 200, f"Expected 200 for date {in_date}")
             self.assertEqual(resp_in.data["data"][0]["id"], workout.id)
 
-        # After range: 2026-10-05 -> 404
         req_after = self.factory.get("/api/v1/workout/today/?date=2026-10-05")
         force_authenticate(req_after, user=self.client_user)
         self.assertEqual(TodayWorkoutAPIView.as_view()(req_after).status_code, 404)
+
+    def test_session_linked_during_workout_assignment(self):
+        template = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Session Alpha",
+            duration_min=60
+        )
+        session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template,
+            room=self.room,
+            start_at=self.today_start,
+            end_at=self.today_end,
+            capacity=10
+        )
+        workout = Workout.objects.create(
+            tenant=self.tenant,
+            name="Alpha Workout",
+            session_type="Session Alpha",
+            movement_level="Stability",
+            created_by=self.trainer
+        )
+        req = self.factory.post("/api/v1/workout/assign/", {
+            "workout_id": workout.id,
+            "user_id": str(self.client_user.id),
+            "session_id": str(session.id),
+            "notes": "Assigned with session"
+        }, format="json")
+        force_authenticate(req, user=self.trainer)
+        resp = AssignWorkoutAPIView.as_view()(req)
+        self.assertEqual(resp.status_code, 201)
+        workout.refresh_from_db()
+        self.assertEqual(workout.assigned_user, self.client_user)
+        self.assertEqual(workout.session, session)
+        self.assertEqual(str(workout.session_id), str(session.id))
+        assignment = WorkoutAssignment.objects.get(workout=workout, user=self.client_user)
+        self.assertEqual(assignment.session, session)
+        self.assertEqual(str(assignment.session_id), str(session.id))
+        self.assertEqual(str(resp.data["data"]["session_id"]), str(session.id))
+        self.assertEqual(resp.data["data"]["session_name"], "Session Alpha")
+        self.assertIsNotNone(resp.data["data"]["session_details"])
+        self.assertEqual(str(resp.data["data"]["session_details"]["id"]), str(session.id))
+
+    def test_session_link_included_when_fetching_client_workouts(self):
+        template = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Session Beta",
+            duration_min=60
+        )
+        session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template,
+            room=self.room,
+            start_at=self.today_start,
+            end_at=self.today_end,
+            capacity=10
+        )
+        workout = Workout.objects.create(
+            tenant=self.tenant,
+            name="Beta Workout",
+            session_type="Session Beta",
+            movement_level="Stability",
+            assigned_user=self.client_user,
+            session=session,
+            created_by=self.trainer
+        )
+        WorkoutAssignment.objects.create(
+            tenant=self.tenant,
+            workout=workout,
+            user=self.client_user,
+            session=session,
+            assigned_by=self.trainer
+        )
+        req = self.factory.get("/api/v1/workout/workouts/")
+        force_authenticate(req, user=self.client_user)
+        resp = WorkoutAPIView.as_view()(req)
+        self.assertEqual(resp.status_code, 200)
+        found = next((w for w in resp.data["data"] if w["id"] == workout.id), None)
+        self.assertIsNotNone(found)
+        self.assertEqual(str(found["session_id"]), str(session.id))
+        self.assertEqual(found["session_name"], "Session Beta")
+        self.assertIsNotNone(found["session_details"])
+        self.assertEqual(str(found["session_details"]["id"]), str(session.id))
+
+        assign_req = self.factory.get(f"/api/v1/workout/assignments/?user_id={self.client_user.id}")
+        force_authenticate(assign_req, user=self.trainer)
+        assign_resp = WorkoutAssignmentListCreateAPIView.as_view()(assign_req)
+        self.assertEqual(assign_resp.status_code, 200)
+        assign_item = assign_resp.data["data"][0]
+        self.assertEqual(str(assign_item["session_id"]), str(session.id))
+        self.assertEqual(assign_item["session_name"], "Session Beta")
+        self.assertIsNotNone(assign_item["session_details"])
+        self.assertEqual(str(assign_item["session_details"]["id"]), str(session.id))
+
+    def test_workout_does_not_appear_without_booked_session(self):
+        template = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Session Gamma",
+            duration_min=60
+        )
+        session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template,
+            room=self.room,
+            start_at=self.today_start,
+            end_at=self.today_end,
+            capacity=10
+        )
+        workout = Workout.objects.create(
+            tenant=self.tenant,
+            name="Gamma Workout",
+            session_type="Session Gamma",
+            movement_level="Stability",
+            assigned_user=self.client_user,
+            session=session,
+            start_date=self.today,
+            end_date=self.today,
+            created_by=self.trainer
+        )
+        WorkoutAssignment.objects.create(
+            tenant=self.tenant,
+            workout=workout,
+            user=self.client_user,
+            session=session,
+            date=self.today,
+            assigned_by=self.trainer
+        )
+        req = self.factory.get("/api/v1/workout/today/")
+        force_authenticate(req, user=self.client_user)
+        resp = TodayWorkoutAPIView.as_view()(req)
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.data.get("detail"), "No session booked today")
+
+    def test_workout_linked_and_displayed_after_session_booking(self):
+        template = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.location,
+            name="Session Delta",
+            duration_min=60
+        )
+        session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=template,
+            room=self.room,
+            start_at=self.today_start,
+            end_at=self.today_end,
+            capacity=10
+        )
+        workout = Workout.objects.create(
+            tenant=self.tenant,
+            name="Delta Workout",
+            session_type="Session Delta",
+            movement_level="Stability",
+            assigned_user=self.client_user,
+            start_date=self.today,
+            end_date=self.today,
+            created_by=self.trainer
+        )
+        assignment = WorkoutAssignment.objects.create(
+            tenant=self.tenant,
+            workout=workout,
+            user=self.client_user,
+            date=self.today,
+            assigned_by=self.trainer
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            session=session,
+            status="booked"
+        )
+        req = self.factory.get("/api/v1/workout/today/")
+        force_authenticate(req, user=self.client_user)
+        resp = TodayWorkoutAPIView.as_view()(req)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.data["data"]), 1)
+        workout_data = resp.data["data"][0]
+        self.assertEqual(workout_data["id"], workout.id)
+        self.assertEqual(str(workout_data["session_id"]), str(session.id))
+        self.assertEqual(workout_data["session_name"], "Session Delta")
+        self.assertIsNotNone(workout_data["session_details"])
+        self.assertEqual(str(workout_data["session_details"]["id"]), str(session.id))
+        workout.refresh_from_db()
+        assignment.refresh_from_db()
+        self.assertEqual(workout.session, session)
+        self.assertEqual(assignment.session, session)
+
+    def test_workout_assigned_to_session_a_never_displayed_for_session_b(self):
+        template_a = ClassTemplate.objects.create(tenant=self.tenant, location=self.location, name="Class A", duration_min=60)
+        template_b = ClassTemplate.objects.create(tenant=self.tenant, location=self.location, name="Class B", duration_min=60)
+        session_a = ClassSession.objects.create(tenant=self.tenant, template=template_a, room=self.room, start_at=self.today_start, end_at=self.today_end, capacity=10)
+        session_b = ClassSession.objects.create(tenant=self.tenant, template=template_b, room=self.room, start_at=self.today_start + timedelta(hours=2), end_at=self.today_end + timedelta(hours=2), capacity=10)
+        workout_a = Workout.objects.create(
+            tenant=self.tenant,
+            name="Workout for Class A",
+            session_type="Class A",
+            movement_level="Stability",
+            assigned_user=self.client_user,
+            session=session_a,
+            start_date=self.today,
+            end_date=self.today,
+            created_by=self.trainer
+        )
+        workout_b = Workout.objects.create(
+            tenant=self.tenant,
+            name="Workout for Class B",
+            session_type="Class B",
+            movement_level="Stability",
+            session=session_b,
+            start_date=self.today,
+            end_date=self.today,
+            created_by=self.trainer
+        )
+        WorkoutAssignment.objects.create(
+            tenant=self.tenant,
+            workout=workout_a,
+            user=self.client_user,
+            session=session_a,
+            date=self.today,
+            assigned_by=self.trainer
+        )
+        Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client_user,
+            session=session_b,
+            status="booked"
+        )
+        req = self.factory.get("/api/v1/workout/today/")
+        force_authenticate(req, user=self.client_user)
+        resp = TodayWorkoutAPIView.as_view()(req)
+        self.assertEqual(resp.status_code, 200)
+        returned_ids = [w["id"] for w in resp.data["data"]]
+        self.assertNotIn(workout_a.id, returned_ids)
+        self.assertIn(workout_b.id, returned_ids)
 
 

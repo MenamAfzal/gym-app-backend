@@ -1079,6 +1079,39 @@ class BookingViewSet(viewsets.ModelViewSet):
                 music_preference=final_music_preference
             )
 
+        try:
+            from apps.workout.models import WorkoutAssignment, Workout
+            target_date = session.start_at.date() if getattr(session, 'start_at', None) else None
+            template_name = session.template.name if getattr(session, 'template', None) else ""
+            if target_date:
+                pending_assignments = WorkoutAssignment.objects.filter(
+                    user=target_client,
+                    session__isnull=True
+                ).filter(
+                    Q(date=target_date) |
+                    Q(workout__start_date=target_date) |
+                    Q(workout__session_type__iexact=template_name)
+                )
+                for pa in pending_assignments:
+                    pa.session = session
+                    pa.save(update_fields=['session'])
+                    if pa.workout and not pa.workout.session_id:
+                        pa.workout.session = session
+                        pa.workout.save(update_fields=['session'])
+
+                direct_workouts = Workout.objects.filter(
+                    assigned_user=target_client,
+                    session__isnull=True
+                ).filter(
+                    Q(start_date=target_date) |
+                    Q(session_type__iexact=template_name)
+                )
+                for dw in direct_workouts:
+                    dw.session = session
+                    dw.save(update_fields=['session'])
+        except Exception:
+            pass
+
         # Create confirmation notification
         from apps.notifications.services import NotificationService
         from apps.notifications.events import BookingConfirmedEvent

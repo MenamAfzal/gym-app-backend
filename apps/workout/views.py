@@ -271,10 +271,12 @@ class WorkoutAPIView(APIView):
         if session_id:
             session_obj = None
             if Session:
-                session_obj = Session.objects.filter(id=session_id).select_related('template', 'recurrence_rule', 'recurrence_rule__template', 'room').first()
+                sess_mgr = getattr(Session, 'all_objects', getattr(Session, 'objects', None))
+                if sess_mgr:
+                    session_obj = sess_mgr.filter(id=session_id).select_related('template', 'recurrence_rule', 'recurrence_rule__template', 'room').first()
             if session_obj:
                 cands = get_session_match_candidates(session_obj)
-                matched_ids = [w.id for w in workouts if calculate_workout_session_score(w, cands) > 0]
+                matched_ids = [w.id for w in workouts if (w.session_id and str(w.session_id) == str(session_id)) or calculate_workout_session_score(w, cands) > 0]
                 workouts = workouts.filter(id__in=matched_ids)
         elif session_type:
             cands = [session_type]
@@ -505,15 +507,19 @@ class TodayWorkoutAPIView(APIView):
                 {"detail": "Invalid movement level for user profile"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        booking_mgr = getattr(Booking, 'all_objects', getattr(Booking, 'objects', None))
         bookings = []
-        if Booking:
+        if booking_mgr:
+            b_qs = booking_mgr.filter(
+                client=user,
+                session__start_at__date=target_date,
+            ).exclude(status__in=["cancelled", "no_show", "waitlisted"])
+            if hasattr(request, 'tenant') and request.tenant:
+                b_qs = b_qs.filter(tenant=request.tenant)
+            elif hasattr(user, 'tenant') and user.tenant:
+                b_qs = b_qs.filter(tenant=user.tenant)
             bookings = list(
-                Booking.objects.filter(
-                    client=user,
-                    session__start_at__date=target_date,
-                )
-                .exclude(status__in=["cancelled", "no_show", "waitlisted"])
-                .select_related(
+                b_qs.select_related(
                     "session",
                     "session__template",
                     "session__recurrence_rule",
@@ -566,32 +572,6 @@ class TodayWorkoutAPIView(APIView):
         )
 
         if not bookings:
-            assigned_today = []
-            for a in user_assignments:
-                if a.workout and is_assignment_active_on_date(a, target_date):
-                    if a.workout not in assigned_today:
-                        assigned_today.append(a.workout)
-            for w in user_direct_assigned_workouts:
-                if is_workout_active_on_date(w, target_date) and w not in assigned_today:
-                    assigned_today.append(w)
-
-            if assigned_today:
-                workouts_data = []
-                for w in assigned_today:
-                    serializer = WorkoutSerializer(w, many=False, context={"request": request})
-                    w_data = serializer.data
-                    w_data["session_id"] = None
-                    w_data["session_name"] = w.session_type or w.name
-                    w_data["session_start_time"] = None
-                    w_data["session_end_time"] = None
-                    w_data["Music Preference"] = ""
-                    w_data["is_favorited"] = w.id in favorited_ids
-                    workouts_data.append(w_data)
-                return Response(
-                    {"detail": "Today's workouts fetched successfully", "data": workouts_data},
-                    status=status.HTTP_200_OK,
-                )
-
             return Response(
                 {"detail": "No session booked today"},
                 status=status.HTTP_404_NOT_FOUND,
@@ -603,6 +583,7 @@ class TodayWorkoutAPIView(APIView):
                 sess_name = b.session.name or (b.session.template.name if getattr(b.session, 'template', None) else "")
                 items_to_match.append({
                     "session_id": b.session.id,
+                    "session_obj": b.session,
                     "session_name": sess_name,
                     "session_start_time": getattr(b.session, "start_time", getattr(b.session, "start_at", None)),
                     "session_end_time": getattr(b.session, "end_time", getattr(b.session, "end_at", None)),
@@ -655,44 +636,47 @@ class TodayWorkoutAPIView(APIView):
                 if not a.workout or not is_assignment_active_on_date(a, target_date):
                     continue
                 score = 0
-                if a.session_id and str(a.session_id) == str(item["session_id"]):
-                    score = 1000
-                elif not a.session_id and a.session_type and any(clean_session_name(a.session_type).lower() == clean_session_name(c).lower() for c in cands if c):
+                assigned_sess_id = a.session_id or getattr(a.workout, 'session_id', None)
+                if assigned_sess_id:
+                    if str(assigned_sess_id) == str(item["session_id"]):
+                        score = 1000
+                    else:
+                        score = 0
+                elif a.session_type and any(clean_session_name(a.session_type).lower() == clean_session_name(c).lower() for c in cands if c):
                     score = 900
-                elif not a.session_id:
+                else:
                     w_score = calculate_workout_session_score(a.workout, cands)
                     if w_score > 0:
                         score = 800 + w_score
                     elif a.date == target_date:
                         score = 700
-                elif a.session_id and str(a.session_id) != str(item["session_id"]):
-                    w_score = calculate_workout_session_score(a.workout, cands)
-                    if w_score > 0 and not available_workouts:
-                        score = 400 + w_score
+                    else:
+                        score = 500
                 if score > 0:
-                    assigned_candidates.append((score, a.workout))
+                    assigned_candidates.append((score, a.workout, a))
 
             for w in user_direct_assigned_workouts:
                 if not is_workout_active_on_date(w, target_date):
                     continue
-                if w.session_id and str(w.session_id) == str(item["session_id"]):
-                    score = 1000
-                elif not w.session_id:
+                score = 0
+                if w.session_id:
+                    if str(w.session_id) == str(item["session_id"]):
+                        score = 1000
+                    else:
+                        score = 0
+                else:
                     w_score = calculate_workout_session_score(w, cands)
                     score = 850 + w_score if w_score > 0 else 750
-                elif not available_workouts:
-                    w_score = calculate_workout_session_score(w, cands)
-                    score = 450 + w_score if w_score > 0 else 0
-                else:
-                    score = 0
                 if score > 0:
-                    assigned_candidates.append((score, w))
+                    assigned_candidates.append((score, w, None))
 
             assigned_candidates.sort(key=lambda x: (x[0], x[1].created_at), reverse=True)
 
             workout = None
+            matched_assignment = None
             if assigned_candidates:
                 workout = assigned_candidates[0][1]
+                matched_assignment = assigned_candidates[0][2]
             else:
                 scored_workouts = []
                 for w in available_workouts:
@@ -714,14 +698,39 @@ class TodayWorkoutAPIView(APIView):
                 if pair_key in matched_pair_keys:
                     continue
                 matched_pair_keys.add(pair_key)
+
+                is_multi_day = bool(workout.start_date and workout.end_date and workout.start_date < workout.end_date)
+                if not is_multi_day:
+                    if (workout.assigned_user == user or matched_assignment is not None) and not workout.session_id:
+                        workout.session = item["session_obj"]
+                        workout.save(update_fields=['session'])
+                    WorkoutAssignment.objects.filter(
+                        workout=workout,
+                        user=user,
+                        session__isnull=True
+                    ).update(session=item["session_obj"])
+
                 serializer = WorkoutSerializer(workout, many=False, context={"request": request, "session_id": item["session_id"]})
                 workout_data = serializer.data
+                workout_data["session"] = str(item["session_id"])
                 workout_data["session_id"] = item["session_id"]
                 workout_data["Music Preference"] = item["music_preference"]
                 workout_data["session_name"] = item["session_name"]
                 workout_data["session_start_time"] = item["session_start_time"]
                 workout_data["session_end_time"] = item["session_end_time"]
                 workout_data["is_favorited"] = workout.id in favorited_ids
+                if not workout_data.get("session_details") and item.get("session_obj"):
+                    sess = item["session_obj"]
+                    workout_data["session_details"] = {
+                        "id": str(sess.id),
+                        "name": getattr(sess, "name", "") or (sess.template.name if getattr(sess, "template", None) else ""),
+                        "start_at": sess.start_at.isoformat() if getattr(sess, "start_at", None) else None,
+                        "end_at": sess.end_at.isoformat() if getattr(sess, "end_at", None) else None,
+                        "start_time": sess.start_at.isoformat() if getattr(sess, "start_at", None) else None,
+                        "end_time": sess.end_at.isoformat() if getattr(sess, "end_at", None) else None,
+                        "room": getattr(sess.room, "name", None) if getattr(sess, "room", None) else None,
+                        "status": getattr(sess, "status", None),
+                    }
                 workouts_data.append(workout_data)
 
         workouts_data.sort(
@@ -791,24 +800,36 @@ class WorkoutAssignmentListCreateAPIView(APIView):
         target_user = serializer.validated_data['user_obj']
         session_obj = serializer.validated_data.get('session_obj')
         session_type = serializer.validated_data.get('session_type') or (session_obj.name if session_obj else workout.session_type)
-        date_val = serializer.validated_data.get('date') or workout.start_date or workout.end_date
+        date_val = serializer.validated_data.get('date') or (session_obj.start_at.date() if session_obj and getattr(session_obj, 'start_at', None) else None) or workout.start_date or workout.end_date
         notes = serializer.validated_data.get('notes', '')
 
-        assignment, created = WorkoutAssignment.objects.update_or_create(
-            workout=workout,
-            user=target_user,
-            session=session_obj,
-            date=date_val,
-            defaults={
-                'assigned_by': request.user,
-                'session_type': session_type,
-                'notes': notes,
-            }
-        )
+        workout.assigned_user = target_user
+        workout.session = session_obj
         workout.is_custom = True
-        if workout.assigned_user is None:
-            workout.assigned_user = target_user
-        workout.save(update_fields=['assigned_user', 'is_custom'])
+        if date_val:
+            workout.start_date = date_val
+            workout.end_date = date_val
+        workout.save(update_fields=['assigned_user', 'session', 'start_date', 'end_date', 'is_custom'])
+
+        assignment = WorkoutAssignment.objects.filter(workout=workout, user=target_user).first()
+        if assignment:
+            assignment.session = session_obj
+            assignment.assigned_by = request.user
+            assignment.session_type = session_type
+            assignment.date = date_val
+            if notes is not None:
+                assignment.notes = notes
+            assignment.save()
+        else:
+            assignment = WorkoutAssignment.objects.create(
+                workout=workout,
+                user=target_user,
+                session=session_obj,
+                assigned_by=request.user,
+                session_type=session_type,
+                date=date_val,
+                notes=notes,
+            )
 
         output_serializer = WorkoutAssignmentSerializer(assignment, context={'request': request})
         return Response(
@@ -855,24 +876,36 @@ class AssignSpecificWorkoutAPIView(APIView):
         target_user = serializer.validated_data['user_obj']
         session_obj = serializer.validated_data.get('session_obj')
         session_type = serializer.validated_data.get('session_type') or (session_obj.name if session_obj else workout.session_type)
-        date_val = serializer.validated_data.get('date') or workout.start_date or workout.end_date
+        date_val = serializer.validated_data.get('date') or (session_obj.start_at.date() if session_obj and getattr(session_obj, 'start_at', None) else None) or workout.start_date or workout.end_date
         notes = serializer.validated_data.get('notes', '')
 
-        assignment, created = WorkoutAssignment.objects.update_or_create(
-            workout=workout,
-            user=target_user,
-            session=session_obj,
-            date=date_val,
-            defaults={
-                'assigned_by': request.user,
-                'session_type': session_type,
-                'notes': notes,
-            }
-        )
+        workout.assigned_user = target_user
+        workout.session = session_obj
         workout.is_custom = True
-        if workout.assigned_user is None:
-            workout.assigned_user = target_user
-        workout.save(update_fields=['assigned_user', 'is_custom'])
+        if date_val:
+            workout.start_date = date_val
+            workout.end_date = date_val
+        workout.save(update_fields=['assigned_user', 'session', 'start_date', 'end_date', 'is_custom'])
+
+        assignment = WorkoutAssignment.objects.filter(workout=workout, user=target_user).first()
+        if assignment:
+            assignment.session = session_obj
+            assignment.assigned_by = request.user
+            assignment.session_type = session_type
+            assignment.date = date_val
+            if notes is not None:
+                assignment.notes = notes
+            assignment.save()
+        else:
+            assignment = WorkoutAssignment.objects.create(
+                workout=workout,
+                user=target_user,
+                session=session_obj,
+                assigned_by=request.user,
+                session_type=session_type,
+                date=date_val,
+                notes=notes,
+            )
 
         output_serializer = WorkoutAssignmentSerializer(assignment, context={'request': request})
         return Response(
