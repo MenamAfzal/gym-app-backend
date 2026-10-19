@@ -485,13 +485,6 @@ class TenantBillingSubscriptionView(APIView):
 
     def get(self, request):
         user = request.user
-        if user.role == UserRole.GYM_MANAGER:
-            from apps.users.permission_service import PermissionService
-            if not PermissionService.has_permission(user, 'payments', 'subscriptions', 'view'):
-                return Response({"error": "You do not have permission to view subscriptions."}, status=status.HTTP_403_FORBIDDEN)
-        elif user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN] and not (user.is_staff or user.is_superuser):
-            return Response({"error": "Only Gym Owners can view billing subscriptions."}, status=status.HTTP_403_FORBIDDEN)
-
         tenant = getattr(user, 'tenant', None)
         if not tenant:
             return Response(
