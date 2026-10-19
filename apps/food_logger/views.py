@@ -31,30 +31,14 @@ from rest_framework import generics, permissions, filters
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 
-# Local file upload helper for recipe images (saved to local media directory)
-def save_local_recipe_image(file_obj, obj):
-    import os
-    import uuid
-    from django.core.files.storage import FileSystemStorage
-    from django.conf import settings
-    
-    subfolder = 'recipe_images'
-    fs = FileSystemStorage(
-        location=os.path.join(settings.MEDIA_ROOT, subfolder),
-        base_url=f"/media/{subfolder}/"
-    )
-    ext = os.path.splitext(file_obj.name)[1]
-    filename = f"{uuid.uuid4()}{ext}"
-    saved_filename = fs.save(filename, file_obj)
-    
-    url = fs.url(saved_filename)
-    if hasattr(obj, 'image'):
-        obj.image = url
-        obj.save()
-    return url
+# Local file upload helpers for recipe images (saved to local media directory)
+from .utils import (
+    save_recipe_image,
+    get_full_recipe_image_url,
+    save_local_recipe_image,
+    food_loger_s3,
+)
 
-# Backward compatibility alias
-food_loger_s3 = save_local_recipe_image
 
 # Permission Classes
 def is_staff_user(user):
@@ -214,19 +198,13 @@ class StaffRecipeListCreateAPIView(APIView):
 
     def post(self, request):
         if not is_staff_user(request.user):
-             return Response({"detail": "Only staff can create recipes"}, status=403)
+            return Response({"detail": "Only staff can create recipes"}, status=403)
         serializer = StaffRecipeSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             recipe = serializer.save()
-            created_item = getattr(recipe, '_created_item', None)
-            if created_item:
-                file_obj = request.FILES.get("image")
-                if file_obj:
-                    file_copy = io.BytesIO(file_obj.read())
-                    file_copy.name = file_obj.name
-                    food_loger_s3(file_copy, created_item)
-            return Response(serializer.data, status=201)
-        return Response(serializer.errors, status=400)
+            response_serializer = StaffRecipeSerializer(recipe, context={'request': request})
+            return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def delete(self, request):
         if not is_staff_user(request.user):
@@ -296,7 +274,7 @@ class StaffRecipeItemListAPIView(APIView):
 
         for recipe in recipes:
             items = recipe.items.all()
-            serializer = StaffRecipeItemSerializer(items, many=True)
+            serializer = StaffRecipeItemSerializer(items, many=True, context={'request': request})
             grouped_data.append({
                 "category_id": recipe.id,
                 "category_name": recipe.category or "Uncategorized",

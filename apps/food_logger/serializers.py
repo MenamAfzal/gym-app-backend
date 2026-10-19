@@ -6,6 +6,20 @@ from .models import FoodSuggestion, StaffRecipeItem, StaffRecipe, UserRecipeItem
     CustomMeal, LoggedMeal, LoggedMealItem, CustomFood, FavoriteStaffRecipes, UserMedication
 from apps.users.models import User
 from datetime import datetime
+from .utils import save_recipe_image, get_full_recipe_image_url
+
+
+class ImageOrURLField(serializers.Field):
+    """
+    Accepts both uploaded files (MultiPart) and string URLs / base64 payloads,
+    and returns fully qualified absolute image URL in representation.
+    """
+    def to_internal_value(self, data):
+        return data
+
+    def to_representation(self, value):
+        return get_full_recipe_image_url(value, self.context.get('request'))
+
 
 
 class Userserializer(serializers.ModelSerializer):
@@ -86,6 +100,8 @@ class FoodSuggestionSerializer(serializers.ModelSerializer):
 
 class StaffRecipeItemSerializer(serializers.ModelSerializer):
     created_by = Userserializer(read_only=True)
+    image = ImageOrURLField(required=False, allow_null=True)
+
     class Meta:
         model = StaffRecipeItem
         exclude = ['recipe']
@@ -104,39 +120,52 @@ class StaffRecipeSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at']
 
     def to_internal_value(self, data):
-        data = data.copy()
-        if 'items' in data and isinstance(data['items'], str):
+        if hasattr(data, 'dict'):
+            clean_data = data.dict()
+        elif hasattr(data, 'copy'):
+            clean_data = dict(data.copy())
+        else:
+            clean_data = dict(data)
+
+        if 'items' in clean_data and isinstance(clean_data['items'], str):
             try:
                 import json
-                data['items'] = json.loads(data['items'])
+                clean_data['items'] = json.loads(clean_data['items'])
             except Exception:
                 pass
 
-        if 'items' not in data or not data['items']:
+        if 'items' not in clean_data or not clean_data['items']:
             flat_item = {}
-            for field in ['name', 'calories', 'protein', 'carbs', 'fats', 'serving_qty', 'serving_info', 'serving_unit', 'serving_weight_grams', 'description', 'ingredients']:
-                if field in data:
-                    flat_item[field] = data[field]
-            if 'fat' in data and 'fats' not in data:
-                flat_item['fats'] = data['fat']
+            for field in [
+                'name', 'calories', 'protein', 'carbs', 'fats', 'serving_qty',
+                'serving_info', 'serving_unit', 'serving_weight_grams',
+                'cholesterol', 'sodium', 'sugars', 'potassium', 'saturated_fat', 'fiber',
+                'description', 'ingredients', 'image', 'tag_name', 'tag_id', 'locale'
+            ]:
+                if field in clean_data:
+                    flat_item[field] = clean_data[field]
+            if 'fat' in clean_data and 'fats' not in clean_data:
+                flat_item['fats'] = clean_data['fat']
             if flat_item:
-                data['items'] = [flat_item]
+                clean_data['items'] = [flat_item]
 
-        return super().to_internal_value(data)
+        return super().to_internal_value(clean_data)
 
     def create(self, validated_data):
         """
         Custom create method for multipart/form-data + nested JSON items.
+        Stores uploaded or linked images on backend storage and saves image URL to DB.
         """
         request = self.context.get('request')
-        user = request.user
+        user = request.user if request else None
 
+        category_val = validated_data.get('category')
         recipe, created = StaffRecipe.objects.get_or_create(
-                    category=validated_data.get('category'),
-                )
+            category=category_val,
+        )
 
         items_data = validated_data.pop('items', [])
-        if not items_data:
+        if not items_data and request:
             items_raw = request.data.get('items')
             if items_raw:
                 if isinstance(items_raw, list):
@@ -148,13 +177,30 @@ class StaffRecipeSerializer(serializers.ModelSerializer):
                     except Exception:
                         pass
 
-        shared_image = request.FILES.get('image')
+        # Check for top-level shared file or URL from request
+        shared_file = None
+        shared_url = None
+        if request:
+            if hasattr(request, 'FILES'):
+                shared_file = (
+                    request.FILES.get('image')
+                    or request.FILES.get('file')
+                    or request.FILES.get('photo')
+                )
+            if hasattr(request, 'data'):
+                raw_top_img = request.data.get('image')
+                if isinstance(raw_top_img, str) and raw_top_img.strip():
+                    shared_url = raw_top_img.strip()
 
         for item_data in items_data:
+            # Determine image for this item (item-specific image > shared file > shared URL)
+            raw_img = item_data.pop('image', None) or shared_file or shared_url
+            saved_image_url = save_recipe_image(raw_img, request=request) if raw_img else None
+
             created_item = StaffRecipeItem.objects.create(
                 recipe=recipe,
                 created_by=user,
-                image=shared_image,
+                image=saved_image_url,
                 **item_data
             )
             recipe._created_item = created_item
@@ -163,6 +209,7 @@ class StaffRecipeSerializer(serializers.ModelSerializer):
 # ------ User Recipe Serializer
 
 class UserRecipeItemSerializer(serializers.ModelSerializer):
+    image = ImageOrURLField(required=False, allow_null=True)
 
     class Meta:
         model = UserRecipeItem
@@ -170,20 +217,64 @@ class UserRecipeItemSerializer(serializers.ModelSerializer):
         read_only_fields = ["user"]
 
     def create(self, validated_data):
-        user = self.context["request"].user
+        request = self.context.get("request")
+        user = request.user if request else None
+
+        raw_image = None
+        if request and hasattr(request, 'FILES'):
+            raw_image = (
+                request.FILES.get('image')
+                or request.FILES.get('file')
+                or request.FILES.get('photo')
+            )
+        if not raw_image and request and hasattr(request, 'data'):
+            raw_image = request.data.get('image')
+
+        if raw_image:
+            validated_data['image'] = save_recipe_image(raw_image, request=request)
 
         return UserRecipeItem.objects.create(
             user=user,
             **validated_data
         )
 
+    def update(self, instance, validated_data):
+        request = self.context.get("request")
+
+        file_obj = None
+        if request and hasattr(request, 'FILES'):
+            file_obj = (
+                request.FILES.get('image')
+                or request.FILES.get('file')
+                or request.FILES.get('photo')
+            )
+
+        _SENTINEL = object()
+        image_data = _SENTINEL
+        if request and hasattr(request, 'data') and 'image' in request.data:
+            image_data = request.data.get('image')
+
+        image_input = file_obj if file_obj is not None else image_data
+
+        if image_input is not _SENTINEL:
+            if image_input in [None, "", False]:
+                instance.image = None
+            else:
+                instance.image = save_recipe_image(image_input, request=request)
+
+        for attr, value in validated_data.items():
+            if attr != 'image':
+                setattr(instance, attr, value)
+        instance.save()
+        return instance
+
 class FavoriteStaffRecipeSerializer(serializers.ModelSerializer):
     staff_recipe_name = serializers.CharField(source='staff_recipe.name', read_only=True)
-    staff_recipe = UserRecipeItemSerializer(read_only=True)
+    staff_recipe = StaffRecipeItemSerializer(read_only=True)
 
     class Meta:
         model = FavoriteStaffRecipes
-        fields = ['id', 'staff_recipe', 'staff_recipe_name', 'is_favorite', 'date', 'staff_recipe']
+        fields = ['id', 'staff_recipe', 'staff_recipe_name', 'is_favorite', 'date']
 
 class MealItemSerializer(serializers.ModelSerializer):
 
@@ -241,6 +332,8 @@ class UserFoodSerializer(serializers.ModelSerializer):
 def build_item_serializer(model_class):
 
     class BaseSerializer(serializers.ModelSerializer):
+        image = serializers.SerializerMethodField()
+
         class Meta:
             model = model_class
             fields = [
@@ -249,6 +342,9 @@ def build_item_serializer(model_class):
                 "serving_qty", "serving_unit", "serving_info",
                 "potassium", "sodium", "sugars", "image"
             ]
+
+        def get_image(self, obj):
+            return get_full_recipe_image_url(getattr(obj, 'image', None), self.context.get('request'))
     return BaseSerializer
 
 
@@ -287,7 +383,7 @@ class LoggedMealSerializer(serializers.ModelSerializer):
 
 
 class StaffRecipeItemUpdateSerializer(serializers.ModelSerializer):
-    image = serializers.FileField(required=False, allow_null=True)  
+    image = ImageOrURLField(required=False, allow_null=True)
     class Meta:
         model = StaffRecipeItem
         exclude = ['recipe', 'created_by']   
@@ -295,20 +391,26 @@ class StaffRecipeItemUpdateSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         request = self.context.get('request')
-        
-        file_obj = request.FILES.get('image')
-        if file_obj:
-            from .views import food_loger_s3
 
-             
-            file_copy = io.BytesIO(file_obj.read())
-            file_copy.name = file_obj.name
+        file_obj = None
+        if request and hasattr(request, 'FILES'):
+            file_obj = (
+                request.FILES.get('image')
+                or request.FILES.get('file')
+                or request.FILES.get('photo')
+            )
 
-             
-            s3_url = food_loger_s3(file_copy, instance)   
+        _SENTINEL = object()
+        image_data = validated_data.pop('image', _SENTINEL)
 
-             
-            instance.image = s3_url
+        image_input = file_obj if file_obj is not None else image_data
+
+        if image_input is not _SENTINEL:
+            if image_input in [None, "", False]:
+                instance.image = None
+            else:
+                saved_url = save_recipe_image(image_input, request=request)
+                instance.image = saved_url
 
         # Update remaining fields
         for attr, value in validated_data.items():
