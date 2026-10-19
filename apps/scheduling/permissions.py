@@ -10,11 +10,16 @@ class IsAuthenticated(permissions.BasePermission):
 
 
 SCHEDULING_RESOURCE_MAP = {
+    'location': 'locations',
+    'locations': 'locations',
+    'staff-location': 'locations',
     'class-template': 'classes',
     'recurrence-rule': 'classes',
     'session': 'sessions',
+    'event': 'sessions',
     'workshop': 'events',
     'mindbody-event': 'events',
+    'event-enrollment': 'events',
     'room': 'rooms',
     'layout': 'rooms',
     'spot-type': 'spot_types',
@@ -22,6 +27,8 @@ SCHEDULING_RESOURCE_MAP = {
     'package': 'packages',
     'booking': 'bookings',
     'waitlist': 'waitlist',
+    'substitute-request': 'substitutes',
+    'substitutes': 'substitutes',
     'staff-availability': 'staff_availability',
     'booking-settings': 'booking_settings',
     'settings': 'booking_settings',
@@ -34,10 +41,15 @@ SCHEDULING_ACTION_MAP = {
     'update': 'edit',
     'partial_update': 'edit',
     'destroy': 'delete',
+    'cancel': 'cancel_session',
     'cancel_event': 'cancel_event',
     'cancel_session': 'cancel_session',
     'check_in': 'check_in',
     'roster': 'roster',
+    'enroll': 'roster',
+    'accept': 'edit',
+    'upcoming': 'view',
+    'my_enrollments': 'view',
 }
 
 
@@ -64,7 +76,9 @@ class IsOwnerOrManager(permissions.BasePermission):
                     resource = resource or ('segments' if 'segment' in basename else 'metrics')
                 else:
                     app = 'scheduling'
-                    resource = resource or SCHEDULING_RESOURCE_MAP.get(basename, 'classes')
+                    resource = resource or SCHEDULING_RESOURCE_MAP.get(basename)
+            if not resource:
+                return False
             action = getattr(view, 'action', None)
             if not action and hasattr(request, 'method'):
                 action = 'view' if request.method in ['GET', 'HEAD', 'OPTIONS'] else 'edit'

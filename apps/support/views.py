@@ -14,12 +14,41 @@ class IsGymOwnerOrAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
         return request.user.is_authenticated and request.user.role in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]
 
+
+class TenantTicketPermission(permissions.BasePermission):
+    def has_permission(self, request, view):
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
+            return False
+        if user.is_staff or user.is_superuser or getattr(user, 'role', None) in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
+            return True
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            action = getattr(view, 'action', None)
+            if not action and hasattr(request, 'method'):
+                action = 'view' if request.method in ['GET', 'HEAD', 'OPTIONS'] else 'create' if request.method == 'POST' else 'edit'
+            action_map = {
+                'list': 'view',
+                'retrieve': 'view',
+                'create': 'create',
+                'add_comment': 'create',
+                'update': 'edit',
+                'partial_update': 'edit',
+                'destroy': 'delete',
+            }
+            required_action = action_map.get(action, 'view')
+            return PermissionService.has_permission(user, 'support', 'tickets', required_action)
+        return False
+
+
 class TenantTicketViewSet(viewsets.ModelViewSet):
     """
-    For Gym Owners to manage tickets for their specific tenant.
+    For Gym Owners and authorized Managers to manage tickets for their specific tenant.
     """
     serializer_class = TicketSerializer
-    permission_classes = [IsGymOwnerOrAdmin]
+    permission_app = 'support'
+    permission_resource = 'tickets'
+    permission_classes = [TenantTicketPermission]
 
     def get_queryset(self):
         return Ticket.objects.all().select_related(

@@ -980,7 +980,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import AccessToken
 from .serializers import PollDetailSerializer, UserMinimalSerializer
 from .models import CommentReaction
-from .permissions import is_admin_user, IsOwnerOrAdmin, IsAdminOrModerator
+from .permissions import is_admin_user, IsOwnerOrAdmin, IsAdminOrModerator, HasCommunityPermission
 from apps.socialnetwork.helper_functions import handle_file_response
 from apps.socialnetwork.models import (
     Comment, Like, Photo, Poll, PollOption, Video, Vote, Post, SocialPost, PostMedia,
@@ -1226,7 +1226,7 @@ class MultiMediaUploadAPIView(APIView):
     This endpoint handles multiple files of different types in a single request.
     """
     parser_classes = (MultiPartParser, FormParser, JSONParser)
-    permission_classes = [AllowAny]
+    permission_classes = [permissions.IsAuthenticated, HasCommunityPermission]
 
     @transaction.atomic
     def post(self, request, *args, **kwargs):
@@ -1337,7 +1337,7 @@ class MultiMediaUploadAPIView(APIView):
 
 
 class PollCreateAPIView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasCommunityPermission]
 
     def post(self, request, *args, **kwargs):
         user = request.user
@@ -1350,7 +1350,7 @@ class PollCreateAPIView(APIView):
 
 
 class PollAPIView(viewsets.ModelViewSet):
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasCommunityPermission]
 
     def get_queryset(self):
         user = self.request.user
@@ -1487,7 +1487,7 @@ class MediaViewSet(viewsets.ModelViewSet):
     Media posts viewset for photos and videos.
     """
     parser_classes = (MultiPartParser, FormParser, JSONParser)
-    permission_classes = [AllowAny]
+    permission_classes = [HasCommunityPermission]
 
     media_types = {
         'photo': {'model': Photo, 'serializer': PhotoSerializer, 'detail_serializer': PhotoDetailSerializer},
@@ -1837,7 +1837,7 @@ class MediaViewSet(viewsets.ModelViewSet):
 
 # Updated UnifiedFeedAPIView with the desired output format
 class UnifiedFeedAPIView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [HasCommunityPermission]
 
     # def get(self, request, *args, **kwargs):
     #     user_id = request.query_params.get('user_id')
@@ -2087,7 +2087,7 @@ class UnifiedFeedAPIView(APIView):
 
 class UnifiedMediaUploadAPIView(APIView):
     parser_classes = (MultiPartParser, FormParser, JSONParser)
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasCommunityPermission]
 
     @transaction.atomic
     def post(self, request, *args, **kwargs):
@@ -2128,7 +2128,7 @@ class UnifiedMediaUploadAPIView(APIView):
 
 class PostViewSet(viewsets.ModelViewSet):
     parser_classes = (MultiPartParser, FormParser, JSONParser)
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasCommunityPermission]
 
     def get_queryset(self):
         user = self.request.user
@@ -2328,7 +2328,7 @@ class CommentViewSet(mixins.DestroyModelMixin, viewsets.GenericViewSet):
     queryset = Comment.all_objects.all()
     # Ensure you are using the correct serializer for retrieval/deletion
     serializer_class = CommentSerializer 
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasCommunityPermission]
 
     def get_queryset(self):
         return Comment.objects.all()

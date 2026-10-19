@@ -48,7 +48,11 @@ class TenantLedgerViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
+        if user.role == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.has_permission(user, 'payments', 'transactions', 'view'):
+                return PlatformLedger.objects.none()
+        elif user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN] and not (user.is_staff or user.is_superuser):
             return PlatformLedger.objects.none()
             
         queryset = PlatformLedger.objects.all()
@@ -115,8 +119,12 @@ class StripeConnectOnboardingView(APIView):
     def post(self, request):
         user = request.user
         
-        # Only allow Gym Owners to setup payouts
-        if user.role != UserRole.GYM_OWNER:
+        # Allow Gym Owners and authorized Managers to setup payouts
+        if user.role == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.has_permission(user, 'payments', 'gateways', 'edit'):
+                return Response({"error": "You do not have permission to configure payment gateways."}, status=status.HTTP_403_FORBIDDEN)
+        elif user.role != UserRole.GYM_OWNER and not (user.is_staff or user.is_superuser or user.role == UserRole.PLATFORM_ADMIN):
             return Response({"error": "Only Gym Owners can set up payouts."}, status=status.HTTP_403_FORBIDDEN)
             
         tenant = user.tenant
@@ -477,6 +485,13 @@ class TenantBillingSubscriptionView(APIView):
 
     def get(self, request):
         user = request.user
+        if user.role == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.has_permission(user, 'payments', 'subscriptions', 'view'):
+                return Response({"error": "You do not have permission to view subscriptions."}, status=status.HTTP_403_FORBIDDEN)
+        elif user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN] and not (user.is_staff or user.is_superuser):
+            return Response({"error": "Only Gym Owners can view billing subscriptions."}, status=status.HTTP_403_FORBIDDEN)
+
         tenant = getattr(user, 'tenant', None)
         if not tenant:
             return Response(
@@ -576,7 +591,14 @@ class TenantBillingSubscriptionCancelView(APIView):
 
     def post(self, request):
         user = request.user
-        if user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
+        if user.role == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.has_permission(user, 'payments', 'subscriptions', 'edit'):
+                return Response(
+                    {"error": "You do not have permission to cancel subscriptions."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        elif user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN] and not (user.is_staff or user.is_superuser):
             return Response(
                 {"error": "Only Gym Owners can cancel a subscription."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -669,7 +691,14 @@ class CreateCheckoutSessionView(APIView):
     def post(self, request):
         user = request.user
 
-        if user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
+        if user.role == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.has_permission(user, 'payments', 'subscriptions', 'edit'):
+                return Response(
+                    {"error": "You do not have permission to initiate a subscription checkout."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        elif user.role not in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN] and not (user.is_staff or user.is_superuser):
             return Response(
                 {"error": "Only Gym Owners can initiate a subscription checkout."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -903,7 +932,11 @@ class TenantFinanceSummaryAPIView(APIView):
 
     def get(self, request):
         user = request.user
-        if user.role != UserRole.GYM_OWNER:
+        if user.role == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.has_permission(user, 'payments', 'transactions', 'view'):
+                return Response({"error": "Only Gym Owners can view financial summaries."}, status=status.HTTP_403_FORBIDDEN)
+        elif user.role != UserRole.GYM_OWNER and not (user.is_staff or user.is_superuser or user.role == UserRole.PLATFORM_ADMIN):
             return Response({"error": "Only Gym Owners can view financial summaries."}, status=status.HTTP_403_FORBIDDEN)
 
         tenant = user.tenant
@@ -1043,7 +1076,11 @@ class TenantPayoutListView(generics.ListAPIView):
 
     def get_queryset(self):
         user = self.request.user
-        if user.role != UserRole.GYM_OWNER:
+        if user.role == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.has_permission(user, 'payments', 'transactions', 'view'):
+                return TenantPayout.objects.none()
+        elif user.role != UserRole.GYM_OWNER and not (user.is_staff or user.is_superuser or user.role == UserRole.PLATFORM_ADMIN):
             return TenantPayout.objects.none()
         
         queryset = TenantPayout.objects.all()

@@ -72,9 +72,14 @@ class StandardResultsSetPagination(PageNumberPagination):
 class LocationViewSet(viewsets.ModelViewSet):
     queryset = Location.all_objects.all()
     serializer_class = LocationSerializer
+    permission_app = 'scheduling'
+    permission_resource = 'locations'
     permission_classes = [IsAuthenticated]
 
     def get_permissions(self):
+        user = getattr(self.request, 'user', None)
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            return [IsOwnerOrManager()]
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [IsOwnerOrManager()]
         return [IsAuthenticated()]
@@ -82,7 +87,7 @@ class LocationViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = Location.objects.all()
         user = self.request.user
-        if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
+        if getattr(user, 'role', None) in [UserRole.TRAINER, UserRole.FRONT_DESK]:
             qs = qs.filter(location_staff__staff=user).distinct()
         return qs
 
@@ -357,7 +362,17 @@ class StaffLocationViewSet(viewsets.ModelViewSet):
 class StaffAvailabilityViewSet(viewsets.ModelViewSet):
     queryset = StaffAvailability.all_objects.all()
     serializer_class = StaffAvailabilitySerializer
+    permission_app = 'scheduling'
+    permission_resource = 'staff_availability'
     permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        user = getattr(self.request, 'user', None)
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            return [IsOwnerOrManager()]
+        if getattr(user, 'role', None) in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN] or getattr(user, 'is_staff', False):
+            return [IsOwnerOrManager()]
+        return [IsAuthenticated()]
 
     def get_queryset(self):
         qs = StaffAvailability.objects.select_related('staff', 'staff__profile')
@@ -365,6 +380,14 @@ class StaffAvailabilityViewSet(viewsets.ModelViewSet):
         if staff_id:
             qs = qs.filter(staff_id=staff_id)
         return qs
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        tenant = getattr(self.request, 'tenant', None) or getattr(user, 'tenant', None)
+        if getattr(user, 'role', None) == UserRole.TRAINER and not serializer.validated_data.get('staff'):
+            serializer.save(tenant=tenant, staff=user)
+        else:
+            serializer.save(tenant=tenant)
 
 
 class ClassTemplateViewSet(viewsets.ModelViewSet):
@@ -383,6 +406,8 @@ class ClassTemplateViewSet(viewsets.ModelViewSet):
 class RecurrenceRuleViewSet(viewsets.ModelViewSet):
     queryset = RecurrenceRule.all_objects.all()
     serializer_class = RecurrenceRuleSerializer
+    permission_app = 'scheduling'
+    permission_resource = 'classes'
     permission_classes = [IsOwnerOrManager]
 
     def get_queryset(self):
@@ -390,6 +415,12 @@ class RecurrenceRuleViewSet(viewsets.ModelViewSet):
 
     @transaction.atomic
     def perform_create(self, serializer):
+        user = self.request.user
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.has_permission(user, 'scheduling', 'sessions', 'create'):
+                from rest_framework.exceptions import PermissionDenied
+                raise PermissionDenied("You do not have permission to create sessions.")
         rule = serializer.save()
         
         # Expand RecurrenceRule into ClassSession rows
@@ -452,11 +483,16 @@ class RecurrenceRuleViewSet(viewsets.ModelViewSet):
 class ClassSessionViewSet(viewsets.ModelViewSet):
     queryset = ClassSession.all_objects.all()
     serializer_class = ClassSessionSerializer
+    permission_app = 'scheduling'
+    permission_resource = 'sessions'
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
-        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+        user = getattr(self.request, 'user', None)
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            return [IsOwnerOrManager()]
+        if self.action in ['create', 'update', 'partial_update', 'destroy', 'cancel']:
             return [IsOwnerOrManager()]
         return [IsAuthenticated()]
 
@@ -479,8 +515,13 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         user = self.request.user
         
         # Staff location segregation
-        if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
+        if getattr(user, 'role', None) in [UserRole.TRAINER, UserRole.FRONT_DESK]:
             qs = qs.filter(template__location__location_staff__staff=user).distinct()
+        elif getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.scheduling.models import StaffLocation
+            assigned_locations = StaffLocation.all_objects.filter(staff=user).values_list('location_id', flat=True)
+            if assigned_locations.exists():
+                qs = qs.filter(template__location_id__in=assigned_locations).distinct()
             
         params = self.request.query_params
         
@@ -539,6 +580,50 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    def update(self, request, *args, **kwargs):
+        if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
+            is_cancel = request.data.get('is_cancel')
+            status_val = request.data.get('status')
+            is_cancelling = (
+                is_cancel is True or
+                str(is_cancel).lower() in ['true', '1'] or
+                str(status_val).lower() in ['cancelled', 'canceled']
+            )
+            if is_cancelling:
+                from apps.users.permission_service import PermissionService
+                has_cancel_perm = (
+                    PermissionService.has_permission(request.user, 'scheduling', 'sessions', 'cancel_session')
+                    or PermissionService.has_permission(request.user, 'scheduling', 'sessions', 'delete')
+                )
+                if not has_cancel_perm:
+                    return Response(
+                        {"detail": "You do not have permission to cancel sessions."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
+            is_cancel = request.data.get('is_cancel')
+            status_val = request.data.get('status')
+            is_cancelling = (
+                is_cancel is True or
+                str(is_cancel).lower() in ['true', '1'] or
+                str(status_val).lower() in ['cancelled', 'canceled']
+            )
+            if is_cancelling:
+                from apps.users.permission_service import PermissionService
+                has_cancel_perm = (
+                    PermissionService.has_permission(request.user, 'scheduling', 'sessions', 'cancel_session')
+                    or PermissionService.has_permission(request.user, 'scheduling', 'sessions', 'delete')
+                )
+                if not has_cancel_perm:
+                    return Response(
+                        {"detail": "You do not have permission to cancel sessions."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+        return super().partial_update(request, *args, **kwargs)
+
     @transaction.atomic
     def perform_update(self, serializer):
         old_status = serializer.instance.status
@@ -558,6 +643,18 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         """
         Custom action to cancel an entire session, cancel all active bookings, and refund 1 credit to each client.
         """
+        if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            has_cancel_perm = (
+                PermissionService.has_permission(request.user, 'scheduling', 'sessions', 'cancel_session')
+                or PermissionService.has_permission(request.user, 'scheduling', 'sessions', 'delete')
+            )
+            if not has_cancel_perm:
+                return Response(
+                    {"detail": "You do not have permission to cancel sessions."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
         session = self.get_object()
         if session.status == 'cancelled':
             return Response({"detail": "Session is already cancelled."}, status=status.HTTP_400_BAD_REQUEST)
@@ -579,6 +676,18 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         """
         Cancel a session. Triggers credit-refund for all active bookings and notifications.
         """
+        if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            has_delete_perm = (
+                PermissionService.has_permission(request.user, 'scheduling', 'sessions', 'delete')
+                or PermissionService.has_permission(request.user, 'scheduling', 'sessions', 'cancel_session')
+            )
+            if not has_delete_perm:
+                return Response(
+                    {"detail": "You do not have permission to delete or cancel sessions."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
         session = self.get_object()
         session.status = 'cancelled'
         session.save()
@@ -720,6 +829,8 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
 
 class BookingViewSet(viewsets.ModelViewSet):
     queryset = Booking.all_objects.all()
+    permission_app = 'scheduling'
+    permission_resource = 'bookings'
     permission_classes = [IsAuthenticated]
     pagination_class = StandardResultsSetPagination
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
@@ -732,6 +843,12 @@ class BookingViewSet(viewsets.ModelViewSet):
     ]
     ordering_fields = ['created_at', 'status', 'session__start_at', 'client__email']
     ordering = ['-created_at']
+
+    def get_permissions(self):
+        user = getattr(self.request, 'user', None)
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            return [IsOwnerOrManager()]
+        return [IsAuthenticated()]
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)
@@ -1238,6 +1355,11 @@ class BookingViewSet(viewsets.ModelViewSet):
         if not is_staff and booking.client != user:
             return Response({"detail": "You do not have permission to check in for this booking."}, status=status.HTTP_403_FORBIDDEN)
 
+        if user.role == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.has_permission(user, 'scheduling', 'bookings', 'check_in'):
+                return Response({"detail": "You do not have permission to check in bookings."}, status=status.HTTP_403_FORBIDDEN)
+
         booking.checked_in_at = timezone.now()
         booking.status = 'checked_in'
         booking.save()
@@ -1348,7 +1470,15 @@ class BookingViewSet(viewsets.ModelViewSet):
 class WaitlistViewSet(viewsets.ModelViewSet):
     queryset = Waitlist.all_objects.all()
     serializer_class = WaitlistSerializer
+    permission_app = 'scheduling'
+    permission_resource = 'waitlist'
     permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        user = getattr(self.request, 'user', None)
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            return [IsOwnerOrManager()]
+        return [IsAuthenticated()]
 
     def get_queryset(self):
         user = self.request.user
@@ -1662,7 +1792,15 @@ class AppointmentViewSet(viewsets.ModelViewSet):
 class SubstituteRequestViewSet(viewsets.ModelViewSet):
     queryset = SubstituteRequest.all_objects.all()
     serializer_class = SubstituteRequestSerializer
+    permission_app = 'scheduling'
+    permission_resource = 'substitutes'
     permission_classes = [IsGymStaffOrOwner]
+
+    def get_permissions(self):
+        user = getattr(self.request, 'user', None)
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            return [IsOwnerOrManager()]
+        return [IsGymStaffOrOwner()]
 
     def get_queryset(self):
         return SubstituteRequest.objects.select_related(
@@ -1701,13 +1839,18 @@ class SubstituteRequestViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], permission_classes=[IsGymStaffOrOwner])
     @transaction.atomic
     def accept(self, request, pk=None):
+        from apps.users.models import UserRole
+        if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.has_permission(request.user, 'scheduling', 'substitutes', 'edit'):
+                return Response({"detail": "You do not have permission to offer or accept substitutes."}, status=status.HTTP_403_FORBIDDEN)
+
         sub_req = SubstituteRequest.objects.select_for_update().get(id=pk)
 
         if sub_req.status != 'open':
             return Response({"detail": "Request has already been filled or expired."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Determine target trainer who covers
-        from apps.users.models import UserRole
         is_admin = request.user.role in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER] or request.user.is_staff
 
         target_trainer = request.user
@@ -2241,11 +2384,14 @@ class TenantBookingSettingsView(APIView):
             from apps.users.permission_service import PermissionService
             if PermissionService.has_permission(user, 'scheduling', 'booking_settings', 'edit'):
                 return True
-            if PermissionService.has_permission(user, 'scheduling', 'classes', 'edit'):
-                return True
         return False
 
     def get(self, request):
+        user = request.user
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.has_permission(user, 'scheduling', 'booking_settings', 'view'):
+                return Response({"detail": "You do not have permission to view booking settings."}, status=status.HTTP_403_FORBIDDEN)
         tenant = self._get_tenant(request)
         settings_obj = TenantBookingSettings.get_or_create_for_tenant(tenant)
         serializer = TenantBookingSettingsSerializer(settings_obj)
@@ -2289,6 +2435,8 @@ class EventViewSet(viewsets.ModelViewSet):
     Supports free events and paid events requiring client pass credits.
     """
     queryset = Event.all_objects.all()
+    permission_app = 'scheduling'
+    permission_resource = 'events'
     parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
     pagination_class = StandardResultsSetPagination
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
@@ -2321,6 +2469,9 @@ class EventViewSet(viewsets.ModelViewSet):
             set_current_tenant(tenant)
 
     def get_permissions(self):
+        user = getattr(self.request, 'user', None)
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            return [IsOwnerOrManager()]
         if self.action in ['create', 'update', 'partial_update', 'destroy', 'cancel_event']:
             return [IsOwnerOrManager()]
         elif self.action in ['roster', 'check_in']:
@@ -2443,7 +2594,14 @@ class EventViewSet(viewsets.ModelViewSet):
         # If staff is enrolling on behalf of a client
         if target_client_id:
             user_role = getattr(request.user, 'role', None)
-            if user_role not in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
+            if user_role == UserRole.GYM_MANAGER:
+                from apps.users.permission_service import PermissionService
+                if not PermissionService.has_permission(request.user, 'scheduling', 'events', 'roster'):
+                    return Response(
+                        {"detail": "You do not have permission to add clients to the roster."},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+            elif user_role not in [UserRole.GYM_OWNER, UserRole.TRAINER, UserRole.FRONT_DESK]:
                 return Response(
                     {"detail": "Only gym staff can enroll another client."},
                     status=status.HTTP_403_FORBIDDEN
@@ -2506,6 +2664,14 @@ class EventViewSet(viewsets.ModelViewSet):
         """
         Retrieve attendee roster for staff / instructors.
         """
+        if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.has_permission(request.user, 'scheduling', 'events', 'roster'):
+                return Response(
+                    {"detail": "You do not have permission to view the roster."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
         event = self.get_object()
         enrollments = EventEnrollment.all_objects.filter(event=event).select_related('client', 'client__profile').prefetch_related('attended_sessions')
         serializer = EventRosterSerializer(enrollments, many=True, context={'request': request})
@@ -2538,6 +2704,14 @@ class EventViewSet(viewsets.ModelViewSet):
         Staff / Instructor check-in for an attendee.
         Accepts enrollment_id or client_id, and optional session_id.
         """
+        if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.has_permission(request.user, 'scheduling', 'events', 'check_in'):
+                return Response(
+                    {"detail": "You do not have permission to check in clients."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
         event = self.get_object()
         enrollment_id = request.data.get('enrollment_id')
         client_id = request.data.get('client_id')
@@ -2611,8 +2785,16 @@ class EventEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = EventEnrollment.all_objects.all()
     serializer_class = EventEnrollmentSerializer
+    permission_app = 'scheduling'
+    permission_resource = 'events'
     pagination_class = StandardResultsSetPagination
     permission_classes = [IsAuthenticated]
+
+    def get_permissions(self):
+        user = getattr(self.request, 'user', None)
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            return [IsOwnerOrManager()]
+        return [IsAuthenticated()]
 
     def initial(self, request, *args, **kwargs):
         super().initial(request, *args, **kwargs)

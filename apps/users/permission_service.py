@@ -5,13 +5,9 @@ from apps.core.permissions_catalog import sanitize_permissions, get_permission_c
 class PermissionService:
     @classmethod
     def _get_policy(cls, user):
-        if hasattr(user, '_cached_manager_policy'):
+        if hasattr(user, '_cached_manager_policy') and user._cached_manager_policy is not None:
             return user._cached_manager_policy
-        policy = None
-        try:
-            policy = user.permission_policy
-        except Exception:
-            policy = ManagerPermissionPolicy.all_objects.filter(manager=user).first()
+        policy = ManagerPermissionPolicy.all_objects.filter(manager=user).first()
         user._cached_manager_policy = policy
         return policy
 

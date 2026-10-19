@@ -2,6 +2,10 @@ PERMISSION_CATALOG = {
     'scheduling': {
         'label': 'Scheduling & Timetable',
         'resources': {
+            'locations': {
+                'label': 'Locations',
+                'actions': ['view', 'create', 'edit', 'delete']
+            },
             'classes': {
                 'label': 'Classes & Templates',
                 'actions': ['view', 'create', 'edit', 'delete']
@@ -32,7 +36,11 @@ PERMISSION_CATALOG = {
             },
             'waitlist': {
                 'label': 'Waitlist',
-                'actions': ['view', 'edit', 'delete']
+                'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'substitutes': {
+                'label': 'Substitutes',
+                'actions': ['view', 'create', 'edit', 'delete']
             },
             'staff_availability': {
                 'label': 'Staff Availability',

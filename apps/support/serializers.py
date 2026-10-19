@@ -8,7 +8,7 @@ class TicketCommentSerializer(serializers.ModelSerializer):
     class Meta:
         model = TicketComment
         fields = ['id', 'ticket', 'author', 'author_details', 'body', 'created_at']
-        read_only_fields = ['id', 'created_at', 'author']
+        read_only_fields = ['id', 'created_at', 'author', 'ticket']
 
 class TicketSerializer(serializers.ModelSerializer):
     created_by_details = UserSerializer(source='created_by', read_only=True)
