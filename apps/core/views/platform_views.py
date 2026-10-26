@@ -158,11 +158,46 @@ class PlatformFeatureViewSet(viewsets.ModelViewSet):
     permission_classes = [IsPlatformAdmin]
 
 
+class IsPlatformAdminOrGymReferrer(permissions.BasePermission):
+    """
+    Allows full access to Platform Admins, and read-only access to Gym Owners
+    for their own referral records.
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.is_staff and request.user.tenant is None:
+            return True
+        if request.user.tenant and request.method in permissions.SAFE_METHODS:
+            return True
+        return False
+
+
 class PlatformReferralRewardViewSet(viewsets.ModelViewSet):
     """
     API for Managing and Auditing Referral Rewards platform-wide.
+    Platform Admins can see and manage all referral records.
+    Gym owners can view referral records where they are the referrer.
     """
-    queryset = ReferralReward.objects.all().select_related('referrer', 'referred_tenant', 'subscription__plan').order_by('-created_at')
     serializer_class = ReferralRewardSerializer
-    permission_classes = [IsPlatformAdmin]
+    permission_classes = [IsPlatformAdminOrGymReferrer]
+
+    def get_queryset(self):
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            return ReferralReward.objects.none()
+
+        from apps.core.tenants.services import TenantAdministrationService
+
+        if user.is_staff and user.tenant is None:
+            TenantAdministrationService.sync_missing_referral_rewards()
+            return ReferralReward.objects.all().select_related(
+                'referrer', 'referred_tenant', 'subscription__plan', 'billing_subscription__billing_plan'
+            ).order_by('-created_at')
+        elif user.tenant:
+            TenantAdministrationService.sync_missing_referral_rewards(referrer=user.tenant)
+            return ReferralReward.objects.filter(referrer=user.tenant).select_related(
+                'referrer', 'referred_tenant', 'subscription__plan', 'billing_subscription__billing_plan'
+            ).order_by('-created_at')
+        return ReferralReward.objects.none()
     

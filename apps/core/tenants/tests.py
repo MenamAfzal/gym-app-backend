@@ -4,6 +4,7 @@ Tenant Model Tests
 Basic test scaffolding for tenant models.
 """
 from django.test import TestCase
+from rest_framework.test import APITestCase
 from apps.core.tenants.models import Tenant, Plan, Feature
 
 
@@ -245,6 +246,187 @@ class PlatformLedgerViewSetTest(TestCase):
 
         ledger_ids = [item['id'] for item in response.data]
         self.assertEqual(len(ledger_ids), 2)
+
+
+class GymReferralFlowTestCase(APITestCase):
+    def setUp(self):
+        from apps.users.models import User, UserRole
+        # Platform Admin
+        self.platform_admin = User.objects.create_user(
+            email="platformadmin@fitworks.com",
+            password="adminpassword123",
+            role=UserRole.PLATFORM_ADMIN,
+            is_staff=True,
+            tenant=None
+        )
+
+        # Referring Gym: La Forza
+        self.la_forza = Tenant.objects.create(
+            name="La Forza",
+            subdomain="la-forza",
+            is_active=True
+        )
+        self.la_forza_owner = User.objects.create_user(
+            email="owner@laforza.com",
+            password="password123",
+            role=UserRole.GYM_OWNER,
+            tenant=self.la_forza
+        )
+
+        # Modern Billing Plan (Basic Plan - $49.00)
+        from apps.payments.models import BillingPlan
+        self.basic_billing_plan, _ = BillingPlan.objects.get_or_create(
+            slug="basic",
+            defaults={"name": "Basic Plan", "is_public": True}
+        )
+
+    def test_complete_gym_referral_and_stripe_subscription_flow(self):
+        """
+        End-to-end verification of gym referral lifecycle:
+        1. Tenant onboarding with referring gym (La Forza).
+        2. Referral record persisted with pending status and 0 reward before subscription.
+        3. Visible in both La Forza's referrals API and Platform Admin Portal.
+        4. Stripe checkout completed and fulfilled -> reward becomes paid (10% commission).
+        5. Both APIs return the updated paid referral reward and plan name.
+        """
+        from apps.core.tenants.models import ReferralReward
+        from apps.payments.models import TenantBillingSubscription
+        from apps.payments.billing_service import FeatureBillingService
+
+        self.client.force_authenticate(user=self.platform_admin)
+
+        # 1. Platform Admin creates new gym "Test Gym Referral" with La Forza as referrer (using name string)
+        payload = {
+            "gym_name": "Test Gym Referral",
+            "subdomain": "test-gym-referral",
+            "owner_email": "owner@testgymreferral.com",
+            "owner_password": "securepassword123",
+            "referred_by": "La Forza"
+        }
+        create_res = self.client.post('/api/v1/platform/tenants/', payload, format='json')
+        self.assertEqual(create_res.status_code, 201)
+        new_tenant_id = create_res.data['id']
+        new_tenant = Tenant.objects.get(id=new_tenant_id)
+
+        # Verify referral attribution on tenant
+        self.assertEqual(new_tenant.referred_by, self.la_forza)
+
+        # 2. Verify pre-subscription ReferralReward was created
+        reward = ReferralReward.objects.get(referrer=self.la_forza, referred_tenant=new_tenant)
+        self.assertEqual(reward.status, 'pending')
+        self.assertEqual(float(reward.reward_amount), 0.00)
+        self.assertIsNone(reward.billing_subscription)
+
+        # 3. Check La Forza's referrals API (/api/v1/platform/billing/referrals/)
+        self.client.force_authenticate(user=self.la_forza_owner)
+        la_forza_res = self.client.get('/api/v1/platform/billing/referrals/')
+        self.assertEqual(la_forza_res.status_code, 200)
+        self.assertEqual(len(la_forza_res.data), 1)
+        ref_data = la_forza_res.data[0]
+        self.assertEqual(ref_data['referred_tenant_name'], "Test Gym Referral")
+        self.assertEqual(ref_data['status'], "pending")
+        self.assertEqual(float(ref_data['reward_amount']), 0.00)
+        self.assertEqual(ref_data['plan_name'], "Pending Subscription")
+
+        # Check Platform Admin referrals API (/api/v1/platform/referrals/)
+        self.client.force_authenticate(user=self.platform_admin)
+        admin_res = self.client.get('/api/v1/platform/referrals/')
+        self.assertEqual(admin_res.status_code, 200)
+        self.assertTrue(any(r['referred_tenant_name'] == "Test Gym Referral" for r in admin_res.data))
+
+        # 4. Simulate Test Gym Referral purchasing Basic plan via Stripe Checkout
+        session_obj = {
+            "id": "cs_test_gym_sub_123",
+            "subscription": "sub_stripe_123",
+            "customer": "cus_stripe_123",
+            "amount_total": 4900,  # $49.00 in cents
+            "metadata": {
+                "tenant_id": str(new_tenant.id),
+                "plan_slug": "basic",
+                "feature_ids": ""
+            }
+        }
+        billing_sub = FeatureBillingService.fulfill_checkout(session_obj)
+        self.assertEqual(billing_sub.status, TenantBillingSubscription.StatusChoices.ACTIVE)
+
+        # 5. Verify ReferralReward updated to paid with 10% commission ($4.90)
+        reward.refresh_from_db()
+        self.assertEqual(reward.status, 'paid')
+        self.assertEqual(float(reward.reward_amount), 4.90)
+        self.assertEqual(reward.billing_subscription, billing_sub)
+
+        # 6. Verify APIs return the updated paid reward and plan name
+        self.client.force_authenticate(user=self.la_forza_owner)
+        la_forza_res2 = self.client.get('/api/v1/platform/billing/referrals/')
+        self.assertEqual(la_forza_res2.status_code, 200)
+        self.assertEqual(len(la_forza_res2.data), 1)
+        ref_data2 = la_forza_res2.data[0]
+        self.assertEqual(ref_data2['status'], "paid")
+        self.assertEqual(float(ref_data2['reward_amount']), 4.90)
+        self.assertEqual(ref_data2['plan_name'], self.basic_billing_plan.name)
+        self.assertEqual(ref_data2['subscription_status'], "active")
+
+        # Platform Admin API check
+        self.client.force_authenticate(user=self.platform_admin)
+        admin_res2 = self.client.get('/api/v1/platform/referrals/')
+        self.assertEqual(admin_res2.status_code, 200)
+        reward_record = next(r for r in admin_res2.data if r['referred_tenant_name'] == "Test Gym Referral")
+        self.assertEqual(reward_record['status'], "paid")
+        self.assertEqual(float(reward_record['reward_amount']), 4.90)
+        self.assertEqual(reward_record['plan_name'], self.basic_billing_plan.name)
+
+    def test_referral_attribution_with_dict_and_uuid_aliases(self):
+        """
+        Verify that referred_by can be passed as a dict, UUID string, or alias.
+        """
+        self.client.force_authenticate(user=self.platform_admin)
+
+        # Test with dict
+        res_dict = self.client.post('/api/v1/platform/tenants/', {
+            "gym_name": "Gym With Dict Ref",
+            "subdomain": "gym-dict-ref",
+            "owner_email": "owner@dictref.com",
+            "owner_password": "password123",
+            "referred_by": {"id": str(self.la_forza.id), "name": "La Forza"}
+        }, format='json')
+        self.assertEqual(res_dict.status_code, 201)
+        tenant_dict = Tenant.objects.get(subdomain="gym-dict-ref")
+        self.assertEqual(tenant_dict.referred_by, self.la_forza)
+
+        # Test with UUID string alias referring_gym
+        res_alias = self.client.post('/api/v1/platform/tenants/', {
+            "gym_name": "Gym With Alias Ref",
+            "subdomain": "gym-alias-ref",
+            "owner_email": "owner@aliasref.com",
+            "owner_password": "password123",
+            "referring_gym": str(self.la_forza.id)
+        }, format='json')
+        self.assertEqual(res_alias.status_code, 201)
+        tenant_alias = Tenant.objects.get(subdomain="gym-alias-ref")
+        self.assertEqual(tenant_alias.referred_by, self.la_forza)
+
+    def test_self_healing_syncs_existing_referral_without_reward(self):
+        """
+        Verify that if a tenant has referred_by set in DB without a ReferralReward row,
+        calling the referrals API self-heals and creates the record.
+        """
+        from apps.core.tenants.models import ReferralReward
+
+        orphan_referred = Tenant.objects.create(
+            name="Orphan Referred Gym",
+            subdomain="orphan-ref",
+            is_active=True,
+            referred_by=self.la_forza
+        )
+        self.assertFalse(ReferralReward.objects.filter(referred_tenant=orphan_referred).exists())
+
+        # Calling La Forza's referrals API triggers self-healing
+        self.client.force_authenticate(user=self.la_forza_owner)
+        res = self.client.get('/api/v1/platform/billing/referrals/')
+        self.assertEqual(res.status_code, 200)
+        self.assertTrue(any(r['referred_tenant_name'] == "Orphan Referred Gym" for r in res.data))
+        self.assertTrue(ReferralReward.objects.filter(referred_tenant=orphan_referred).exists())
+
 
 
 

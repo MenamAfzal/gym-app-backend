@@ -97,8 +97,14 @@ class BillingViewSet(viewsets.ViewSet):
             
         from apps.core.tenants.models import ReferralReward
         from apps.core.tenants.serializers import ReferralRewardSerializer
-        
-        rewards = ReferralReward.objects.filter(referrer=tenant)
+        from apps.core.tenants.services import TenantAdministrationService
+
+        # Self-healing: ensure all gyms referred by this tenant have an up-to-date referral reward record
+        TenantAdministrationService.sync_missing_referral_rewards(referrer=tenant)
+
+        rewards = ReferralReward.objects.filter(referrer=tenant).select_related(
+            'referrer', 'referred_tenant', 'subscription__plan', 'billing_subscription__billing_plan'
+        ).order_by('-created_at')
         serializer = ReferralRewardSerializer(rewards, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
         

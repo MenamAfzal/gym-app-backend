@@ -94,12 +94,12 @@ class AffiliatePointsTransactionAdmin(admin.ModelAdmin):
 class ReferralRewardAdmin(admin.ModelAdmin):
     """Admin for gym-to-gym referral cash rewards."""
     list_display = [
-        'referrer', 'referred_tenant', 'reward_amount', 'status', 'subscription', 'created_at'
+        'referrer', 'referred_tenant', 'reward_amount', 'status', 'subscription', 'billing_subscription', 'created_at'
     ]
     list_filter = ['status', 'created_at']
     search_fields = ['referrer__name', 'referred_tenant__name']
     readonly_fields = ['id', 'created_at', 'updated_at']
-    autocomplete_fields = ['referrer', 'referred_tenant', 'subscription']
+    autocomplete_fields = ['referrer', 'referred_tenant', 'subscription', 'billing_subscription']
     date_hierarchy = 'created_at'
 
 

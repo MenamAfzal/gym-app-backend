@@ -303,12 +303,23 @@ class ReferralReward(UUIDMixin, TimestampMixin):
     subscription = models.ForeignKey(
         'TenantSubscription',
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
         related_name='referral_rewards',
-        help_text="The subscription that triggered this reward"
+        help_text="The core subscription that triggered this reward"
+    )
+    billing_subscription = models.ForeignKey(
+        'payments.TenantBillingSubscription',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='referral_rewards',
+        help_text="The feature billing subscription that triggered this reward"
     )
     reward_amount = models.DecimalField(
         max_digits=10,
         decimal_places=2,
+        default=0.00,
         help_text="The reward amount earned (e.g. commission)"
     )
     status = models.CharField(
@@ -326,6 +337,7 @@ class ReferralReward(UUIDMixin, TimestampMixin):
         ordering = ['-created_at']
         verbose_name = 'Referral Reward'
         verbose_name_plural = 'Referral Rewards'
+        unique_together = [('referrer', 'referred_tenant')]
 
     def __str__(self):
         return f"Reward for {self.referrer.name} referring {self.referred_tenant.name}: ${self.reward_amount}"

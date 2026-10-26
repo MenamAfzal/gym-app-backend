@@ -74,9 +74,14 @@ def _handle_checkout_completed(session):
     subscription.stripe_subscription_id = stripe_subscription_id
     subscription.save()
 
-    # Also update any pending referral rewards to paid
-    from apps.core.tenants.models import ReferralReward
-    ReferralReward.objects.filter(subscription=subscription, status='pending').update(status='paid')
+    # Also update any referral rewards to paid
+    if tenant.referred_by:
+        from apps.core.tenants.services import TenantAdministrationService
+        TenantAdministrationService.process_tenant_referral_reward(
+            tenant=tenant,
+            core_subscription=subscription,
+            is_trial=False
+        )
 
     from apps.core.tenants.affiliate_service import AffiliateService
     AffiliateService.award_initial_subscription_points(tenant, subscription)

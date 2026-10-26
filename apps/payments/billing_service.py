@@ -351,6 +351,23 @@ class FeatureBillingService:
             billing_plan.slug,
         )
 
+        if tenant.referred_by:
+            try:
+                from apps.core.tenants.services import TenantAdministrationService
+                amount_total = _get(session_obj, "amount_total")
+                amount_decimal = None
+                if amount_total:
+                    import decimal
+                    amount_decimal = decimal.Decimal(amount_total) / decimal.Decimal(100)
+                TenantAdministrationService.process_tenant_referral_reward(
+                    tenant=tenant,
+                    billing_subscription=billing_sub,
+                    amount=amount_decimal,
+                    is_trial=False
+                )
+            except Exception as e:
+                logger.exception("Failed to process gym referral reward for tenant %s upon checkout fulfillment: %s", tenant.id, e)
+
         # Award affiliate points if gym was referred by an external partner
         if getattr(tenant, 'affiliate_id', None):
             try:

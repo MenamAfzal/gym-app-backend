@@ -824,6 +824,32 @@ def stripe_checkout_webhook(request):
         except Exception as exc:
             logger.exception("Error handling invoice.payment_succeeded in checkout webhook: %s", exc)
 
+        # Trigger referral reward processing/update if gym was referred by another gym
+        try:
+            inv = data_object if isinstance(data_object, dict) else (data_object.to_dict() if hasattr(data_object, 'to_dict') else {})
+            stripe_sub_id = inv.get('subscription')
+            if stripe_sub_id:
+                from apps.payments.models import TenantBillingSubscription
+                from apps.core.tenants.services import TenantAdministrationService
+                import decimal
+                billing_sub = (
+                    TenantBillingSubscription.all_objects
+                    .select_related('tenant', 'tenant__referred_by')
+                    .filter(stripe_subscription_id=stripe_sub_id)
+                    .first()
+                )
+                if billing_sub and billing_sub.tenant and billing_sub.tenant.referred_by:
+                    inv_amount = inv.get('amount_paid') or inv.get('total')
+                    amount_dec = (decimal.Decimal(inv_amount) / decimal.Decimal(100)) if inv_amount else None
+                    TenantAdministrationService.process_tenant_referral_reward(
+                        tenant=billing_sub.tenant,
+                        billing_subscription=billing_sub,
+                        amount=amount_dec,
+                        is_trial=False
+                    )
+        except Exception as exc:
+            logger.exception("Error processing referral reward on invoice.payment_succeeded: %s", exc)
+
         # Trigger affiliate renewal points if gym was referred by an affiliate partner
         try:
             inv = data_object if isinstance(data_object, dict) else (data_object.to_dict() if hasattr(data_object, 'to_dict') else {})

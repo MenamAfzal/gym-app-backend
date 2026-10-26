@@ -84,24 +84,51 @@ class OnboardTenantSerializer(serializers.Serializer):
     subdomain = serializers.SlugField(max_length=100)
     owner_email = serializers.EmailField()
     owner_password = serializers.CharField(write_only=True, min_length=8)
-    initial_plan_id = serializers.UUIDField(required=False)
-    logo = serializers.ImageField(required=False)
+    initial_plan_id = serializers.UUIDField(required=False, allow_null=True)
+    logo = serializers.ImageField(required=False, allow_null=True)
     branding = serializers.JSONField(required=False, default=dict)
-    referred_by_id = serializers.UUIDField(required=False, allow_null=True)
+    referred_by_id = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    referred_by = serializers.JSONField(required=False, allow_null=True, write_only=True)
+    referring_gym = serializers.CharField(required=False, allow_null=True, allow_blank=True, write_only=True)
+    referring_gym_id = serializers.CharField(required=False, allow_null=True, allow_blank=True, write_only=True)
+    referring_tenant = serializers.CharField(required=False, allow_null=True, allow_blank=True, write_only=True)
+    referring_tenant_id = serializers.CharField(required=False, allow_null=True, allow_blank=True, write_only=True)
     affiliate_code = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     affiliate = serializers.CharField(required=False, allow_null=True, allow_blank=True, write_only=True)
     ref = serializers.CharField(required=False, allow_null=True, allow_blank=True, write_only=True)
     referral_code = serializers.CharField(required=False, allow_null=True, allow_blank=True, write_only=True)
 
     def to_internal_value(self, data):
-        # Support aliases for affiliate code from different frontend clients
         data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+        # Support aliases for affiliate code from different frontend clients
         if not data_copy.get('affiliate_code'):
             for alias in ('affiliate', 'ref', 'referral_code'):
                 if data_copy.get(alias):
                     data_copy['affiliate_code'] = data_copy.get(alias)
                     break
+
+        # Support aliases and formats for referred_by
+        ref_val = None
+        for alias in ('referred_by_id', 'referred_by', 'referring_gym_id', 'referring_gym', 'referring_tenant_id', 'referring_tenant'):
+            if data_copy.get(alias) is not None and str(data_copy.get(alias)).strip() != '':
+                ref_val = data_copy.get(alias)
+                break
+
+        if ref_val is not None:
+            if isinstance(ref_val, dict):
+                ref_val = ref_val.get('id') or ref_val.get('name') or ref_val.get('subdomain')
+            data_copy['referred_by_id'] = str(ref_val).strip() if ref_val is not None else None
+
         return super().to_internal_value(data_copy)
+
+    def validate_referred_by_id(self, value):
+        if not value:
+            return None
+        from apps.core.tenants.services import TenantAdministrationService
+        tenant = TenantAdministrationService.resolve_tenant(value)
+        if not tenant:
+            raise serializers.ValidationError(f"Referring gym '{value}' does not exist.")
+        return str(tenant.id)
 
     def validate_affiliate_code(self, value):
         if not value:
@@ -122,6 +149,7 @@ class TenantSerializer(serializers.ModelSerializer):
     entitlements = serializers.SerializerMethodField()
     referred_by = serializers.SerializerMethodField()
     affiliate_partner = serializers.SerializerMethodField()
+    referred_by_id = serializers.CharField(required=False, allow_null=True, allow_blank=True, write_only=True)
     
     class Meta:
         model = Tenant
@@ -129,9 +157,31 @@ class TenantSerializer(serializers.ModelSerializer):
             'id', 'name', 'subdomain', 'logo', 'branding', 
             'is_active', 'created_at', 
             'current_subscription', 'entitlements',
-            'referred_by', 'affiliate_partner'
+            'referred_by', 'affiliate_partner', 'referred_by_id'
         ]
         read_only_fields = ['id', 'created_at']
+
+    def to_internal_value(self, data):
+        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+        if 'referred_by' in data_copy and 'referred_by_id' not in data_copy:
+            ref_val = data_copy.get('referred_by')
+            if isinstance(ref_val, dict):
+                ref_val = ref_val.get('id') or ref_val.get('name') or ref_val.get('subdomain')
+            data_copy['referred_by_id'] = str(ref_val).strip() if ref_val is not None else None
+        return super().to_internal_value(data_copy)
+
+    def update(self, instance, validated_data):
+        if 'referred_by_id' in validated_data:
+            ref_val = validated_data.pop('referred_by_id')
+            if ref_val:
+                from apps.core.tenants.services import TenantAdministrationService
+                resolved = TenantAdministrationService.resolve_tenant(ref_val)
+                if resolved:
+                    instance.referred_by = resolved
+                    TenantAdministrationService.ensure_referral_reward_record(referrer=resolved, referred_tenant=instance)
+            else:
+                instance.referred_by = None
+        return super().update(instance, validated_data)
 
     def get_referred_by(self, obj):
         if obj.referred_by_id:
@@ -235,17 +285,54 @@ class CheckoutInitSerializer(serializers.Serializer):
 
 class ReferralRewardSerializer(serializers.ModelSerializer):
     referrer_name = serializers.ReadOnlyField(source='referrer.name')
+    referrer_subdomain = serializers.ReadOnlyField(source='referrer.subdomain')
     referred_tenant_name = serializers.ReadOnlyField(source='referred_tenant.name')
-    plan_name = serializers.ReadOnlyField(source='subscription.plan.name')
+    referred_tenant_subdomain = serializers.ReadOnlyField(source='referred_tenant.subdomain')
+    billing_subscription = serializers.PrimaryKeyRelatedField(read_only=True)
+    plan_name = serializers.SerializerMethodField()
+    subscription_status = serializers.SerializerMethodField()
 
     class Meta:
         model = ReferralReward
         fields = [
-            'id', 'referrer', 'referrer_name', 
-            'referred_tenant', 'referred_tenant_name', 
-            'subscription', 'plan_name', 
+            'id', 'referrer', 'referrer_name', 'referrer_subdomain',
+            'referred_tenant', 'referred_tenant_name', 'referred_tenant_subdomain',
+            'subscription', 'billing_subscription', 'plan_name', 'subscription_status',
             'reward_amount', 'status', 'created_at'
         ]
+
+    def get_plan_name(self, obj):
+        if obj.billing_subscription and obj.billing_subscription.billing_plan:
+            return obj.billing_subscription.billing_plan.name
+        if obj.subscription and obj.subscription.plan:
+            return obj.subscription.plan.name
+        if obj.referred_tenant:
+            # Fallback: check if the referred tenant has a non-free active subscription
+            active_bs = obj.referred_tenant.payments_tenantbillingsubscriptions.filter(
+                status='active'
+            ).exclude(billing_plan__slug='free').select_related('billing_plan').first()
+            if active_bs and active_bs.billing_plan:
+                return active_bs.billing_plan.name
+            active_sub = obj.referred_tenant.subscriptions.filter(
+                status='active'
+            ).select_related('plan').first()
+            if active_sub and active_sub.plan:
+                return active_sub.plan.name
+        return "Pending Subscription"
+
+    def get_subscription_status(self, obj):
+        if obj.billing_subscription:
+            return obj.billing_subscription.status
+        if obj.subscription:
+            return obj.subscription.status
+        if obj.referred_tenant:
+            bs = obj.referred_tenant.payments_tenantbillingsubscriptions.order_by('-created_at').first()
+            if bs:
+                return bs.status
+            sub = obj.referred_tenant.subscriptions.order_by('-created_at').first()
+            if sub:
+                return sub.status
+        return "none"
 
 
 class AffiliateRegistrationSerializer(serializers.Serializer):
