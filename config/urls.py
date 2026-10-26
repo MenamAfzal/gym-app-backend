@@ -29,6 +29,7 @@ from apps.users.views import (
 )
 
 urlpatterns = [
+    path('admin/', admin.site.urls),
     path('join/<str:code>/', ReferralJoinLandingView.as_view(), name='root-referral-join-landing-code'),
     path('join/<str:code>', ReferralJoinLandingView.as_view(), name='root-referral-join-landing-code-no-slash'),
     path('join/', ReferralJoinLandingView.as_view(), name='root-referral-join-landing'),
