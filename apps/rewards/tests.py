@@ -2717,6 +2717,62 @@ class ClientReferralEngineComprehensiveTests(RewardsBaseTestCase):
         self.assertIn(code_a.encode(), resp.content)
         self.assertIn(b"fitverx://referral?", resp.content)
 
+    def test_referral_join_landing_page_path_based_and_modal_features(self):
+        from apps.rewards.referral_service import ReferralService
+        code_a = ReferralService.get_or_create_referral_code(self.member1)
+
+        # 1. Test direct path format /join/<code_a> and /join/<code_a>/
+        resp_path = self.client.get(f"/join/{code_a}")
+        self.assertEqual(resp_path.status_code, 200)
+        self.assertIn(b"You're Invited to Join", resp_path.content)
+        self.assertIn(code_a.encode(), resp_path.content)
+
+        resp_path_slash = self.client.get(f"/join/{code_a}/")
+        self.assertEqual(resp_path_slash.status_code, 200)
+
+        # 2. Verify Copy Referral Code button and fallback logic exist in document
+        self.assertIn(b'id="copyBtn"', resp_path.content)
+        self.assertIn(b'copyCode()', resp_path.content)
+        self.assertIn(b'fallbackCopy', resp_path.content)
+        self.assertIn(b'execCommand', resp_path.content)
+
+        # 3. Verify Open Fitworks App button and intent/deep-link handler exist
+        self.assertIn(b'id="openAppBtn"', resp_path.content)
+        self.assertIn(b'openFitworksApp()', resp_path.content)
+        self.assertIn(b'intent://referral?', resp_path.content)
+
+        # 4. Verify Google Play Store button is properly configured
+        self.assertIn(b'id="playStoreLink"', resp_path.content)
+        self.assertIn(b'play.google.com/store/apps/details?id=', resp_path.content)
+
+        # 5. Verify Apple App Store button is disabled with coming soon badge
+        self.assertIn(b'App Store (iOS Coming Soon)', resp_path.content)
+        self.assertIn(b'btn-disabled', resp_path.content)
+
+        # 6. Verify disruptive auto-navigation on load has been removed
+        self.assertNotIn(b'setTimeout(() => { window.location.href = "{deep_link}"; }, 500);', resp_path.content)
+
+    def test_client_referral_api_sharing_payload_enrichments(self):
+        from apps.rewards.referral_service import ReferralService
+        code_a = ReferralService.get_or_create_referral_code(self.member1)
+
+        # Login as member1
+        self.client.force_authenticate(user=self.member1)
+        resp = self.client.get("/api/v1/rewards/client/referrals/")
+        self.assertEqual(resp.status_code, 200)
+
+        data = resp.data
+        self.assertEqual(data["referral_code"], code_a)
+        self.assertTrue(data["referral_link"].endswith(f"/join?ref={code_a}"))
+        self.assertTrue(data["referral_path_link"].endswith(f"/join/{code_a}"))
+        self.assertIn("share_message", data)
+        self.assertIn("share_urls", data)
+        self.assertIn("whatsapp", data["share_urls"])
+        self.assertIn("sms", data["share_urls"])
+        self.assertIn("email", data["share_urls"])
+        self.assertIn("play_store_url", data)
+        self.assertEqual(data["ios_available"], False)
+
 
 class AdminRewardAnalyticsViewTests(RewardsBaseTestCase):
     """

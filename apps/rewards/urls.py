@@ -43,6 +43,8 @@ urlpatterns = [
     path('client/referrals/complete/', ClientReferralView.as_view(), name='client-reward-referrals-complete'),
     path('client/referrals/redeem/', ClientReferralView.as_view(), name='client-reward-referrals-redeem'),
     path('referrals/resolve/', ReferralResolveView.as_view(), name='referral-resolve'),
+    path('join/<str:code>/', ReferralJoinLandingView.as_view(), name='referral-join-landing-code'),
+    path('join/<str:code>', ReferralJoinLandingView.as_view(), name='referral-join-landing-code-no-slash'),
     path('join/', ReferralJoinLandingView.as_view(), name='referral-join-landing'),
     path('join', ReferralJoinLandingView.as_view(), name='referral-join-landing-no-slash'),
     path('client/', include(router_client.urls)),

@@ -283,3 +283,15 @@ PLATFORM_FEE_PERCENTAGE = 10.0
 KIMI_API_KEY = os.environ.get("KIMI_API_KEY", os.environ.get("MOONSHOT_API_KEY", ""))
 KIMI_BASE_URL = os.environ.get("KIMI_BASE_URL", os.environ.get("MOONSHOT_BASE_URL", "https://api.moonshot.cn/v1"))
 KIMI_MODEL = os.environ.get("KIMI_MODEL", "moonshot-v1-8k-vision-preview")
+
+# MOBILE APPLICATION & APP STORE SETTINGS
+PLATFORM_NAME = os.environ.get("PLATFORM_NAME", "Fitworks")
+DEEPLINK_SCHEME = os.environ.get("DEEPLINK_SCHEME", "fitworks")
+DEEPLINK_FALLBACK_SCHEME = os.environ.get("DEEPLINK_FALLBACK_SCHEME", "fitverx")
+GOOGLE_PLAY_STORE_PACKAGE = os.environ.get("GOOGLE_PLAY_STORE_PACKAGE", "com.fitworks.client")
+GOOGLE_PLAY_STORE_URL = os.environ.get(
+    "GOOGLE_PLAY_STORE_URL",
+    f"https://play.google.com/store/apps/details?id={GOOGLE_PLAY_STORE_PACKAGE}"
+)
+APPLE_APP_STORE_URL = os.environ.get("APPLE_APP_STORE_URL", "")
+

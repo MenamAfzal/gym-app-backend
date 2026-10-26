@@ -161,9 +161,9 @@ class AffiliateJoinLandingView(views.APIView):
     """
     permission_classes = [permissions.AllowAny]
 
-    def get(self, request):
-        code = request.query_params.get('ref') or request.query_params.get('code') or ''
-        clean_code = code.strip()
+    def get(self, request, code=None):
+        code = code or request.query_params.get('ref') or request.query_params.get('code') or ''
+        clean_code = code.strip().strip('/')
 
         partner = None
         is_active = False

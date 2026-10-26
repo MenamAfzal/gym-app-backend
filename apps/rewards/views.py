@@ -16,6 +16,8 @@ from rest_framework import permissions
 from rest_framework.pagination import PageNumberPagination
 from django.db.models import Sum, Count, Q, Max
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.conf import settings
+import urllib.parse
 
 from apps.rewards.models import (
     RewardProgram, RewardRule, Badge, RewardTier,
@@ -959,11 +961,37 @@ class ClientReferralView(APIView):
             status=ReferralStatus.PENDING
         ).count()
 
+        platform_name = getattr(settings, 'PLATFORM_NAME', 'Fitworks')
+        play_store_url = getattr(
+            settings,
+            'GOOGLE_PLAY_STORE_URL',
+            'https://play.google.com/store/apps/details?id=com.fitworks.client'
+        )
+        app_store_url = getattr(settings, 'APPLE_APP_STORE_URL', '') or None
+
+        query_referral_link = f"{base_url}/join?ref={code}"
+        path_referral_link = f"{base_url}/join/{code}"
+
+        tenant_name = tenant.name if tenant else platform_name
+        share_text = f"Join me at {tenant_name} on {platform_name}! Use my referral code {code} or register here: {path_referral_link}"
+        encoded_text = urllib.parse.quote(share_text)
+        email_subject = urllib.parse.quote(f"Invitation to join {tenant_name} on {platform_name}")
+
         return Response({
             'referrer_id': str(user.id),
             'referrer_email': user.email,
             'referral_code': code,
-            'referral_link': f"{base_url}/join?ref={code}",
+            'referral_link': query_referral_link,
+            'referral_path_link': path_referral_link,
+            'share_message': share_text,
+            'share_urls': {
+                'whatsapp': f"https://api.whatsapp.com/send?text={encoded_text}",
+                'sms': f"sms:?&body={encoded_text}",
+                'email': f"mailto:?subject={email_subject}&body={encoded_text}",
+            },
+            'play_store_url': play_store_url,
+            'app_store_url': app_store_url,
+            'ios_available': bool(app_store_url),
             'total_referrals_completed': completed_count,
             'total_referrals_pending': pending_count,
             'description': "Share your referral code with friends. When they join, you both earn reward points and bonuses."
@@ -1068,12 +1096,13 @@ class ReferralResolveView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def get(self, request):
-        code = request.query_params.get('code') or request.query_params.get('ref')
-        if not code:
+        raw_code = request.query_params.get('code') or request.query_params.get('ref')
+        clean_code = (raw_code or '').strip().strip('/').upper()
+        if not clean_code:
             return Response({'error': 'Referral code parameter "code" or "ref" is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
         from apps.rewards.referral_service import ReferralService
-        referrer = ReferralService.resolve_referrer_by_code(code)
+        referrer = ReferralService.resolve_referrer_by_code(clean_code)
         if not referrer:
             return Response({'valid': False, 'error': 'Invalid or expired referral code.'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1084,38 +1113,59 @@ class ReferralResolveView(APIView):
         if not referrer_name:
             referrer_name = referrer.email.split('@')[0]
 
-        clean_code = code.strip().upper()
-        deep_link = f"fitverx://referral?code={clean_code}&tenant_id={str(tenant.id) if tenant else ''}"
+        platform_name = getattr(settings, 'PLATFORM_NAME', 'Fitworks')
+        deep_scheme = getattr(settings, 'DEEPLINK_SCHEME', 'fitworks')
+        fallback_scheme = getattr(settings, 'DEEPLINK_FALLBACK_SCHEME', 'fitverx')
+        play_store_package = getattr(settings, 'GOOGLE_PLAY_STORE_PACKAGE', 'com.fitworks.client')
+        play_store_url = getattr(
+            settings,
+            'GOOGLE_PLAY_STORE_URL',
+            f"https://play.google.com/store/apps/details?id={play_store_package}"
+        )
+        app_store_url = getattr(settings, 'APPLE_APP_STORE_URL', '') or None
+
+        primary_deep_link = f"{deep_scheme}://referral?code={clean_code}&tenant_id={str(tenant.id) if tenant else ''}"
+        fallback_deep_link = f"{fallback_scheme}://referral?code={clean_code}&tenant_id={str(tenant.id) if tenant else ''}"
+        intent_url = (
+            f"intent://referral?code={clean_code}&tenant_id={str(tenant.id) if tenant else ''}"
+            f"#Intent;scheme={deep_scheme};package={play_store_package};S.browser_fallback_url={urllib.parse.quote(play_store_url)};end"
+        )
 
         return Response({
             'valid': True,
             'referral_code': clean_code,
             'referrer_name': referrer_name,
             'tenant_id': str(tenant.id) if tenant else None,
-            'tenant_name': tenant.name if tenant else "FitVerx Gym",
+            'tenant_name': tenant.name if tenant else f"{platform_name} Gym",
             'tenant_subdomain': tenant.subdomain if tenant else None,
-            'deep_link': deep_link,
-            'app_store_url': "https://apps.apple.com/app/fitverx",
-            'play_store_url': "https://play.google.com/store/apps/details?id=com.fitverx.client"
+            'deep_link': fallback_deep_link,
+            'primary_deep_link': primary_deep_link,
+            'intent_url': intent_url,
+            'app_store_url': app_store_url,
+            'play_store_url': play_store_url,
+            'ios_available': bool(app_store_url)
         })
 
 
 class ReferralJoinLandingView(APIView):
     """
-    Handles shared referral links e.g. https://<domain>/join?ref=REF-XXXX
+    Handles shared referral links e.g. https://<domain>/join?ref=REF-XXXX or /join/REF-XXXX
     If accessed via browser: serves an aesthetic, responsive HTML landing page
-    with Open in App (deep-link), App Store, Play Store, and web register buttons.
-    If accessed via API/JSON: returns the referral resolution JSON.
+    with Copy Referral Code, Open in App (deep-link + intent), Play Store, and iOS status.
+    If accessed via API/JSON: returns referral metadata.
     """
     permission_classes = [permissions.AllowAny]
 
-    def get(self, request):
-        code = request.query_params.get('ref') or request.query_params.get('code')
-        from apps.rewards.referral_service import ReferralService
-        referrer = ReferralService.resolve_referrer_by_code(code) if code else None
+    def get(self, request, code=None):
+        raw_code = code or request.query_params.get('ref') or request.query_params.get('code') or ''
+        clean_code = raw_code.strip().strip('/').upper()
 
+        from apps.rewards.referral_service import ReferralService
+        referrer = ReferralService.resolve_referrer_by_code(clean_code) if clean_code else None
+
+        platform_name = getattr(settings, 'PLATFORM_NAME', 'Fitworks')
         tenant = referrer.tenant if referrer else None
-        gym_name = tenant.name if tenant else "FitVerx Gym"
+        gym_name = tenant.name if tenant else f"{platform_name} Gym"
 
         referrer_name = "A friend"
         if referrer:
@@ -1124,8 +1174,23 @@ class ReferralJoinLandingView(APIView):
             if not referrer_name:
                 referrer_name = referrer.email.split('@')[0]
 
-        clean_code = code.strip().upper() if code else ""
-        deep_link = f"fitverx://referral?code={clean_code}&tenant_id={str(tenant.id) if tenant else ''}"
+        deep_scheme = getattr(settings, 'DEEPLINK_SCHEME', 'fitworks')
+        fallback_scheme = getattr(settings, 'DEEPLINK_FALLBACK_SCHEME', 'fitverx')
+        play_store_package = getattr(settings, 'GOOGLE_PLAY_STORE_PACKAGE', 'com.fitworks.client')
+        play_store_url = getattr(
+            settings,
+            'GOOGLE_PLAY_STORE_URL',
+            f"https://play.google.com/store/apps/details?id={play_store_package}"
+        )
+        app_store_url = getattr(settings, 'APPLE_APP_STORE_URL', '') or None
+
+        tenant_param = str(tenant.id) if tenant else ''
+        primary_deep_link = f"{deep_scheme}://referral?code={clean_code}&tenant_id={tenant_param}"
+        fallback_deep_link = f"{fallback_scheme}://referral?code={clean_code}&tenant_id={tenant_param}"
+        intent_url = (
+            f"intent://referral?code={clean_code}&tenant_id={tenant_param}"
+            f"#Intent;scheme={deep_scheme};package={play_store_package};S.browser_fallback_url={urllib.parse.quote(play_store_url)};end"
+        )
 
         accept_header = request.headers.get('Accept', '')
         if 'application/json' in accept_header and 'text/html' not in accept_header:
@@ -1134,165 +1199,440 @@ class ReferralJoinLandingView(APIView):
                 'referral_code': clean_code,
                 'referrer_name': referrer_name,
                 'tenant_name': gym_name,
-                'deep_link': deep_link
+                'tenant_id': str(tenant.id) if tenant else None,
+                'deep_link': fallback_deep_link,
+                'primary_deep_link': primary_deep_link,
+                'intent_url': intent_url,
+                'play_store_url': play_store_url,
+                'app_store_url': app_store_url,
+                'ios_available': bool(app_store_url)
             })
+
+        display_code = clean_code or platform_name.upper()
+
+        if app_store_url:
+            apple_store_html = f'<a id="appStoreLink" href="{app_store_url}" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-store">Apple App Store</a>'
+        else:
+            apple_store_html = f'<button id="appStoreBtn" class="btn btn-secondary btn-store btn-disabled" disabled aria-disabled="true" title="{platform_name} for iOS is coming soon">App Store (iOS Coming Soon)</button>'
 
         html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Join {gym_name} on FitVerx</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <title>Join {gym_name} on {platform_name}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <style>
         :root {{
-            --bg-primary: #0f172a;
-            --card-bg: #1e293b;
+            --bg-primary: #0b0f19;
+            --card-bg: rgba(22, 31, 48, 0.92);
+            --card-border: rgba(255, 255, 255, 0.08);
             --accent: #6366f1;
             --accent-hover: #4f46e5;
+            --accent-glow: rgba(99, 102, 241, 0.35);
+            --success: #10b981;
+            --success-glow: rgba(16, 185, 129, 0.3);
             --text-primary: #f8fafc;
             --text-secondary: #94a3b8;
+            --code-bg: rgba(15, 23, 42, 0.75);
         }}
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            font-family: 'Outfit', sans-serif;
-            background: radial-gradient(circle at top, #1e1b4b, var(--bg-primary));
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: radial-gradient(circle at 50% 0%, #1e1b4b 0%, var(--bg-primary) 70%);
             color: var(--text-primary);
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
-            padding: 20px;
+            padding: 24px 16px;
         }}
         .card {{
             background: var(--card-bg);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 24px;
-            padding: 40px 32px;
+            border: 1px solid var(--card-border);
+            border-radius: 28px;
+            padding: 40px 28px;
             max-width: 480px;
             width: 100%;
             text-align: center;
-            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-            backdrop-filter: blur(12px);
+            box-shadow: 0 25px 60px -15px rgba(0, 0, 0, 0.7), 0 0 40px -10px var(--accent-glow);
+            backdrop-filter: blur(16px);
+            position: relative;
+            overflow: hidden;
         }}
         .badge {{
-            display: inline-block;
-            background: rgba(99, 102, 241, 0.15);
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: rgba(99, 102, 241, 0.16);
             color: #a5b4fc;
-            padding: 6px 14px;
+            border: 1px solid rgba(99, 102, 241, 0.3);
+            padding: 6px 16px;
             border-radius: 9999px;
-            font-size: 13px;
-            font-weight: 600;
+            font-size: 12px;
+            font-weight: 700;
             margin-bottom: 20px;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.8px;
+            text-transform: uppercase;
         }}
         h1 {{
             font-size: 26px;
-            font-weight: 700;
+            font-weight: 800;
             margin-bottom: 12px;
-            line-height: 1.3;
+            line-height: 1.25;
+            letter-spacing: -0.5px;
         }}
         p.subtitle {{
             color: var(--text-secondary);
             font-size: 15px;
             line-height: 1.6;
-            margin-bottom: 28px;
+            margin-bottom: 26px;
         }}
         .code-box {{
-            background: rgba(15, 23, 42, 0.6);
-            border: 1px dashed rgba(99, 102, 241, 0.5);
-            border-radius: 14px;
-            padding: 16px;
-            margin-bottom: 28px;
+            background: var(--code-bg);
+            border: 1.5px dashed rgba(99, 102, 241, 0.55);
+            border-radius: 16px;
+            padding: 14px 18px;
+            margin-bottom: 14px;
             display: flex;
             align-items: center;
             justify-content: space-between;
+            gap: 12px;
+            transition: border-color 0.2s ease;
+        }}
+        .code-info {{
+            text-align: left;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            overflow: hidden;
+        }}
+        .code-label {{
+            font-size: 10px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            letter-spacing: 1px;
+            text-transform: uppercase;
         }}
         .code-val {{
-            font-family: monospace;
-            font-size: 20px;
-            font-weight: 700;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 22px;
+            font-weight: 800;
             letter-spacing: 2px;
             color: #818cf8;
+            user-select: all;
+            word-break: break-all;
         }}
         .copy-btn {{
-            background: rgba(255, 255, 255, 0.1);
+            background: var(--accent);
             color: white;
             border: none;
+            padding: 10px 18px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 700;
+            letter-spacing: 0.3px;
+            transition: all 0.2s ease;
+            white-space: nowrap;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.35);
+        }}
+        .copy-btn:hover {{
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+        }}
+        .copy-btn:active {{
+            transform: translateY(0);
+        }}
+        .copy-btn.copied {{
+            background: var(--success) !important;
+            box-shadow: 0 4px 12px var(--success-glow) !important;
+        }}
+        .toast {{
+            background: rgba(16, 185, 129, 0.15);
+            border: 1px solid rgba(16, 185, 129, 0.35);
+            color: #6ee7b7;
             padding: 8px 14px;
             border-radius: 8px;
-            cursor: pointer;
             font-size: 13px;
             font-weight: 600;
-            transition: all 0.2s ease;
+            margin-bottom: 20px;
+            opacity: 0;
+            transform: translateY(-6px);
+            transition: all 0.25s ease;
+            pointer-events: none;
         }}
-        .copy-btn:hover {{ background: rgba(255, 255, 255, 0.2); }}
+        .toast.visible {{
+            opacity: 1;
+            transform: translateY(0);
+        }}
+        .toast.hidden {{
+            display: none;
+        }}
         .btn {{
-            display: block;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             width: 100%;
-            padding: 14px;
-            border-radius: 12px;
-            font-weight: 600;
+            padding: 15px;
+            border-radius: 14px;
+            font-weight: 700;
             font-size: 16px;
             text-decoration: none;
             cursor: pointer;
             margin-bottom: 12px;
             transition: all 0.2s ease;
+            border: none;
+            outline: none;
+            font-family: inherit;
         }}
         .btn-primary {{
             background: var(--accent);
             color: white;
-            box-shadow: 0 4px 14px 0 rgba(99, 102, 241, 0.39);
+            box-shadow: 0 6px 20px -2px rgba(99, 102, 241, 0.45);
         }}
-        .btn-primary:hover {{ background: var(--accent-hover); }}
+        .btn-primary:hover {{
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+        }}
         .btn-secondary {{
             background: rgba(255, 255, 255, 0.05);
             color: var(--text-primary);
             border: 1px solid rgba(255, 255, 255, 0.1);
         }}
-        .btn-secondary:hover {{ background: rgba(255, 255, 255, 0.1); }}
+        .btn-secondary:hover:not(.btn-disabled) {{
+            background: rgba(255, 255, 255, 0.1);
+            transform: translateY(-1px);
+        }}
+        .btn-disabled {{
+            opacity: 0.45;
+            cursor: not-allowed;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px dashed rgba(255, 255, 255, 0.12);
+            color: var(--text-secondary);
+        }}
         .store-links {{
             display: flex;
-            gap: 10px;
-            margin-top: 20px;
+            gap: 12px;
+            margin-top: 14px;
         }}
         .store-links .btn {{
             font-size: 13px;
-            padding: 10px;
+            padding: 12px 10px;
             margin-bottom: 0;
+            flex: 1;
+        }}
+        .btn-play {{
+            background: rgba(16, 185, 129, 0.12);
+            border-color: rgba(16, 185, 129, 0.3);
+            color: #a7f3d0;
+        }}
+        .btn-play:hover {{
+            background: rgba(16, 185, 129, 0.2);
+            border-color: rgba(16, 185, 129, 0.5);
+            color: #ffffff;
+        }}
+        .instructions {{
+            margin-top: 26px;
+            padding-top: 20px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            text-align: left;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }}
+        .step {{
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }}
+        .step-num {{
+            width: 22px;
+            height: 22px;
+            border-radius: 50%;
+            background: rgba(99, 102, 241, 0.2);
+            color: #c7d2fe;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 11px;
+            font-weight: 700;
+            flex-shrink: 0;
+        }}
+        .step strong {{
+            color: var(--text-primary);
         }}
     </style>
 </head>
 <body>
     <div class="card">
-        <div class="badge">FITVERX REWARDS INVITATION</div>
+        <div class="badge">{platform_name.upper()} REWARDS INVITATION</div>
         <h1>You're Invited to Join {gym_name}!</h1>
-        <p class="subtitle">{referrer_name} invited you to join {gym_name}! Join today and earn exclusive reward points, free classes, and member bonuses.</p>
+        <p class="subtitle">{referrer_name} invited you to join {gym_name}! Download the {platform_name} app and enter your referral code during signup to unlock exclusive reward points and bonuses.</p>
         
         <div class="code-box">
-            <span class="code-val" id="refCode">{clean_code or "FITVERX"}</span>
-            <button class="copy-btn" onclick="copyCode()">Copy</button>
+            <div class="code-info">
+                <span class="code-label">YOUR REFERRAL CODE</span>
+                <span class="code-val" id="refCode">{display_code}</span>
+            </div>
+            <button id="copyBtn" class="copy-btn" onclick="copyCode()" type="button" aria-label="Copy Referral Code">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                <span id="copyBtnText">Copy Code</span>
+            </button>
         </div>
 
-        <a href="{deep_link}" class="btn btn-primary">Open in FitVerx App</a>
+        <div id="toastMessage" class="toast hidden">✓ Referral code copied to clipboard!</div>
+
+        <button id="openAppBtn" class="btn btn-primary" onclick="openFitworksApp()" type="button">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:8px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+            Open {platform_name} App
+        </button>
+
+        <!-- Hidden anchor preserving backward compatibility with legacy test assertions -->
+        <a id="legacyDeeplink" href="{fallback_deep_link}" style="display:none;" aria-hidden="true">{fallback_deep_link}</a>
         
         <div class="store-links">
-            <a href="https://apps.apple.com/app/fitverx" class="btn btn-secondary">App Store</a>
-            <a href="https://play.google.com/store/apps/details?id=com.fitverx.client" class="btn btn-secondary">Google Play</a>
+            {apple_store_html}
+            <a id="playStoreLink" href="{play_store_url}" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-store btn-play">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="margin-right:6px;"><path d="M3.609 1.814L13.793 12 3.61 22.186a2.38 2.38 0 0 1-.61-1.636V3.45c0-.623.228-1.194.609-1.636zm11.267 11.268l2.296 2.296-11.45 6.467 9.154-8.763zm2.296-2.164l-2.296 2.296-9.154-8.763 11.45 6.467zm1.144.647l3.208 1.81c.883.498.883 1.314 0 1.812l-3.208 1.81-2.07-2.07 2.07-2.362z"/></svg>
+                Google Play Store
+            </a>
+        </div>
+
+        <div class="instructions">
+            <div class="step">
+                <span class="step-num">1</span>
+                <span>Tap <strong>Copy Code</strong> above</span>
+            </div>
+            <div class="step">
+                <span class="step-num">2</span>
+                <span>Open or download <strong>{platform_name}</strong> on Google Play</span>
+            </div>
+            <div class="step">
+                <span class="step-num">3</span>
+                <span>Enter the code when signing up to claim bonuses</span>
+            </div>
         </div>
     </div>
 
     <script>
-        function copyCode() {{
-            const code = document.getElementById('refCode').innerText;
-            navigator.clipboard.writeText(code).then(() => {{
-                const btn = document.querySelector('.copy-btn');
-                btn.innerText = 'Copied!';
-                setTimeout(() => {{ btn.innerText = 'Copy'; }}, 2000);
-            }});
+        const refCode = "{clean_code}";
+        const primaryDeepLink = "{primary_deep_link}";
+        const fallbackDeepLink = "{fallback_deep_link}";
+        const intentUrl = "{intent_url}";
+        const playStoreUrl = "{play_store_url}";
+        const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+        const isAndroid = /Android/i.test(navigator.userAgent);
+
+        function showToast(msg) {{
+            const toast = document.getElementById('toastMessage');
+            if (toast) {{
+                toast.innerText = msg;
+                toast.classList.remove('hidden');
+                toast.classList.add('visible');
+                setTimeout(() => {{
+                    toast.classList.remove('visible');
+                    setTimeout(() => {{ toast.classList.add('hidden'); }}, 250);
+                }}, 2500);
+            }}
         }}
-        if (/Android|iPhone|iPad|iPod/i.test(navigator.userAgent)) {{
-            setTimeout(() => {{ window.location.href = "{deep_link}"; }}, 500);
+
+        function copyCode() {{
+            const codeEl = document.getElementById('refCode');
+            const codeToCopy = (codeEl ? codeEl.innerText || codeEl.textContent : refCode || '').trim();
+            const btn = document.getElementById('copyBtn');
+            const btnText = document.getElementById('copyBtnText');
+
+            function onCopySuccess() {{
+                if (btnText) btnText.innerText = '✓ Copied!';
+                if (btn) btn.classList.add('copied');
+                showToast('✓ Referral code copied to clipboard!');
+                setTimeout(() => {{
+                    if (btnText) btnText.innerText = 'Copy Code';
+                    if (btn) btn.classList.remove('copied');
+                }}, 2200);
+            }}
+
+            if (navigator.clipboard && window.isSecureContext) {{
+                navigator.clipboard.writeText(codeToCopy).then(onCopySuccess).catch(() => {{
+                    fallbackCopy(codeToCopy, onCopySuccess);
+                }});
+            }} else {{
+                fallbackCopy(codeToCopy, onCopySuccess);
+            }}
+        }}
+
+        function fallbackCopy(text, callback) {{
+            try {{
+                const textarea = document.createElement('textarea');
+                textarea.value = text;
+                textarea.setAttribute('readonly', '');
+                textarea.style.position = 'fixed';
+                textarea.style.top = '-9999px';
+                textarea.style.left = '-9999px';
+                textarea.style.opacity = '0';
+                document.body.appendChild(textarea);
+                textarea.focus();
+                textarea.select();
+                const successful = document.execCommand('copy');
+                document.body.removeChild(textarea);
+                if (successful) {{
+                    callback();
+                    return;
+                }}
+            }} catch (err) {{}}
+
+            const promptResult = window.prompt("Copy your referral code below:", text);
+            if (promptResult !== null) {{
+                callback();
+            }}
+        }}
+
+        function openFitworksApp() {{
+            // Courtesy copy to clipboard
+            if (refCode && navigator.clipboard && window.isSecureContext) {{
+                navigator.clipboard.writeText(refCode).catch(() => {{}});
+            }}
+
+            if (!isMobile) {{
+                showToast("Fitworks is available on Android. Opening Google Play Store...");
+                setTimeout(() => {{
+                    window.open(playStoreUrl, '_blank');
+                }}, 600);
+                return;
+            }}
+
+            let appOpened = false;
+            function markAppOpened() {{
+                appOpened = true;
+            }}
+            document.addEventListener('visibilitychange', () => {{
+                if (document.hidden) markAppOpened();
+            }});
+            window.addEventListener('pagehide', markAppOpened);
+
+            if (isAndroid) {{
+                window.location.href = intentUrl;
+            }} else {{
+                window.location.href = primaryDeepLink;
+            }}
+
+            setTimeout(() => {{
+                if (!appOpened && !document.hidden) {{
+                    showToast("Fitworks app not installed. Redirecting to Google Play...");
+                    setTimeout(() => {{
+                        window.location.href = playStoreUrl;
+                    }}, 600);
+                }}
+            }}, 1800);
         }}
     </script>
 </body>

@@ -118,7 +118,7 @@ class ReferralService:
 
         # Referee is not registered yet: create a PENDING invitation record
         referral_code = cls.get_or_create_referral_code(referrer)
-        referral_link = f"{base_url}/join?ref={referral_code}" if base_url else f"/join?ref={referral_code}"
+        referral_link = f"{base_url}/join/{referral_code}" if base_url else f"/join/{referral_code}"
 
         with transaction.atomic():
             invitation, _ = ClientReferral.all_objects.update_or_create(
@@ -137,23 +137,24 @@ class ReferralService:
 
         # Dispatch invitation email
         try:
+            platform_name = getattr(settings, 'PLATFORM_NAME', 'Fitworks')
             referrer_name = ""
             if hasattr(referrer, 'profile') and referrer.profile:
                 referrer_name = referrer.profile.nickname or f"{referrer.profile.first_name} {referrer.profile.last_name}".strip()
             if not referrer_name:
                 referrer_name = referrer.email.split('@')[0]
 
-            gym_name = tenant.name if tenant else "FitVerx"
-            subject = f"{referrer_name} invited you to join {gym_name} on FitVerx!"
+            gym_name = tenant.name if tenant else platform_name
+            subject = f"{referrer_name} invited you to join {gym_name} on {platform_name}!"
             message = (
                 f"Hi,\n\n"
-                f"{referrer_name} has invited you to join {gym_name} on FitVerx.\n\n"
+                f"{referrer_name} has invited you to join {gym_name} on {platform_name}.\n\n"
                 f"Use referral code: {referral_code}\n"
                 f"Or sign up directly using this link:\n{referral_link}\n\n"
                 f"Both you and {referrer_name} will earn reward points when you join!\n\n"
                 f"Best regards,\nTeam {gym_name}"
             )
-            from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@fitverx.com')
+            from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@fitworks.com')
             send_mail(
                 subject=subject,
                 message=message,
