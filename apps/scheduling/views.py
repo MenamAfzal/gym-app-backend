@@ -45,6 +45,7 @@ from .permissions import (
     IsInstructor, IsClient, IsAssignedClient
 )
 from apps.users.models import User, UserRole
+from apps.users.permission_service import PermissionService
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,19 @@ class LocationViewSet(viewsets.ModelViewSet):
         user = self.request.user
         if getattr(user, 'role', None) in [UserRole.TRAINER, UserRole.FRONT_DESK]:
             qs = qs.filter(location_staff__staff=user).distinct()
+        elif getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(user)
+            if manager_loc_ids is not None:
+                qs = qs.filter(id__in=manager_loc_ids)
         return qs
+
+    def perform_create(self, serializer):
+        tenant = getattr(self.request, 'tenant', None) or getattr(self.request.user, 'tenant', None)
+        location = serializer.save(tenant=tenant)
+        user = self.request.user
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            StaffLocation.objects.get_or_create(staff=user, location=location, tenant=tenant)
 
 
 class RoomViewSet(viewsets.ModelViewSet):
@@ -110,7 +123,12 @@ class RoomViewSet(viewsets.ModelViewSet):
             qs = Room.objects.alive().select_related('location')
 
         user = self.request.user
-        if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(user)
+            if manager_loc_ids is not None:
+                qs = qs.filter(location_id__in=manager_loc_ids)
+        elif getattr(user, 'role', None) in [UserRole.TRAINER, UserRole.FRONT_DESK]:
             qs = qs.filter(location__location_staff__staff=user).distinct()
             
         location_id = self.kwargs.get('location_pk') or self.request.query_params.get('location')
@@ -121,6 +139,13 @@ class RoomViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         tenant = getattr(self.request, 'tenant', None) or self.request.user.tenant
         location_pk = self.kwargs.get('location_pk')
+        loc = serializer.validated_data.get('location')
+        target_loc_id = loc.id if loc else location_pk
+        user = self.request.user
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.is_manager_assigned_to_location(user, target_loc_id):
+                raise serializers.ValidationError({"location": "You are not assigned to this location."})
         if location_pk and not serializer.validated_data.get('location'):
             serializer.save(tenant=tenant, location_id=location_pk)
         elif serializer.validated_data.get('location'):
@@ -161,7 +186,12 @@ class SpotTypeViewSet(viewsets.ModelViewSet):
         qs = qs.select_related('location').prefetch_related('spots')
 
         user = self.request.user
-        if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(user)
+            if manager_loc_ids is not None:
+                qs = qs.filter(location_id__in=manager_loc_ids)
+        elif getattr(user, 'role', None) in [UserRole.TRAINER, UserRole.FRONT_DESK]:
             qs = qs.filter(location__location_staff__staff=user).distinct()
 
         location_id = self.kwargs.get('location_pk') or self.request.query_params.get('location')
@@ -199,6 +229,13 @@ class SpotTypeViewSet(viewsets.ModelViewSet):
             or get_current_tenant()
         )
         location_pk = self.kwargs.get('location_pk')
+        loc = serializer.validated_data.get('location')
+        target_loc_id = loc.id if loc else location_pk
+        user = self.request.user
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.is_manager_assigned_to_location(user, target_loc_id):
+                raise serializers.ValidationError({"location": "You are not assigned to this location."})
         if location_pk and not serializer.validated_data.get('location'):
             serializer.save(tenant=tenant, location_id=location_pk)
         elif serializer.validated_data.get('location'):
@@ -265,6 +302,13 @@ class RoomLayoutViewSet(viewsets.ModelViewSet):
         else:
             qs = RoomLayout.objects.alive().select_related('room', 'room__location')
 
+        user = getattr(self.request, 'user', None)
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(user)
+            if manager_loc_ids is not None:
+                qs = qs.filter(room__location_id__in=manager_loc_ids)
+
         qs = qs.prefetch_related('spots__spot_type')
         room_id = self.kwargs.get('room_pk') or self.request.query_params.get('room')
         if room_id:
@@ -281,6 +325,11 @@ class RoomLayoutViewSet(viewsets.ModelViewSet):
             data['room'] = Room.objects.get(id=self.kwargs['room_pk'])
         elif not data.get('room'):
             raise serializers.ValidationError({"room": "Room is required."})
+
+        if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.is_manager_assigned_to_location(request.user, data['room'].location_id):
+                raise serializers.ValidationError({"room": "You are not assigned to this location."})
 
         try:
             layout = create_layout(
@@ -350,6 +399,13 @@ class StaffLocationViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = StaffLocation.objects.select_related('staff', 'staff__profile', 'location')
+        user = getattr(self.request, 'user', None)
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(user)
+            if manager_loc_ids is not None:
+                qs = qs.filter(location_id__in=manager_loc_ids)
+
         location_id = self.request.query_params.get('location') or self.request.query_params.get('location_id')
         if location_id:
             qs = qs.filter(location_id=location_id)
@@ -357,6 +413,17 @@ class StaffLocationViewSet(viewsets.ModelViewSet):
         if staff_id:
             qs = qs.filter(staff_id=staff_id)
         return qs
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if getattr(instance.staff, 'role', None) == UserRole.GYM_MANAGER:
+            remaining = StaffLocation.objects.filter(staff=instance.staff).exclude(pk=instance.pk).count()
+            if remaining == 0:
+                return Response(
+                    {"detail": "Cannot remove the last assigned location from a Gym Manager. Every Manager must have at least one assigned location."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        return super().destroy(request, *args, **kwargs)
 
 
 class StaffAvailabilityViewSet(viewsets.ModelViewSet):
@@ -376,6 +443,16 @@ class StaffAvailabilityViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = StaffAvailability.objects.select_related('staff', 'staff__profile')
+        user = getattr(self.request, 'user', None)
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            manager_loc_ids = PermissionService.get_manager_location_ids(user)
+            if manager_loc_ids is not None:
+                qs = qs.filter(
+                    Q(staff=user) |
+                    Q(staff__staff_locations__location_id__in=manager_loc_ids) |
+                    Q(staff__profile__primary_location_id__in=manager_loc_ids)
+                ).distinct()
+
         staff_id = self.request.query_params.get('staff')
         if staff_id:
             qs = qs.filter(staff_id=staff_id)
@@ -396,10 +473,23 @@ class ClassTemplateViewSet(viewsets.ModelViewSet):
     permission_classes = [IsOwnerOrManager]
 
     def get_queryset(self):
-        return ClassTemplate.objects.select_related('location')
+        qs = ClassTemplate.objects.select_related('location')
+        user = getattr(self.request, 'user', None)
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(user)
+            if manager_loc_ids is not None:
+                qs = qs.filter(location_id__in=manager_loc_ids)
+        return qs
 
     def perform_create(self, serializer):
         tenant = getattr(self.request, 'tenant', None) or getattr(self.request.user, 'tenant', None)
+        user = self.request.user
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            loc = serializer.validated_data.get('location')
+            if loc and not PermissionService.is_manager_assigned_to_location(user, loc.id):
+                raise serializers.ValidationError({"location": "You are not assigned to this location."})
         serializer.save(tenant=tenant)
 
 
@@ -411,7 +501,14 @@ class RecurrenceRuleViewSet(viewsets.ModelViewSet):
     permission_classes = [IsOwnerOrManager]
 
     def get_queryset(self):
-        return RecurrenceRule.objects.select_related('template', 'room', 'staff', 'staff__profile')
+        qs = RecurrenceRule.objects.select_related('template', 'room', 'staff', 'staff__profile')
+        user = getattr(self.request, 'user', None)
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(user)
+            if manager_loc_ids is not None:
+                qs = qs.filter(template__location_id__in=manager_loc_ids)
+        return qs
 
     @transaction.atomic
     def perform_create(self, serializer):
@@ -421,6 +518,9 @@ class RecurrenceRuleViewSet(viewsets.ModelViewSet):
             if not PermissionService.has_permission(user, 'scheduling', 'sessions', 'create'):
                 from rest_framework.exceptions import PermissionDenied
                 raise PermissionDenied("You do not have permission to create sessions.")
+            tpl = serializer.validated_data.get('template')
+            if tpl and not PermissionService.is_manager_assigned_to_location(user, tpl.location_id):
+                raise serializers.ValidationError({"template": "You are not assigned to this location."})
         rule = serializer.save()
         
         # Expand RecurrenceRule into ClassSession rows
@@ -518,10 +618,10 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
         if getattr(user, 'role', None) in [UserRole.TRAINER, UserRole.FRONT_DESK]:
             qs = qs.filter(template__location__location_staff__staff=user).distinct()
         elif getattr(user, 'role', None) == UserRole.GYM_MANAGER:
-            from apps.scheduling.models import StaffLocation
-            assigned_locations = StaffLocation.all_objects.filter(staff=user).values_list('location_id', flat=True)
-            if assigned_locations.exists():
-                qs = qs.filter(template__location_id__in=assigned_locations).distinct()
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(user)
+            if manager_loc_ids is not None:
+                qs = qs.filter(template__location_id__in=manager_loc_ids).distinct()
             
         params = self.request.query_params
         
@@ -579,6 +679,15 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
             qs = qs.filter(room_id=room_id)
 
         return qs
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            template = serializer.validated_data.get('template')
+            if template and not PermissionService.is_manager_assigned_to_location(user, template.location_id):
+                raise serializers.ValidationError({"template": "You are not assigned to this location."})
+        serializer.save(tenant=getattr(self.request, 'tenant', None) or user.tenant)
 
     def update(self, request, *args, **kwargs):
         if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
@@ -934,7 +1043,12 @@ class BookingViewSet(viewsets.ModelViewSet):
         # 3. Role-based scoping
         if user.role == UserRole.CLIENT:
             qs = qs.filter(client=user)
-        elif user.role in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
+        elif user.role == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(user)
+            if manager_loc_ids is not None:
+                qs = qs.filter(session__template__location_id__in=manager_loc_ids).distinct()
+        elif user.role == UserRole.FRONT_DESK:
             from apps.scheduling.models import StaffLocation
             assigned_locations = StaffLocation.all_objects.filter(staff=user).values_list('location_id', flat=True)
             if assigned_locations.exists():
@@ -1485,6 +1599,11 @@ class WaitlistViewSet(viewsets.ModelViewSet):
         qs = Waitlist.objects.select_related('client', 'client__profile', 'session', 'session__template')
         if user.role == UserRole.CLIENT:
             qs = qs.filter(client=user)
+        elif user.role == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(user)
+            if manager_loc_ids is not None:
+                qs = qs.filter(session__template__location_id__in=manager_loc_ids).distinct()
         
         client_id = self.request.query_params.get('client')
         if client_id:
@@ -1496,8 +1615,12 @@ class WaitlistViewSet(viewsets.ModelViewSet):
         session_id = request.data.get('session')
         session = get_object_or_404(ClassSession, id=session_id)
 
+        if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            if not PermissionService.is_manager_assigned_to_location(request.user, session.template.location_id):
+                return Response({"detail": "You are not assigned to this location."}, status=status.HTTP_403_FORBIDDEN)
+
         # Determine target waitlist client
-        from apps.users.models import UserRole
         is_staff = request.user.is_staff or request.user.role != UserRole.CLIENT
 
         target_client = request.user
@@ -1548,7 +1671,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
 
         user = self.request.user
         qs = Appointment.objects.select_related('provider', 'provider__profile', 'client', 'client__profile', 'location', 'room')
-        if user.role == UserRole.CLIENT:
+        manager_loc_ids = PermissionService.get_manager_location_ids(user)
+        if manager_loc_ids is not None:
+            qs = qs.filter(location_id__in=manager_loc_ids)
+        elif user.role == UserRole.CLIENT:
             qs = qs.filter(client=user)
         elif user.role in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
             qs = qs.filter(location__location_staff__staff=user).distinct()
@@ -1695,6 +1821,12 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             )
 
         location = data['location']
+        manager_loc_ids = PermissionService.get_manager_location_ids(request.user)
+        if manager_loc_ids is not None and location.id not in manager_loc_ids:
+            return Response(
+                {"detail": "You do not have permission to book appointments for this location."},
+                status=status.HTTP_403_FORBIDDEN
+            )
         room = data.get('room')
         if room and room.location_id != location.id:
             return Response({"detail": "Selected room does not belong to the selected location."}, status=status.HTTP_400_BAD_REQUEST)
@@ -1803,17 +1935,28 @@ class SubstituteRequestViewSet(viewsets.ModelViewSet):
         return [IsGymStaffOrOwner()]
 
     def get_queryset(self):
-        return SubstituteRequest.objects.select_related(
+        qs = SubstituteRequest.objects.select_related(
             'session', 'session__template', 'session__template__location',
             'session__room', 'session__staff', 'session__staff__profile',
             'requested_by_staff', 'requested_by_staff__profile',
             'accepted_by_staff', 'accepted_by_staff__profile'
         )
+        manager_loc_ids = PermissionService.get_manager_location_ids(self.request.user)
+        if manager_loc_ids is not None:
+            qs = qs.filter(session__template__location_id__in=manager_loc_ids)
+        return qs
 
     @transaction.atomic
     def create(self, request, *args, **kwargs):
         session_id = request.data.get('session')
         session = get_object_or_404(ClassSession, id=session_id)
+
+        manager_loc_ids = PermissionService.get_manager_location_ids(request.user)
+        if manager_loc_ids is not None and session.template.location_id not in manager_loc_ids:
+            return Response(
+                {"detail": "You do not have permission to request substitutes for this location."},
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         # Determine if user is owner/manager
         from apps.users.models import UserRole
@@ -1909,10 +2052,21 @@ class PackageTypeViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = PackageType.objects.all()
+        manager_loc_ids = PermissionService.get_manager_location_ids(self.request.user)
+        if manager_loc_ids is not None:
+            qs = qs.filter(location_id__in=manager_loc_ids)
         location_id = self.request.query_params.get('location')
         if location_id:
             qs = qs.filter(location_id=location_id)
         return qs
+
+    @transaction.atomic
+    def perform_create(self, serializer):
+        manager_loc_ids = PermissionService.get_manager_location_ids(self.request.user)
+        location = serializer.validated_data.get('location')
+        if manager_loc_ids is not None and location and location.id not in manager_loc_ids:
+            raise PermissionDenied("You cannot create package types for an unassigned location.")
+        serializer.save(tenant=self.request.tenant)
 
     @action(detail=False, methods=['get'], url_path='stats', permission_classes=[IsOwnerOrManager])
     def stats(self, request):
@@ -1920,6 +2074,13 @@ class PackageTypeViewSet(viewsets.ModelViewSet):
         from apps.scheduling.models import Package, PackageType
 
         active_packages = Package.objects.filter(status='active')
+        package_types = PackageType.objects.all()
+
+        manager_loc_ids = PermissionService.get_manager_location_ids(request.user)
+        if manager_loc_ids is not None:
+            active_packages = active_packages.filter(package_type__location_id__in=manager_loc_ids)
+            package_types = package_types.filter(location_id__in=manager_loc_ids)
+
         total_subscribers = active_packages.values('client').distinct().count()
 
         from django.db.models.functions import Coalesce
@@ -1930,7 +2091,7 @@ class PackageTypeViewSet(viewsets.ModelViewSet):
 
         packages_stats = []
         from django.db.models import Count
-        package_types = PackageType.objects.annotate(
+        package_types = package_types.annotate(
             active_subscribers=Count('purchased_packages', filter=Q(purchased_packages__status='active'))
         )
         for pt in package_types:
@@ -1968,6 +2129,10 @@ class PackageViewSet(viewsets.ModelViewSet):
 
     @transaction.atomic
     def perform_create(self, serializer):
+        manager_loc_ids = PermissionService.get_manager_location_ids(self.request.user)
+        package_type = serializer.validated_data.get('package_type')
+        if manager_loc_ids is not None and package_type and package_type.location_id and package_type.location_id not in manager_loc_ids:
+            raise PermissionDenied("You cannot assign packages for an unassigned location.")
         serializer.save(tenant=self.request.tenant)
 
     def get_permissions(self):
@@ -1979,6 +2144,9 @@ class PackageViewSet(viewsets.ModelViewSet):
         qs = Package.objects.select_related(
             'package_type', 'package_type__location', 'client', 'client__profile', 'assigned_by'
         )
+        manager_loc_ids = PermissionService.get_manager_location_ids(self.request.user)
+        if manager_loc_ids is not None:
+            qs = qs.filter(package_type__location_id__in=manager_loc_ids)
         client_id = self.request.query_params.get('client')
         if client_id:
             qs = qs.filter(client_id=client_id)
@@ -2017,6 +2185,11 @@ class ReportsView(APIView):
         else:
             end_date = parse_date(end_date)
 
+        manager_loc_ids = PermissionService.get_manager_location_ids(request.user)
+        if manager_loc_ids is not None:
+            if location_id and location_id not in [str(lid) for lid in manager_loc_ids]:
+                return Response({"detail": "You do not have access to this location."}, status=403)
+
         if report_type == 'fill-rate':
             # Count bookings on completed/scheduled sessions
             sessions = ClassSession.objects.filter(
@@ -2025,6 +2198,8 @@ class ReportsView(APIView):
             )
             if location_id:
                 sessions = sessions.filter(template__location_id=location_id)
+            elif manager_loc_ids is not None:
+                sessions = sessions.filter(template__location_id__in=manager_loc_ids)
 
             data = []
             for s in sessions:
@@ -2046,6 +2221,8 @@ class ReportsView(APIView):
             )
             if location_id:
                 bookings = bookings.filter(session__template__location_id=location_id)
+            elif manager_loc_ids is not None:
+                bookings = bookings.filter(session__template__location_id__in=manager_loc_ids)
 
             total = bookings.count()
             no_shows = bookings.filter(status='no_show').count()
@@ -2062,6 +2239,8 @@ class ReportsView(APIView):
             instructors = User.objects.filter(role__in=['trainer', 'gym_owner', 'gym_manager'])
             if location_id:
                 instructors = instructors.filter(staff_locations__location_id=location_id)
+            elif manager_loc_ids is not None:
+                instructors = instructors.filter(staff_locations__location_id__in=manager_loc_ids).distinct()
 
             data = []
             for inst in instructors:
@@ -2081,6 +2260,8 @@ class ReportsView(APIView):
                     start_at__date__lte=end_date,
                     status='scheduled'
                 )
+                if manager_loc_ids is not None:
+                    sessions = sessions.filter(template__location_id__in=manager_loc_ids)
                 booked_hours = sum([s.template.duration_min for s in sessions]) / 60.0
 
                 data.append({
@@ -2097,6 +2278,14 @@ class ReportsView(APIView):
             from apps.scheduling.models import Package, PackageType
 
             active_packages = Package.objects.filter(status='active')
+            package_types = PackageType.objects.all()
+            if location_id:
+                active_packages = active_packages.filter(package_type__location_id=location_id)
+                package_types = package_types.filter(location_id=location_id)
+            elif manager_loc_ids is not None:
+                active_packages = active_packages.filter(package_type__location_id__in=manager_loc_ids)
+                package_types = package_types.filter(location_id__in=manager_loc_ids)
+
             total_subscribers = active_packages.values('client').distinct().count()
 
             from django.db.models.functions import Coalesce
@@ -2106,7 +2295,6 @@ class ReportsView(APIView):
             )['val'] or decimal.Decimal('0.00')
 
             packages_stats = []
-            package_types = PackageType.objects.all()
             for pt in package_types:
                 count = pt.purchased_packages.filter(status='active').count()
                 packages_stats.append({
@@ -2134,6 +2322,12 @@ class StaffAssignmentViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
         queryset = StaffClientAssignment.objects.all().select_related('staff__profile', 'client__profile')
+        manager_loc_ids = PermissionService.get_manager_location_ids(user)
+        if manager_loc_ids is not None:
+            return queryset.filter(
+                Q(staff__staff_locations__location_id__in=manager_loc_ids) |
+                Q(client__profile__primary_location_id__in=manager_loc_ids)
+            ).distinct()
         if user.role == UserRole.TRAINER:
             return queryset.filter(staff=user)
         elif user.role in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER]:
@@ -2146,6 +2340,14 @@ class StaffAssignmentViewSet(viewsets.ModelViewSet):
         client_ids = request.data.get('clients', [])
 
         staff = get_object_or_404(User, id=staff_id, role='trainer', tenant=request.tenant)
+        manager_loc_ids = PermissionService.get_manager_location_ids(request.user)
+        if manager_loc_ids is not None:
+            if not StaffLocation.objects.filter(staff=staff, location_id__in=manager_loc_ids).exists():
+                return Response(
+                    {"detail": "You do not have permission to assign this staff member."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
         valid_clients = User.objects.filter(
             id__in=client_ids, 
             role='client', 
@@ -2186,6 +2388,9 @@ class ViewAllClientsAPIView(APIView):
         qs = User.objects.filter(role='client').select_related('profile')
         if request.user.tenant:
             qs = qs.filter(tenant=request.user.tenant)
+        manager_loc_ids = PermissionService.get_manager_location_ids(request.user)
+        if manager_loc_ids is not None:
+            qs = qs.filter(profile__primary_location_id__in=manager_loc_ids)
 
         if status_filter.lower() == 'active':
             qs = qs.filter(is_active=True)
@@ -2215,11 +2420,18 @@ class FacilityAccessViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = self.queryset.select_related('client', 'client__profile', 'location')
         user = self.request.user
-        if getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
+        manager_loc_ids = PermissionService.get_manager_location_ids(user)
+        if manager_loc_ids is not None:
+            qs = qs.filter(location_id__in=manager_loc_ids)
+        elif getattr(user, 'role', None) in [UserRole.GYM_MANAGER, UserRole.FRONT_DESK]:
             qs = qs.filter(location__location_staff__staff=user).distinct()
         return qs
 
     def perform_create(self, serializer):
+        manager_loc_ids = PermissionService.get_manager_location_ids(self.request.user)
+        location = serializer.validated_data.get('location')
+        if manager_loc_ids is not None and location and location.id not in manager_loc_ids:
+            raise PermissionDenied("You do not have permission to log facility access for this location.")
         access_log = serializer.save()
         try:
             from apps.rewards.events import RewardEvent
@@ -2521,9 +2733,12 @@ class EventViewSet(viewsets.ModelViewSet):
             'location', 'room', 'primary_instructor', 'primary_instructor__profile'
         ).prefetch_related(*prefetch_list)
 
-        params = self.request.query_params
-
         # Location filter
+        params = self.request.query_params
+        manager_loc_ids = PermissionService.get_manager_location_ids(user)
+        if manager_loc_ids is not None:
+            qs = qs.filter(location_id__in=manager_loc_ids)
+
         location = params.get('location') or params.get('location_id')
         if location:
             qs = qs.filter(location_id=location)
@@ -2573,6 +2788,13 @@ class EventViewSet(viewsets.ModelViewSet):
             ).distinct()
 
         return qs
+
+    def perform_create(self, serializer):
+        manager_loc_ids = PermissionService.get_manager_location_ids(self.request.user)
+        location = serializer.validated_data.get('location')
+        if manager_loc_ids and location and location.id not in manager_loc_ids:
+            raise PermissionDenied("You do not have permission to create events for this location.")
+        serializer.save()
 
     @action(detail=True, methods=['post'], url_path='enroll')
     def enroll(self, request, pk=None):
@@ -2839,6 +3061,10 @@ class EventEnrollmentViewSet(viewsets.ReadOnlyModelViewSet):
             'credit_source',
             'credit_source__package_type'
         )
+        manager_loc_ids = PermissionService.get_manager_location_ids(user)
+        if manager_loc_ids is not None:
+            qs = qs.filter(event__location_id__in=manager_loc_ids)
+
         if getattr(user, 'role', None) in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.TRAINER, UserRole.FRONT_DESK]:
             # Staff can filter by event_id or client_id
             event_id = self.request.query_params.get('event') or self.request.query_params.get('event_id')

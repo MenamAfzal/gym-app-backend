@@ -34,6 +34,10 @@ PERMISSION_CATALOG = {
                 'label': 'Bookings',
                 'actions': ['view', 'create', 'edit', 'delete', 'check_in']
             },
+            'appointments': {
+                'label': 'Appointments',
+                'actions': ['view', 'create', 'edit', 'delete']
+            },
             'waitlist': {
                 'label': 'Waitlist',
                 'actions': ['view', 'create', 'edit', 'delete']
@@ -45,6 +49,18 @@ PERMISSION_CATALOG = {
             'staff_availability': {
                 'label': 'Staff Availability',
                 'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'facility_access': {
+                'label': 'Facility Access & Check-ins',
+                'actions': ['view', 'create', 'check_out']
+            },
+            'staff_assignments': {
+                'label': 'Staff Client Assignments',
+                'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'reports': {
+                'label': 'Reports & Utilization',
+                'actions': ['view']
             },
             'booking_settings': {
                 'label': 'Booking Settings',
@@ -66,6 +82,14 @@ PERMISSION_CATALOG = {
             'workout_logs': {
                 'label': 'Workout Logs',
                 'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'playlists': {
+                'label': 'Music Playlists',
+                'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'assignments': {
+                'label': 'Workout Assignments',
+                'actions': ['view', 'create', 'delete']
             }
         }
     },
@@ -86,6 +110,14 @@ PERMISSION_CATALOG = {
             },
             'gateways': {
                 'label': 'Payment Gateways',
+                'actions': ['view', 'edit']
+            },
+            'payouts': {
+                'label': 'Payouts & Transfers',
+                'actions': ['view']
+            },
+            'billing': {
+                'label': 'SaaS Subscription & Billing',
                 'actions': ['view', 'edit']
             }
         }
@@ -110,8 +142,20 @@ PERMISSION_CATALOG = {
     'rewards': {
         'label': 'Rewards & Loyalty',
         'resources': {
+            'programs': {
+                'label': 'Reward Programs',
+                'actions': ['view', 'create', 'edit', 'delete']
+            },
             'rules': {
                 'label': 'Reward Rules',
+                'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'badges': {
+                'label': 'Badges & Achievements',
+                'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'tiers': {
+                'label': 'Reward Tiers',
                 'actions': ['view', 'create', 'edit', 'delete']
             },
             'store_items': {
@@ -124,6 +168,14 @@ PERMISSION_CATALOG = {
             },
             'redemptions': {
                 'label': 'Redemptions',
+                'actions': ['view', 'edit']
+            },
+            'analytics': {
+                'label': 'Reward Analytics',
+                'actions': ['view']
+            },
+            'referrals': {
+                'label': 'Referral Programs',
                 'actions': ['view', 'edit']
             }
         }
@@ -142,6 +194,14 @@ PERMISSION_CATALOG = {
             'automations': {
                 'label': 'Automations',
                 'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'groups': {
+                'label': 'Notification Groups',
+                'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'settings': {
+                'label': 'Notification Settings',
+                'actions': ['view', 'edit']
             }
         }
     },
@@ -164,6 +224,18 @@ PERMISSION_CATALOG = {
             'meals': {
                 'label': 'Meals & Plans',
                 'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'recipes': {
+                'label': 'Staff & Client Recipes',
+                'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'goals': {
+                'label': 'Nutrition & Macro Goals',
+                'actions': ['view', 'create', 'edit']
+            },
+            'food_logs': {
+                'label': 'Client Food Logs',
+                'actions': ['view']
             }
         }
     },
@@ -177,6 +249,10 @@ PERMISSION_CATALOG = {
             'groups': {
                 'label': 'Groups',
                 'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'moderation': {
+                'label': 'Moderation & Reports',
+                'actions': ['view', 'moderate']
             }
         }
     },
@@ -198,7 +274,11 @@ PERMISSION_CATALOG = {
             },
             'clients': {
                 'label': 'Clients Directory',
-                'actions': ['view', 'edit']
+                'actions': ['view', 'create', 'edit', 'delete']
+            },
+            'staff_requests': {
+                'label': 'Staff Registration Requests',
+                'actions': ['view', 'approve', 'reject', 'delete']
             }
         }
     },
@@ -230,15 +310,11 @@ def get_permission_catalog():
     return PERMISSION_CATALOG
 
 
-VALID_ACTIONS_MAP = {
-    app: {res: set(res_data['actions']) for res, res_data in app_data['resources'].items()}
-    for app, app_data in PERMISSION_CATALOG.items()
-}
-
-
 def get_all_valid_actions():
-    return VALID_ACTIONS_MAP
-
+    return {
+        app: {res: set(res_data['actions']) for res, res_data in app_data['resources'].items()}
+        for app, app_data in PERMISSION_CATALOG.items()
+    }
 
 
 def sanitize_permissions(permissions_dict):

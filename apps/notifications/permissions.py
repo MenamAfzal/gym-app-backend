@@ -10,8 +10,9 @@ from apps.users.models import UserRole
 NOTIFICATIONS_RESOURCE_MAP = {
     'notification-campaign': 'campaigns',
     'notification-template': 'templates',
-    'notification-group': 'automations',
+    'notification-group': 'groups',
     'notification-automation': 'automations',
+    'notification-settings': 'settings',
 }
 
 NOTIFICATIONS_ACTION_MAP = {
@@ -36,8 +37,18 @@ class IsOwnerOrManager(permissions.BasePermission):
             return True
         if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
             from apps.users.permission_service import PermissionService
-            resource = getattr(view, 'permission_resource', None) or NOTIFICATIONS_RESOURCE_MAP.get(getattr(view, 'basename', ''), 'campaigns')
+            resource = getattr(view, 'permission_resource', None) or NOTIFICATIONS_RESOURCE_MAP.get(getattr(view, 'basename', ''), None)
+            if not resource:
+                view_name = view.__class__.__name__.lower()
+                if 'setting' in view_name:
+                    resource = 'settings'
+                elif 'group' in view_name:
+                    resource = 'groups'
+                else:
+                    resource = 'campaigns'
             action = getattr(view, 'action', None)
+            if not action and hasattr(request, 'method'):
+                action = 'list' if request.method in permissions.SAFE_METHODS else 'update' if request.method in ['PUT', 'PATCH'] else 'create'
             resolved_action = NOTIFICATIONS_ACTION_MAP.get(action, 'edit')
             return PermissionService.has_permission(user, 'notifications', resource, resolved_action)
         return False

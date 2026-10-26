@@ -30,11 +30,27 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 class UserSerializer(serializers.ModelSerializer):
     profile = UserProfileSerializer()
+    assigned_locations = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'email', 'role', 'profile', 'date_joined', 'is_active']
-        read_only_fields = ['id', 'email', 'role', 'date_joined', 'is_active']
+        fields = ['id', 'email', 'role', 'profile', 'assigned_locations', 'date_joined', 'is_active']
+        read_only_fields = ['id', 'email', 'role', 'assigned_locations', 'date_joined', 'is_active']
+
+    def get_assigned_locations(self, obj):
+        if not hasattr(obj, 'staff_locations'):
+            return []
+        try:
+            return [
+                {
+                    "id": str(sl.location.id),
+                    "name": sl.location.name,
+                    "address": getattr(sl.location, 'address', '')
+                }
+                for sl in obj.staff_locations.select_related('location').all()
+            ]
+        except Exception:
+            return []
 
 class CreateUserSerializer(serializers.Serializer):
     """
@@ -46,6 +62,11 @@ class CreateUserSerializer(serializers.Serializer):
     role = serializers.ChoiceField(choices=UserRole.choices)
     tenant_id = serializers.UUIDField(required=False)
     
+    # Location Assignment (Mandatory for Gym Managers)
+    location_ids = serializers.ListField(child=serializers.UUIDField(), required=False, allow_empty=True)
+    location_id = serializers.UUIDField(required=False, allow_null=True)
+    locations = serializers.ListField(required=False, allow_empty=True)
+
     # Basic Profile Fields
     nickname = serializers.CharField(required=False, allow_blank=True)
     bio = serializers.CharField(required=False, allow_blank=True)
@@ -76,9 +97,38 @@ class CreateUserSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         """
-        Cross-field validation if necessary.
+        Cross-field validation. Mandatory location assignment for Gym Manager.
         """
-        # Logic is handled in Service, but basic checks can go here.
+        role = attrs.get('role')
+        raw_locs = []
+        if attrs.get('location_ids'):
+            raw_locs.extend(attrs['location_ids'])
+        if attrs.get('location_id'):
+            raw_locs.append(attrs['location_id'])
+        if attrs.get('locations'):
+            for item in attrs['locations']:
+                if isinstance(item, dict) and 'id' in item:
+                    raw_locs.append(item['id'])
+                else:
+                    raw_locs.append(item)
+
+        clean_loc_ids = list(dict.fromkeys([str(l).strip() for l in raw_locs if l]))
+
+        request = self.context.get('request')
+        tenant = getattr(request, 'tenant', None) if request else None
+        tenant_has_locs = True
+        if tenant:
+            from apps.scheduling.models import Location
+            from apps.core.tenants.context import bypass_tenant_isolation
+            with bypass_tenant_isolation():
+                tenant_has_locs = Location.all_objects.filter(tenant=tenant).exists()
+
+        if role == UserRole.GYM_MANAGER and not clean_loc_ids and tenant_has_locs:
+            raise serializers.ValidationError({
+                "location_ids": "At least one location must be assigned when creating a Manager."
+            })
+
+        attrs['location_ids'] = clean_loc_ids
         return attrs
     
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -245,6 +295,11 @@ class RegistrationInitSerializer(serializers.Serializer):
     emergency_contact_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
     emergency_contact_phone = serializers.CharField(required=False, allow_blank=True, max_length=20)
 
+    # Location Assignment (Mandatory for Gym Managers)
+    location_ids = serializers.ListField(child=serializers.UUIDField(), required=False, allow_empty=True)
+    location_id = serializers.UUIDField(required=False, allow_null=True)
+    locations = serializers.ListField(required=False, allow_empty=True)
+
     # Referral Tracking
     referral_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
@@ -272,6 +327,26 @@ class RegistrationInitSerializer(serializers.Serializer):
             raise serializers.ValidationError("Tenant context required.")
             
         attrs['tenant'] = target_tenant
+
+        role = attrs.get('role')
+        raw_locs = []
+        if attrs.get('location_ids'):
+            raw_locs.extend(attrs['location_ids'])
+        if attrs.get('location_id'):
+            raw_locs.append(attrs['location_id'])
+        if attrs.get('locations'):
+            for item in attrs['locations']:
+                if isinstance(item, dict) and 'id' in item:
+                    raw_locs.append(item['id'])
+                else:
+                    raw_locs.append(item)
+
+        clean_loc_ids = list(dict.fromkeys([str(l).strip() for l in raw_locs if l]))
+        if role == UserRole.GYM_MANAGER and not clean_loc_ids:
+            raise serializers.ValidationError({
+                "location_ids": "At least one location must be assigned when creating a Manager."
+            })
+        attrs['location_ids'] = clean_loc_ids
         return attrs
 
 
@@ -1094,3 +1169,37 @@ class StaffRegistrationRequestApproveSerializer(serializers.Serializer):
         ],
         required=False
     )
+    location_ids = serializers.ListField(child=serializers.UUIDField(), required=False, allow_empty=True)
+    location_id = serializers.UUIDField(required=False, allow_null=True)
+    locations = serializers.ListField(required=False, allow_empty=True)
+
+    def validate(self, attrs):
+        role = attrs.get('role')
+        raw_locs = []
+        if attrs.get('location_ids'):
+            raw_locs.extend(attrs['location_ids'])
+        if attrs.get('location_id'):
+            raw_locs.append(attrs['location_id'])
+        if attrs.get('locations'):
+            for item in attrs['locations']:
+                if isinstance(item, dict) and 'id' in item:
+                    raw_locs.append(item['id'])
+                else:
+                    raw_locs.append(item)
+
+        clean_loc_ids = list(dict.fromkeys([str(l).strip() for l in raw_locs if l]))
+        request = self.context.get('request')
+        tenant = getattr(request, 'tenant', None) if request else None
+        tenant_has_locs = True
+        if tenant:
+            from apps.scheduling.models import Location
+            from apps.core.tenants.context import bypass_tenant_isolation
+            with bypass_tenant_isolation():
+                tenant_has_locs = Location.all_objects.filter(tenant=tenant).exists()
+
+        if role == UserRole.GYM_MANAGER and not clean_loc_ids and tenant_has_locs:
+            raise serializers.ValidationError({
+                "location_ids": "At least one location must be assigned when approving a Gym Manager."
+            })
+        attrs['location_ids'] = clean_loc_ids
+        return attrs

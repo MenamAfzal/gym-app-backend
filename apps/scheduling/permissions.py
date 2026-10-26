@@ -30,6 +30,16 @@ SCHEDULING_RESOURCE_MAP = {
     'substitute-request': 'substitutes',
     'substitutes': 'substitutes',
     'staff-availability': 'staff_availability',
+    'appointment': 'appointments',
+    'appointments': 'appointments',
+    'facility-access': 'facility_access',
+    'facility_access': 'facility_access',
+    'staff-assignment': 'staff_assignments',
+    'staff_assignment': 'staff_assignments',
+    'staff-assignments': 'staff_assignments',
+    'staff_assignments': 'staff_assignments',
+    'reports': 'reports',
+    'report': 'reports',
     'booking-settings': 'booking_settings',
     'settings': 'booking_settings',
 }
@@ -45,6 +55,10 @@ SCHEDULING_ACTION_MAP = {
     'cancel_event': 'cancel_event',
     'cancel_session': 'cancel_session',
     'check_in': 'check_in',
+    'check_out': 'check_out',
+    'bulk_assign': 'create',
+    'stats': 'view',
+    'fill_rate': 'view',
     'roster': 'roster',
     'enroll': 'roster',
     'accept': 'edit',
@@ -108,11 +122,30 @@ class IsGymStaffOrOwner(permissions.BasePermission):
 class IsFrontDeskOrAdmin(permissions.BasePermission):
     """
     Allows access to Gym Owners, Managers, and Front Desk staff (for check-ins, reporting).
+    For Gym Managers, checks ManagerPermissionPolicy if app/resource configured.
     """
     def has_permission(self, request, view):
-        if not request.user or not request.user.is_authenticated:
+        user = getattr(request, 'user', None)
+        if not user or not user.is_authenticated:
             return False
-        return request.user.role in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.FRONT_DESK]
+        if user.is_staff or user.is_superuser:
+            return True
+        if getattr(user, 'role', None) in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN]:
+            return True
+        if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            basename = getattr(view, 'basename', '')
+            view_name = view.__class__.__name__.lower()
+            if 'report' in basename or 'report' in view_name:
+                return PermissionService.has_permission(user, 'scheduling', 'reports', 'view')
+            if 'facility' in basename or 'facility' in view_name:
+                action = getattr(view, 'action', None)
+                if not action and hasattr(request, 'method'):
+                    action = 'view' if request.method in permissions.SAFE_METHODS else 'create'
+                resolved_action = SCHEDULING_ACTION_MAP.get(action, 'view')
+                return PermissionService.has_permission(user, 'scheduling', 'facility_access', resolved_action)
+            return True
+        return getattr(user, 'role', None) == UserRole.FRONT_DESK
 
 
 class IsInstructor(permissions.BasePermission):

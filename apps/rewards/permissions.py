@@ -15,10 +15,25 @@ class IsRewardAdminOrManager(permissions.BasePermission):
         if request.user.is_superuser or getattr(request.user, 'is_staff', False):
             return True
         user_role = getattr(request.user, 'role', '')
+        if user_role == UserRole.GYM_MANAGER:
+            view_name = view.__class__.__name__.lower()
+            resource = 'programs'
+            if 'badge' in view_name:
+                resource = 'badges'
+            elif 'tier' in view_name:
+                resource = 'tiers'
+            elif 'analytics' in view_name:
+                resource = 'analytics'
+            elif 'referral' in view_name:
+                resource = 'referrals'
+            
+            action = 'view' if request.method in permissions.SAFE_METHODS else 'edit' if request.method in ['PUT', 'PATCH'] else 'delete' if request.method == 'DELETE' else 'create'
+            from apps.users.permission_service import PermissionService
+            return PermissionService.has_permission(request.user, 'rewards', resource, action)
+
         return user_role in [
             UserRole.PLATFORM_ADMIN,
             UserRole.GYM_OWNER,
-            UserRole.GYM_MANAGER,
             'gym_admin',
             'admin',
             'owner'

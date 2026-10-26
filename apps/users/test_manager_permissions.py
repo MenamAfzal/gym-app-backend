@@ -4,7 +4,7 @@ from rest_framework.test import APIClient
 from apps.users.models import User, UserRole, ManagerPermissionPolicy
 from apps.core.tenants.models import Tenant
 from apps.users.permission_service import PermissionService
-from apps.scheduling.models import Location
+from apps.scheduling.models import Location, StaffLocation
 
 
 class ManagerPermissionTests(TestCase):
@@ -42,6 +42,11 @@ class ManagerPermissionTests(TestCase):
             name="Downtown",
             address="123 St",
             timezone="UTC"
+        )
+        StaffLocation.objects.create(
+            staff=self.manager_a,
+            location=self.location_a,
+            tenant=self.tenant_a
         )
         self.client = APIClient(HTTP_X_TENANT_ID=str(self.tenant_a.id))
 

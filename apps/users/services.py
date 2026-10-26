@@ -35,7 +35,7 @@ class UserService:
 
     @staticmethod
     @transaction.atomic
-    def create_user_with_profile(email, password, role, tenant=None, **profile_data):
+    def create_user_with_profile(email, password, role, tenant=None, location_ids=None, **profile_data):
         """
         Atomically creates a User and their UserProfile.
         
@@ -44,6 +44,7 @@ class UserService:
             password (str): Raw password
             role (str): UserRole constant
             tenant (Tenant, optional): Tenant instance. Required if role != PLATFORM_ADMIN.
+            location_ids (list, optional): Locations to assign. Mandatory if role == GYM_MANAGER.
             **profile_data: Arbitrary fields for UserProfile (nickname, bio, etc.)
             
         Returns:
@@ -55,6 +56,57 @@ class UserService:
             
         if User.objects.filter(email=email).exists():
             raise ValidationError("A user with this email already exists.")
+
+        # Extract and normalize location IDs
+        raw_locs = []
+        if location_ids:
+            if isinstance(location_ids, (list, set, tuple)):
+                raw_locs.extend(location_ids)
+            else:
+                raw_locs.append(location_ids)
+        if profile_data.get('location_ids'):
+            raw_locs.extend(profile_data.pop('location_ids'))
+        if profile_data.get('location_id'):
+            raw_locs.append(profile_data.pop('location_id'))
+        if profile_data.get('locations'):
+            locs_input = profile_data.pop('locations')
+            for item in locs_input:
+                if isinstance(item, dict) and 'id' in item:
+                    raw_locs.append(item['id'])
+                else:
+                    raw_locs.append(item)
+
+        clean_loc_ids = list(dict.fromkeys([str(l).strip() for l in raw_locs if l]))
+
+        # Enforce mandatory location assignment for Gym Managers if tenant has locations
+        tenant_has_locs = True
+        if tenant:
+            try:
+                from apps.scheduling.models import Location
+                from apps.core.tenants.context import bypass_tenant_isolation
+                with bypass_tenant_isolation():
+                    tenant_has_locs = Location.all_objects.filter(tenant=tenant).exists()
+            except Exception:
+                tenant_has_locs = True
+
+        if role == UserRole.GYM_MANAGER and not clean_loc_ids and tenant_has_locs:
+            raise ValidationError("At least one location must be assigned when creating a Manager.")
+
+        loc_objs = []
+        if clean_loc_ids:
+            try:
+                from apps.scheduling.models import Location
+                from apps.core.tenants.context import bypass_tenant_isolation
+                with bypass_tenant_isolation():
+                    if tenant:
+                        loc_objs = list(Location.all_objects.filter(id__in=clean_loc_ids, tenant=tenant))
+                    else:
+                        loc_objs = list(Location.all_objects.filter(id__in=clean_loc_ids))
+            except Exception:
+                loc_objs = []
+
+            if role == UserRole.GYM_MANAGER and not loc_objs:
+                raise ValidationError("At least one valid location must be assigned when creating a Manager.")
 
         # 2. Create User
         user = User.objects.create_user(
@@ -91,8 +143,26 @@ class UserService:
         
         # Filter out None values to avoid overwriting defaults
         profile_fields = {k: v for k, v in profile_fields.items() if v is not None}
+        if loc_objs:
+            profile_fields['primary_location'] = loc_objs[0]
 
         UserProfile.objects.create(user=user, **profile_fields)
+
+        # 4. Create StaffLocation mappings and Manager Policy
+        if loc_objs:
+            from apps.scheduling.models import StaffLocation
+            from apps.core.tenants.context import bypass_tenant_isolation
+            with bypass_tenant_isolation():
+                for loc in loc_objs:
+                    StaffLocation.all_objects.get_or_create(
+                        staff=user,
+                        location=loc,
+                        defaults={'tenant': tenant or loc.tenant}
+                    )
+
+        if role == UserRole.GYM_MANAGER and tenant:
+            from apps.users.permission_service import PermissionService
+            PermissionService.get_or_create_policy(manager=user, tenant=tenant)
 
         # Referral processing
         referral_code = profile_data.get('referral_code')
@@ -101,7 +171,8 @@ class UserService:
             ReferralService.get_or_create_referral_code(user)
             ReferralService.check_and_complete_pending_referrals_for_user(user, referral_code=referral_code)
         except Exception as e:
-            logger.warning(f"Failed to process referral for new user {user.id}: {e}")
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to process referral for new user {user.id}: {e}")
 
         return user
 
@@ -413,6 +484,10 @@ class AuthService:
             profile.profile_image.save(pending.profile_image.name, pending.profile_image, save=False)
         
         profile.save()
+
+        if user.role == UserRole.GYM_MANAGER and user.tenant:
+            from apps.users.permission_service import PermissionService
+            PermissionService.get_or_create_policy(manager=user, tenant=user.tenant)
 
         # 3. Cleanup & referral completion
         referral_code = pending.referral_code

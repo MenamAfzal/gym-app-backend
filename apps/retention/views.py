@@ -64,6 +64,11 @@ class ClientRetentionMetricsViewSet(viewsets.ReadOnlyModelViewSet):
             return ClientRetentionMetrics.objects.none()
 
         qs = ClientRetentionMetrics.objects.select_related('client', 'client__profile', 'tenant')
+        from apps.users.permission_service import PermissionService
+        manager_loc_ids = PermissionService.get_manager_location_ids(user)
+        if manager_loc_ids is not None:
+            qs = qs.filter(client__profile__primary_location_id__in=manager_loc_ids)
+
         client_id = self.request.query_params.get('client_id')
         if client_id:
             qs = qs.filter(client_id=client_id)
@@ -225,6 +230,13 @@ class ClientActivityTimelineView(APIView):
             client = User.objects.get(id=client_id, tenant=tenant)
         except User.DoesNotExist:
             return Response({"detail": "Client not found in this studio."}, status=status.HTTP_404_NOT_FOUND)
+
+        from apps.users.permission_service import PermissionService
+        manager_loc_ids = PermissionService.get_manager_location_ids(request.user)
+        if manager_loc_ids is not None:
+            primary_loc_id = getattr(getattr(client, 'profile', None), 'primary_location_id', None)
+            if not primary_loc_id or primary_loc_id not in manager_loc_ids:
+                return Response({"detail": "You do not have access to this client."}, status=status.HTTP_403_FORBIDDEN)
 
         try:
             limit = int(request.query_params.get('limit', 50))
@@ -792,6 +804,10 @@ class AtRiskSummaryView(APIView):
                 tenant=tenant,
                 risk_level__in=[ChurnRiskLevel.HIGH, ChurnRiskLevel.CRITICAL]
             )
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(request.user)
+            if manager_loc_ids is not None:
+                at_risk_qs = at_risk_qs.filter(client__profile__primary_location_id__in=manager_loc_ids)
             total_at_risk_count = at_risk_qs.count()
             total_at_risk_revenue = at_risk_qs.aggregate(
                 total=Coalesce(Sum('at_risk_revenue'), Value(Decimal('0.00')))

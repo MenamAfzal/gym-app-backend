@@ -417,8 +417,8 @@ class NotificationGroupViewSet(viewsets.ModelViewSet):
 
 
 class NotificationAutomationViewSet(viewsets.ModelViewSet):
-    """Automation management — Gym Owners only."""
-    permission_classes = [IsGymOwnerOnly]
+    """Automation management — Gym Owners and Managers with permission."""
+    permission_classes = [IsOwnerOrManager]
     serializer_class   = NotificationAutomationSerializer
     pagination_class   = StandardPagination
 
@@ -453,14 +453,12 @@ class NotificationPreferenceView(APIView):
 class TenantNotificationSettingsView(APIView):
     """
     GET  /settings/ — Get tenant notification settings
-    PATCH /settings/ — Update tenant notification settings (Gym Owner only)
+    PATCH /settings/ — Update tenant notification settings
     """
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [IsOwnerOrManager]
 
     def get_permissions(self):
-        if self.request.method in ['PATCH', 'PUT']:
-            return [IsGymOwnerOnly()]
-        return [permissions.IsAuthenticated()]
+        return [IsOwnerOrManager()]
 
     def get(self, request):
         settings_obj = TenantNotificationSettings.get_or_create_for_tenant(request.tenant)

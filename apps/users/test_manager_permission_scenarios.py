@@ -10,7 +10,7 @@ from apps.core.tenants.models import Tenant
 from apps.inventory.models import Product, StockTransaction
 from apps.scheduling.models import (
     Booking, ClassSession, ClassTemplate, Event, EventEnrollment,
-    Location, StaffAvailability, SubstituteRequest, TenantBookingSettings,
+    Location, StaffAvailability, StaffLocation, SubstituteRequest, TenantBookingSettings,
     Waitlist
 )
 from apps.support.models import Ticket, TicketComment
@@ -50,6 +50,16 @@ class ManagerPermissionScenariosTests(TestCase):
             name="Main Studio",
             address="100 Main St",
             timezone="UTC"
+        )
+        StaffLocation.objects.create(
+            staff=self.manager,
+            location=self.location,
+            tenant=self.tenant
+        )
+        StaffLocation.objects.create(
+            staff=self.trainer,
+            location=self.location,
+            tenant=self.tenant
         )
         self.template = ClassTemplate.objects.create(
             tenant=self.tenant,

@@ -90,7 +90,58 @@ class UserViewSet(viewsets.ModelViewSet):
                 Q(profile__primary_location_id=location_param)
             ).distinct()
 
+        if getattr(self.request.user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(self.request.user)
+            if manager_loc_ids:
+                from django.db.models import Q
+                qs = qs.filter(
+                    Q(staff_locations__location_id__in=manager_loc_ids) |
+                    Q(profile__primary_location_id__in=manager_loc_ids)
+                ).distinct()
+
         return qs
+
+    def create(self, request, *args, **kwargs):
+        """
+        Standard POST /api/users/ or /api/profiles/
+        """
+        input_serializer = CreateUserSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+        if data['role'] == UserRole.PLATFORM_ADMIN and not (request.user.is_superuser or getattr(request.user, 'role', None) == UserRole.PLATFORM_ADMIN):
+            return Response(
+                {"detail": "Cannot create Platform Admin from this endpoint."}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        target_tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        try:
+            new_user = UserService.create_user_with_profile(
+                email=data['email'],
+                password=data['password'],
+                role=data['role'],
+                tenant=target_tenant,
+                location_ids=data.get('location_ids'),
+                nickname=data.get('nickname'),
+                bio=data.get('bio'),
+                profile_image=data.get('profile_image'),
+                first_name=data.get('first_name'),
+                last_name=data.get('last_name'),
+                phone_number=data.get('phone_number'),
+                date_of_birth=data.get('date_of_birth'),
+                gender=data.get('gender'),
+                height=data.get('height'),
+                weight=data.get('weight'),
+                address=data.get('address'),
+                city=data.get('city'),
+                country=data.get('country'),
+                postal_code=data.get('postal_code'),
+                emergency_contact_name=data.get('emergency_contact_name'),
+                emergency_contact_phone=data.get('emergency_contact_phone'),
+            )
+            return Response(UserSerializer(new_user).data, status=status.HTTP_201_CREATED)
+        except ValidationError as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
     @action(detail=False, methods=['post'], permission_classes=[IsOwnerOrManager])
     def create_staff(self, request):
@@ -111,12 +162,13 @@ class UserViewSet(viewsets.ModelViewSet):
              )
 
         try:
-            # Delegate to Service - pass all profile fields
+            # Delegate to Service - pass all profile fields and location_ids
             new_user = UserService.create_user_with_profile(
                 email=data['email'],
                 password=data['password'],
                 role=data['role'],
                 tenant=request.tenant, # Injected by TenantMiddleware
+                location_ids=data.get('location_ids'),
                 # Basic Profile
                 nickname=data.get('nickname'),
                 bio=data.get('bio'),
@@ -222,6 +274,12 @@ class UserViewSet(viewsets.ModelViewSet):
         """
         # Filter for clients under the owner's active tenant
         queryset = self.request.user.tenant.users.filter(role=UserRole.CLIENT).select_related('profile')
+
+        if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(request.user)
+            if manager_loc_ids is not None:
+                queryset = queryset.filter(profile__primary_location_id__in=manager_loc_ids).distinct()
         
         # Filter by specific ID if provided in query params
         user_id = request.query_params.get('id')
@@ -341,6 +399,16 @@ class UserViewSet(viewsets.ModelViewSet):
                 Q(staff_locations__location_id=location_param) |
                 Q(profile__primary_location_id=location_param)
             ).distinct()
+
+        if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(request.user)
+            if manager_loc_ids is not None:
+                from django.db.models import Q
+                queryset = queryset.filter(
+                    Q(staff_locations__location_id__in=manager_loc_ids) |
+                    Q(profile__primary_location_id__in=manager_loc_ids)
+                ).distinct()
  
         role_param = request.query_params.get('role')
         if role_param:
@@ -630,6 +698,12 @@ class UserViewSet(viewsets.ModelViewSet):
         GET: Paginated list of clients with complete detailed nutrition profiles.
         """
         queryset = self.request.user.tenant.users.filter(role=UserRole.CLIENT).select_related('profile')
+
+        if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(request.user)
+            if manager_loc_ids is not None:
+                queryset = queryset.filter(profile__primary_location_id__in=manager_loc_ids).distinct()
         
         user_id = request.query_params.get('id')
         if user_id:
@@ -743,6 +817,12 @@ class UserViewSet(viewsets.ModelViewSet):
         GET: Paginated list of clients with complete detailed reflection/journal logs.
         """
         queryset = self.request.user.tenant.users.filter(role=UserRole.CLIENT).select_related('profile')
+
+        if getattr(request.user, 'role', None) == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            manager_loc_ids = PermissionService.get_manager_location_ids(request.user)
+            if manager_loc_ids is not None:
+                queryset = queryset.filter(profile__primary_location_id__in=manager_loc_ids).distinct()
         
         user_id = request.query_params.get('id')
         if user_id:
@@ -952,6 +1032,7 @@ class UserRegistrationView(APIView):
                 password=data['password'],
                 role=data['role'],
                 tenant=target_tenant,
+                location_ids=data.get('location_ids'),
                 # Basic Profile
                 nickname=data.get('nickname'),
                 bio=data.get('bio'),
@@ -1239,6 +1320,42 @@ class StaffRegistrationRequestViewSet(viewsets.ModelViewSet):
         if User.objects.filter(email=request_obj.email).exists():
             return Response({"detail": "A user with this email already exists."}, status=status.HTTP_400_BAD_REQUEST)
         role = request.data.get('role') or request_obj.role
+        raw_locs = []
+        if request.data.get('location_ids'):
+            raw_locs.extend(request.data['location_ids'])
+        if request.data.get('location_id'):
+            raw_locs.append(request.data['location_id'])
+        if request.data.get('locations'):
+            for item in request.data['locations']:
+                if isinstance(item, dict) and 'id' in item:
+                    raw_locs.append(item['id'])
+                else:
+                    raw_locs.append(item)
+        clean_loc_ids = list(dict.fromkeys([str(l).strip() for l in raw_locs if l]))
+
+        tenant_has_locs = True
+        if request_obj.tenant:
+            from apps.scheduling.models import Location
+            from apps.core.tenants.context import bypass_tenant_isolation
+            with bypass_tenant_isolation():
+                tenant_has_locs = Location.all_objects.filter(tenant=request_obj.tenant).exists()
+
+        if role == UserRole.GYM_MANAGER and not clean_loc_ids and tenant_has_locs:
+            return Response(
+                {"detail": "At least one location must be assigned when approving a Gym Manager.", "location_ids": ["This field is required for Gym Managers."]},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        loc_objs = []
+        if clean_loc_ids:
+            from apps.scheduling.models import Location
+            loc_objs = list(Location.objects.filter(id__in=clean_loc_ids, tenant=request_obj.tenant))
+            if role == UserRole.GYM_MANAGER and not loc_objs:
+                return Response(
+                    {"detail": "At least one valid location belonging to this studio must be assigned to the Manager."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
         with transaction.atomic():
             user = User.objects.create(
                 email=request_obj.email,
@@ -1263,9 +1380,17 @@ class StaffRegistrationRequestViewSet(viewsets.ModelViewSet):
             profile.postal_code = request_obj.postal_code
             profile.emergency_contact_name = request_obj.emergency_contact_name
             profile.emergency_contact_phone = request_obj.emergency_contact_phone
+            if loc_objs:
+                profile.primary_location = loc_objs[0]
             if request_obj.profile_image:
                 profile.profile_image.save(request_obj.profile_image.name, request_obj.profile_image, save=False)
             profile.save()
+
+            if loc_objs:
+                from apps.scheduling.models import StaffLocation
+                for loc in loc_objs:
+                    StaffLocation.objects.get_or_create(staff=user, location=loc, tenant=request_obj.tenant)
+
             if role == UserRole.GYM_MANAGER:
                 PermissionService.get_or_create_policy(manager=user, tenant=request_obj.tenant)
             request_obj.status = StaffRequestStatus.APPROVED

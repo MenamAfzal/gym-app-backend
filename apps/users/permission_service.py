@@ -91,3 +91,38 @@ class PermissionService:
             'has_full_access': policy.has_full_access,
             'permissions': policy.permissions
         }
+
+    @classmethod
+    def get_manager_location_ids(cls, user):
+        """
+        Returns assigned location IDs for a Gym Manager.
+        Returns None for users without manager location restrictions (Owner, Admin, superuser, or non-manager).
+        Returns an empty list [] for a Manager with no assigned locations (blocking access to data).
+        """
+        if not user or not user.is_authenticated:
+            return []
+
+        if user.is_superuser or user.is_staff or getattr(user, 'role', None) in [UserRole.PLATFORM_ADMIN, UserRole.GYM_OWNER]:
+            return None
+
+        if getattr(user, 'role', None) != UserRole.GYM_MANAGER:
+            return None
+
+        loc_ids = set()
+        if hasattr(user, 'staff_locations'):
+            loc_ids.update(user.staff_locations.values_list('location_id', flat=True))
+        if hasattr(user, 'profile') and user.profile and getattr(user.profile, 'primary_location_id', None):
+            loc_ids.add(user.profile.primary_location_id)
+
+        return list(loc_ids)
+
+    @classmethod
+    def is_manager_assigned_to_location(cls, user, location_id) -> bool:
+        """
+        Checks if a Gym Manager is assigned to a specific location.
+        Always returns True for Owners, Platform Admins, superusers, and non-managers.
+        """
+        loc_ids = cls.get_manager_location_ids(user)
+        if loc_ids is None:
+            return True
+        return str(location_id) in [str(lid) for lid in loc_ids]

@@ -7,22 +7,29 @@ from apps.core.tenants.stripe_service import StripeService
 from apps.core.tenants.serializers import CheckoutInitSerializer
 from apps.users.models import UserRole
 
-class IsGymOwner(permissions.BasePermission):
+class IsGymOwnerOrManager(permissions.BasePermission):
     """
-    Only Gym Owners can manage the SaaS subscription.
+    Gym Owners and Managers with billing permissions can manage the SaaS subscription.
     """
     def has_permission(self, request, view):
-        return (
-            request.user and 
-            request.user.is_authenticated and 
-            request.user.role == UserRole.GYM_OWNER
-        )
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.role in [UserRole.GYM_OWNER, UserRole.PLATFORM_ADMIN] or request.user.is_superuser:
+            return True
+        if request.user.role == UserRole.GYM_MANAGER:
+            from apps.users.permission_service import PermissionService
+            required_action = 'view' if request.method in permissions.SAFE_METHODS else 'edit'
+            return PermissionService.has_permission(request.user, 'payments', 'billing', required_action)
+        return False
+
+# Backward compatibility alias
+IsGymOwner = IsGymOwnerOrManager
 
 class BillingViewSet(viewsets.ViewSet):
     """
     API for Tenant Billing (Stripe Integration).
     """
-    permission_classes = [IsGymOwner]
+    permission_classes = [IsGymOwnerOrManager]
 
     @action(detail=False, methods=['post'], url_path='checkout-session')
     def create_checkout_session(self, request):
