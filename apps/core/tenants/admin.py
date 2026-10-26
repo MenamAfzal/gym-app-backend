@@ -4,20 +4,31 @@ Tenant Admin Configuration
 from django.contrib import admin
 from .models import (
     Tenant, Plan, Feature, PlanEntitlement,
-    TenantSubscription, TenantEntitlementOverride
+    TenantSubscription, TenantEntitlementOverride, ReferralReward,
+    AffiliatePartner, AffiliatePointsTransaction
 )
 
 
 @admin.register(Tenant)
 class TenantAdmin(admin.ModelAdmin):
     """Admin for Tenant model."""
-    list_display = ['name', 'subdomain', 'is_active', 'stripe_customer_id', 'stripe_account_id', 'created_at']
+    list_display = [
+        'name', 'subdomain', 'is_active', 'referred_by', 'affiliate',
+        'stripe_customer_id', 'created_at'
+    ]
     list_filter = ['is_active', 'created_at']
-    search_fields = ['name', 'subdomain', 'stripe_customer_id', 'stripe_account_id']
+    search_fields = [
+        'name', 'subdomain', 'referred_by__name', 'affiliate__code',
+        'affiliate__company_name', 'stripe_customer_id'
+    ]
     readonly_fields = ['id', 'created_at', 'updated_at']
+    autocomplete_fields = ['referred_by', 'affiliate']
     fieldsets = (
         ('Basic Information', {
             'fields': ('name', 'subdomain', 'is_active')
+        }),
+        ('Referral & Affiliate Attribution', {
+            'fields': ('referred_by', 'affiliate')
         }),
         ('Stripe Billing', {
             'fields': ('stripe_customer_id', 'stripe_account_id')
@@ -31,6 +42,65 @@ class TenantAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         }),
     )
+
+
+@admin.register(AffiliatePartner)
+class AffiliatePartnerAdmin(admin.ModelAdmin):
+    """Admin for external B2B Affiliate Partners."""
+    list_display = [
+        'code', 'user', 'company_name', 'points_balance',
+        'lifetime_points_earned', 'is_active', 'created_at'
+    ]
+    list_filter = ['is_active', 'created_at']
+    search_fields = [
+        'code', 'company_name', 'user__email', 'user__first_name', 'user__last_name'
+    ]
+    readonly_fields = ['id', 'points_balance', 'lifetime_points_earned', 'created_at', 'updated_at']
+    autocomplete_fields = ['user']
+    fieldsets = (
+        ('Partner Identity', {
+            'fields': ('user', 'code', 'company_name', 'is_active')
+        }),
+        ('Points & Rewards', {
+            'fields': ('points_balance', 'lifetime_points_earned')
+        }),
+        ('Promotional Details', {
+            'fields': ('website_or_social', 'metadata'),
+            'classes': ('collapse',)
+        }),
+        ('System Metadata', {
+            'fields': ('id', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+
+@admin.register(AffiliatePointsTransaction)
+class AffiliatePointsTransactionAdmin(admin.ModelAdmin):
+    """Admin audit ledger for affiliate point grants, renewals, and adjustments."""
+    list_display = [
+        'affiliate', 'tenant', 'points', 'transaction_type', 'subscription', 'created_at'
+    ]
+    list_filter = ['transaction_type', 'created_at']
+    search_fields = [
+        'affiliate__code', 'affiliate__company_name', 'tenant__name', 'description'
+    ]
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    autocomplete_fields = ['affiliate', 'tenant', 'subscription']
+    date_hierarchy = 'created_at'
+
+
+@admin.register(ReferralReward)
+class ReferralRewardAdmin(admin.ModelAdmin):
+    """Admin for gym-to-gym referral cash rewards."""
+    list_display = [
+        'referrer', 'referred_tenant', 'reward_amount', 'status', 'subscription', 'created_at'
+    ]
+    list_filter = ['status', 'created_at']
+    search_fields = ['referrer__name', 'referred_tenant__name']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    autocomplete_fields = ['referrer', 'referred_tenant', 'subscription']
+    date_hierarchy = 'created_at'
 
 
 @admin.register(Plan)

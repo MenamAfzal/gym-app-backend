@@ -79,21 +79,6 @@ class TenantEntitlementOverrideSerializer(serializers.ModelSerializer):
         model = TenantEntitlementOverride
         fields = ['id', 'feature', 'feature_key', 'value', 'expires_at']
 
-class TenantSerializer(serializers.ModelSerializer):
-    current_subscription = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = Tenant
-        fields = ['id', 'name', 'subdomain', 'logo', 'branding', 'is_active', 'created_at', 'current_subscription']
-        read_only_fields = ['id', 'created_at']
-
-    def get_current_subscription(self, obj):
-        # Efficiently fetch active subscription
-        sub = obj.subscriptions.filter(status='active').first()
-        if sub:
-            return TenantSubscriptionSerializer(sub).data
-        return None
-
 class OnboardTenantSerializer(serializers.Serializer):
     gym_name = serializers.CharField(max_length=255)
     subdomain = serializers.SlugField(max_length=100)
@@ -104,23 +89,92 @@ class OnboardTenantSerializer(serializers.Serializer):
     branding = serializers.JSONField(required=False, default=dict)
     referred_by_id = serializers.UUIDField(required=False, allow_null=True)
     affiliate_code = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    affiliate = serializers.CharField(required=False, allow_null=True, allow_blank=True, write_only=True)
+    ref = serializers.CharField(required=False, allow_null=True, allow_blank=True, write_only=True)
+    referral_code = serializers.CharField(required=False, allow_null=True, allow_blank=True, write_only=True)
+
+    def to_internal_value(self, data):
+        # Support aliases for affiliate code from different frontend clients
+        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+        if not data_copy.get('affiliate_code'):
+            for alias in ('affiliate', 'ref', 'referral_code'):
+                if data_copy.get(alias):
+                    data_copy['affiliate_code'] = data_copy.get(alias)
+                    break
+        return super().to_internal_value(data_copy)
+
+    def validate_affiliate_code(self, value):
+        if not value:
+            return None
+        clean_code = str(value).strip()
+        if not clean_code:
+            return None
+        partner = AffiliatePartner.objects.filter(code__iexact=clean_code).first()
+        if not partner:
+            raise serializers.ValidationError(f"The affiliate code '{clean_code}' is invalid.")
+        if not partner.is_active:
+            raise serializers.ValidationError(f"The affiliate code '{clean_code}' is inactive.")
+        return partner.code
+
 
 class TenantSerializer(serializers.ModelSerializer):
     current_subscription = serializers.SerializerMethodField()
-    entitlements = serializers.SerializerMethodField() # New Requirement
+    entitlements = serializers.SerializerMethodField()
+    referred_by = serializers.SerializerMethodField()
+    affiliate_partner = serializers.SerializerMethodField()
     
     class Meta:
         model = Tenant
         fields = [
             'id', 'name', 'subdomain', 'logo', 'branding', 
             'is_active', 'created_at', 
-            'current_subscription', 'entitlements'
+            'current_subscription', 'entitlements',
+            'referred_by', 'affiliate_partner'
         ]
         read_only_fields = ['id', 'created_at']
 
-    def get_current_subscription(self, obj):
+    def get_referred_by(self, obj):
+        if obj.referred_by_id:
+            return {
+                'type': 'gym',
+                'id': str(obj.referred_by_id),
+                'name': obj.referred_by.name if obj.referred_by else None,
+                'subdomain': obj.referred_by.subdomain if obj.referred_by else None,
+            }
+        if getattr(obj, 'affiliate_id', None):
+            affiliate = getattr(obj, 'affiliate', None)
+            user = getattr(affiliate, 'user', None) if affiliate else None
+            user_name = user.get_full_name().strip() if user and user.get_full_name() else None
+            display_name = (
+                (affiliate.company_name if affiliate and affiliate.company_name else None)
+                or user_name
+                or (user.email if user else None)
+                or (affiliate.code if affiliate else None)
+            )
+            return {
+                'type': 'affiliate',
+                'id': str(obj.affiliate_id),
+                'name': display_name,
+                'code': affiliate.code if affiliate else None,
+                'company_name': affiliate.company_name if affiliate else None,
+                'email': user.email if user else None,
+            }
+        return None
 
-        
+    def get_affiliate_partner(self, obj):
+        if not getattr(obj, 'affiliate_id', None):
+            return None
+        affiliate = getattr(obj, 'affiliate', None)
+        user = getattr(affiliate, 'user', None) if affiliate else None
+        return {
+            'id': str(obj.affiliate_id),
+            'code': affiliate.code if affiliate else None,
+            'company_name': affiliate.company_name if affiliate else None,
+            'email': user.email if user else None,
+            'is_active': affiliate.is_active if affiliate else None,
+        }
+
+    def get_current_subscription(self, obj):
         if hasattr(obj, '_prefetched_billing_subs'):
             billing_sub = next(
                 (s for s in obj._prefetched_billing_subs
@@ -154,7 +208,6 @@ class TenantSerializer(serializers.ModelSerializer):
 
         sub = obj.subscriptions.filter(status='active').first()
         return TenantSubscriptionSerializer(sub).data if sub else None
-
 
     def get_entitlements(self, obj):
         # Returns the resolved list of features this tenant has access to

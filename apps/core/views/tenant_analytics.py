@@ -99,8 +99,28 @@ class TenantAnalyticsSerializer(serializers.Serializer):
     def get_referred_by(self, obj):
         if obj.referred_by_id:
             return {
+                'type': 'gym',
                 'id':   str(obj.referred_by_id),
                 'name': obj.referred_by.name if obj.referred_by else None,
+                'subdomain': obj.referred_by.subdomain if obj.referred_by else None,
+            }
+        if getattr(obj, 'affiliate_id', None):
+            affiliate = getattr(obj, 'affiliate', None)
+            user = getattr(affiliate, 'user', None) if affiliate else None
+            user_name = user.get_full_name().strip() if user and user.get_full_name() else None
+            display_name = (
+                (affiliate.company_name if affiliate and affiliate.company_name else None)
+                or user_name
+                or (user.email if user else None)
+                or (affiliate.code if affiliate else None)
+            )
+            return {
+                'type': 'affiliate',
+                'id': str(obj.affiliate_id),
+                'name': display_name,
+                'code': affiliate.code if affiliate else None,
+                'company_name': affiliate.company_name if affiliate else None,
+                'email': user.email if user else None,
             }
         return None
 
@@ -224,6 +244,8 @@ def _build_analytics_queryset():
 
     ).select_related(
         'referred_by',
+        'affiliate',
+        'affiliate__user',
     ).prefetch_related(
         'payments_tenantbillingsubscriptions__billing_plan',
     ).order_by('-created_at')

@@ -823,6 +823,30 @@ def stripe_checkout_webhook(request):
             logger.info("invoice.payment_succeeded handled in checkout webhook.")
         except Exception as exc:
             logger.exception("Error handling invoice.payment_succeeded in checkout webhook: %s", exc)
+
+        # Trigger affiliate renewal points if gym was referred by an affiliate partner
+        try:
+            inv = data_object if isinstance(data_object, dict) else (data_object.to_dict() if hasattr(data_object, 'to_dict') else {})
+            billing_reason = inv.get('billing_reason')
+            stripe_sub_id = inv.get('subscription')
+            invoice_id = inv.get('id')
+            if stripe_sub_id and billing_reason in ('subscription_cycle', 'subscription_update', 'manual'):
+                from apps.payments.models import TenantBillingSubscription
+                from apps.core.tenants.affiliate_service import AffiliateService
+                billing_sub = (
+                    TenantBillingSubscription.all_objects
+                    .select_related('tenant', 'tenant__affiliate')
+                    .filter(stripe_subscription_id=stripe_sub_id)
+                    .first()
+                )
+                if billing_sub and billing_sub.tenant and getattr(billing_sub.tenant, 'affiliate_id', None):
+                    AffiliateService.award_renewal_subscription_points(
+                        tenant=billing_sub.tenant,
+                        subscription=billing_sub,
+                        invoice_id=invoice_id
+                    )
+        except Exception as exc:
+            logger.exception("Error awarding affiliate renewal points on invoice.payment_succeeded: %s", exc)
     else:
         logger.info("Checkout webhook: unhandled event type '%s'", event_type)
 

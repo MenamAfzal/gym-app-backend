@@ -351,6 +351,17 @@ class FeatureBillingService:
             billing_plan.slug,
         )
 
+        # Award affiliate points if gym was referred by an external partner
+        if getattr(tenant, 'affiliate_id', None):
+            try:
+                from apps.core.tenants.affiliate_service import AffiliateService
+                AffiliateService.award_initial_subscription_points(
+                    tenant=tenant,
+                    subscription=billing_sub
+                )
+            except Exception as e:
+                logger.exception("Failed to award affiliate points for tenant %s upon checkout fulfillment: %s", tenant.id, e)
+
         return billing_sub
 
     @classmethod

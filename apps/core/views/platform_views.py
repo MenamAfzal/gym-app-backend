@@ -35,7 +35,11 @@ class PlatformTenantViewSet(viewsets.ModelViewSet):
     API for Managing Gyms (Tenants).
     Only accessible by Platform Admins.
     """
-    queryset = Tenant.objects.all().prefetch_related(
+    queryset = Tenant.objects.all().select_related(
+        'referred_by',
+        'affiliate',
+        'affiliate__user'
+    ).prefetch_related(
         'subscriptions',
         Prefetch(
             'payments_tenantbillingsubscriptions',

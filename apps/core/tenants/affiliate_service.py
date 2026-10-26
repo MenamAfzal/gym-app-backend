@@ -162,12 +162,13 @@ class AffiliateService:
     def award_initial_subscription_points(
         cls,
         tenant: Tenant,
-        subscription: Optional[TenantSubscription] = None,
+        subscription: Any = None,
         points: Optional[int] = None
     ) -> Optional[AffiliatePointsTransaction]:
         """
         Awards points to an affiliate when the referred gym first subscribes to a paid package.
         Guards against duplicate initial point grants for the same tenant.
+        Supports both TenantSubscription and TenantBillingSubscription models.
         """
         partner = getattr(tenant, 'affiliate', None)
         if not partner or not partner.is_active:
@@ -194,18 +195,44 @@ class AffiliateService:
         locked_partner.lifetime_points_earned += points_to_award
         locked_partner.save(update_fields=['points_balance', 'lifetime_points_earned'])
 
+        # Safely resolve plan name & subscription link
+        plan_name = None
+        core_sub = None
+        stripe_sub_id = None
+        billing_sub_id = None
+
+        if subscription is not None:
+            if hasattr(subscription, 'billing_plan') and subscription.billing_plan:
+                plan_name = subscription.billing_plan.name
+                billing_sub_id = str(subscription.id)
+            elif hasattr(subscription, 'plan') and subscription.plan:
+                plan_name = subscription.plan.name
+
+            stripe_sub_id = getattr(subscription, 'stripe_subscription_id', None)
+
+            if isinstance(subscription, TenantSubscription):
+                core_sub = subscription
+            else:
+                core_sub = TenantSubscription.objects.filter(tenant=tenant).first()
+
+        metadata = {
+            'gym_name': tenant.name,
+            'subdomain': tenant.subdomain,
+            'plan_name': plan_name,
+        }
+        if stripe_sub_id:
+            metadata['stripe_subscription_id'] = stripe_sub_id
+        if billing_sub_id:
+            metadata['billing_subscription_id'] = billing_sub_id
+
         tx = AffiliatePointsTransaction.objects.create(
             affiliate=locked_partner,
             tenant=tenant,
-            subscription=subscription,
+            subscription=core_sub,
             points=points_to_award,
             transaction_type=AffiliatePointsTransaction.TransactionType.INITIAL_SUBSCRIPTION,
             description=f"Initial subscription for {tenant.name}",
-            metadata={
-                'gym_name': tenant.name,
-                'subdomain': tenant.subdomain,
-                'plan_name': subscription.plan.name if subscription and subscription.plan else None
-            }
+            metadata=metadata
         )
 
         logger.info(f"Awarded {points_to_award} initial points to Affiliate {locked_partner.code} for Tenant {tenant.name}")
@@ -216,13 +243,14 @@ class AffiliateService:
     def award_renewal_subscription_points(
         cls,
         tenant: Tenant,
-        subscription: Optional[TenantSubscription] = None,
+        subscription: Any = None,
         points: Optional[int] = None,
         invoice_id: Optional[str] = None
     ) -> Optional[AffiliatePointsTransaction]:
         """
         Awards recurring renewal points to an affiliate every time the referred gym's package renews.
         Deduplicates against invoice_id if provided.
+        Supports both TenantSubscription and TenantBillingSubscription models.
         """
         partner = getattr(tenant, 'affiliate', None)
         if not partner or not partner.is_active:
@@ -249,18 +277,42 @@ class AffiliateService:
         locked_partner.lifetime_points_earned += points_to_award
         locked_partner.save(update_fields=['points_balance', 'lifetime_points_earned'])
 
+        # Safely resolve plan name & subscription link
+        plan_name = None
+        core_sub = None
+        stripe_sub_id = None
+        billing_sub_id = None
+
+        if subscription is not None:
+            if hasattr(subscription, 'billing_plan') and subscription.billing_plan:
+                plan_name = subscription.billing_plan.name
+                billing_sub_id = str(subscription.id)
+            elif hasattr(subscription, 'plan') and subscription.plan:
+                plan_name = subscription.plan.name
+
+            stripe_sub_id = getattr(subscription, 'stripe_subscription_id', None)
+
+            if isinstance(subscription, TenantSubscription):
+                core_sub = subscription
+            else:
+                core_sub = TenantSubscription.objects.filter(tenant=tenant).first()
+
         metadata = {
             'gym_name': tenant.name,
             'subdomain': tenant.subdomain,
-            'plan_name': subscription.plan.name if subscription and subscription.plan else None
+            'plan_name': plan_name,
         }
         if invoice_id:
             metadata['invoice_id'] = invoice_id
+        if stripe_sub_id:
+            metadata['stripe_subscription_id'] = stripe_sub_id
+        if billing_sub_id:
+            metadata['billing_subscription_id'] = billing_sub_id
 
         tx = AffiliatePointsTransaction.objects.create(
             affiliate=locked_partner,
             tenant=tenant,
-            subscription=subscription,
+            subscription=core_sub,
             points=points_to_award,
             transaction_type=AffiliatePointsTransaction.TransactionType.SUBSCRIPTION_RENEWAL,
             description=f"Package renewal for {tenant.name}",

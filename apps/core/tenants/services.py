@@ -236,10 +236,20 @@ class TenantAdministrationService:
 
         affiliate = None
         if affiliate_code:
-            from apps.core.tenants.affiliate_service import AffiliateService
-            affiliate = AffiliateService.resolve_affiliate(affiliate_code)
-            if not affiliate:
-                logger.warning(f"Affiliate code '{affiliate_code}' not found during onboarding for '{gym_name}'")
+            from apps.core.tenants.models import AffiliatePartner
+            if isinstance(affiliate_code, AffiliatePartner):
+                if not affiliate_code.is_active:
+                    raise ValidationError(f"The affiliate code '{affiliate_code.code}' is inactive.")
+                affiliate = affiliate_code
+            else:
+                clean_code = str(affiliate_code).strip()
+                if clean_code:
+                    partner = AffiliatePartner.objects.filter(code__iexact=clean_code).first()
+                    if not partner:
+                        raise ValidationError(f"The affiliate code '{clean_code}' is invalid.")
+                    if not partner.is_active:
+                        raise ValidationError(f"The affiliate code '{clean_code}' is inactive.")
+                    affiliate = partner
 
         tenant = Tenant.objects.create(
             name=gym_name, 
