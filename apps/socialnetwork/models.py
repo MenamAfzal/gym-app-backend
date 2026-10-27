@@ -258,6 +258,13 @@ class PostReport(TenantAwareModel):
         blank=True,
         related_name='reports'
     )
+    poll = models.ForeignKey(
+        Poll,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reports'
+    )
     post_snapshot = models.JSONField(
         default=dict,
         blank=True,
@@ -294,23 +301,46 @@ class PostReport(TenantAwareModel):
         ordering = ['-created_at']
 
     def save(self, *args, **kwargs):
-        if not self.reported_user_id and self.post and self.post.user:
-            self.reported_user = self.post.user
-        if self.post and not self.post_snapshot:
-            first_media = self.post.media_items.first()
-            self.post_snapshot = {
-                'post_id': str(self.post.id),
-                'caption': self.post.caption,
-                'user_id': str(self.post.user_id),
-                'user_email': getattr(self.post.user, 'email', ''),
-                'created_at': self.post.created_at.isoformat() if self.post.created_at else None,
-                'media_count': self.post.media_items.count(),
-                'sample_media_type': first_media.media_type if first_media else None,
-            }
+        if not self.reported_user_id:
+            if self.post and self.post.user:
+                self.reported_user = self.post.user
+            elif self.poll and self.poll.user:
+                self.reported_user = self.poll.user
+
+        if not self.post_snapshot:
+            if self.post:
+                first_media = self.post.media_items.first()
+                self.post_snapshot = {
+                    'type': 'post',
+                    'post_id': str(self.post.id),
+                    'caption': self.post.caption,
+                    'user_id': str(self.post.user_id),
+                    'user_email': getattr(self.post.user, 'email', ''),
+                    'created_at': self.post.created_at.isoformat() if self.post.created_at else None,
+                    'media_count': self.post.media_items.count(),
+                    'sample_media_type': first_media.media_type if first_media else None,
+                }
+            elif self.poll:
+                options = [
+                    {'id': opt.id, 'text': opt.text, 'votes_count': opt.votes_count}
+                    for opt in self.poll.options.all()
+                ] if hasattr(self.poll, 'options') else []
+                self.post_snapshot = {
+                    'type': 'poll',
+                    'poll_id': str(self.poll.id),
+                    'post_id': str(self.poll.id),
+                    'question': self.poll.question,
+                    'user_id': str(self.poll.user_id),
+                    'user_email': getattr(self.poll.user, 'email', ''),
+                    'created_at': self.poll.created_at.isoformat() if self.poll.created_at else None,
+                    'options': options,
+                }
         super().save(*args, **kwargs)
 
     def __str__(self):
-        post_id = self.post_id or (self.post_snapshot.get('post_id') if isinstance(self.post_snapshot, dict) else 'N/A')
-        return f"Report #{self.id} on Post {post_id} by {self.reporter.email} ({self.status})"
+        target_type = "Poll" if self.poll_id or (isinstance(self.post_snapshot, dict) and self.post_snapshot.get('type') == 'poll') else "Post"
+        target_id = self.post_id or self.poll_id or (self.post_snapshot.get('poll_id') or self.post_snapshot.get('post_id') if isinstance(self.post_snapshot, dict) else 'N/A')
+        reporter_email = getattr(self.reporter, 'email', 'Unknown')
+        return f"Report #{self.id} on {target_type} {target_id} by {reporter_email} ({self.status})"
 
 

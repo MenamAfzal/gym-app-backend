@@ -2605,7 +2605,7 @@ class PostReportViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = PostReport.objects.filter(reporter=self.request.user).select_related(
-            'reporter__profile', 'reported_user__profile', 'post'
+            'reporter__profile', 'reported_user__profile', 'post', 'poll'
         )
         status_param = self.request.query_params.get('status')
         if status_param:
@@ -2613,6 +2613,12 @@ class PostReportViewSet(viewsets.ModelViewSet):
         reason_param = self.request.query_params.get('reason')
         if reason_param:
             qs = qs.filter(reason=reason_param.lower())
+        post_id = self.request.query_params.get('post_id')
+        if post_id:
+            qs = qs.filter(Q(post_id=post_id) | Q(poll_id=post_id))
+        poll_id = self.request.query_params.get('poll_id')
+        if poll_id:
+            qs = qs.filter(poll_id=poll_id)
         return qs.order_by('-created_at')
 
     def get_serializer_class(self):
@@ -2627,15 +2633,18 @@ class PostReportViewSet(viewsets.ModelViewSet):
         if not serializer.is_valid():
             return format_error_response("Invalid report data", serializer.errors)
 
-        post = SocialPost.objects.filter(id=serializer.validated_data['post_id']).first()
-        if not post:
-            return format_error_response("Post not found.", status_code=status.HTTP_404_NOT_FOUND)
+        post = serializer.validated_data.get('resolved_post')
+        poll = serializer.validated_data.get('resolved_poll')
+        target = post or poll
+        if not target:
+            return format_error_response("Target content not found.", status_code=status.HTTP_404_NOT_FOUND)
 
-        tenant = getattr(request.user, 'tenant', None) or getattr(post, 'tenant', None)
+        tenant = getattr(request.user, 'tenant', None) or getattr(target, 'tenant', None)
         report = PostReport.objects.create(
             reporter=request.user,
-            reported_user=post.user,
+            reported_user=target.user,
             post=post,
+            poll=poll,
             reason=serializer.validated_data.get('reason', PostReport.ReportReason.OTHER),
             description=serializer.validated_data.get('description', ''),
             tenant=tenant
@@ -2682,11 +2691,11 @@ class AdminPostReportViewSet(viewsets.ModelViewSet):
         from apps.users.models import UserRole
         if user.role == UserRole.PLATFORM_ADMIN or user.is_superuser:
             qs = PostReport.all_objects.select_related(
-                'reporter__profile', 'reported_user__profile', 'post', 'reviewed_by__profile', 'tenant'
+                'reporter__profile', 'reported_user__profile', 'post', 'poll', 'reviewed_by__profile', 'tenant'
             )
         else:
             qs = PostReport.objects.select_related(
-                'reporter__profile', 'reported_user__profile', 'post', 'reviewed_by__profile', 'tenant'
+                'reporter__profile', 'reported_user__profile', 'post', 'poll', 'reviewed_by__profile', 'tenant'
             )
 
         status_param = self.request.query_params.get('status')
@@ -2699,7 +2708,11 @@ class AdminPostReportViewSet(viewsets.ModelViewSet):
 
         post_id = self.request.query_params.get('post_id')
         if post_id:
-            qs = qs.filter(post_id=post_id)
+            qs = qs.filter(Q(post_id=post_id) | Q(poll_id=post_id))
+
+        poll_id = self.request.query_params.get('poll_id')
+        if poll_id:
+            qs = qs.filter(poll_id=poll_id)
 
         reported_user_id = self.request.query_params.get('reported_user_id')
         if reported_user_id:
@@ -2756,18 +2769,25 @@ class AdminPostReportViewSet(viewsets.ModelViewSet):
         report.reviewed_by = request.user
         report.reviewed_at = timezone.now()
 
-        if action_type == 'delete_post':
+        if action_type in ['delete_post', 'delete_poll']:
             if report.post:
                 report.post.delete()
                 report.post = None
+            if report.poll:
+                report.poll.delete()
+                report.poll = None
             report.status = PostReport.ReportStatus.RESOLVED
             report.action_taken = PostReport.ReportAction.POST_DELETED
 
-        elif action_type == 'hide_post':
+        elif action_type in ['hide_post', 'hide_poll']:
             if report.post:
                 report.post.visible_to_clients = False
                 report.post.visible_to_staff = False
                 report.post.save(update_fields=['visible_to_clients', 'visible_to_staff'])
+            if report.poll:
+                report.poll.visible_to_clients = False
+                report.poll.visible_to_staff = False
+                report.poll.save(update_fields=['visible_to_clients', 'visible_to_staff'])
             report.status = PostReport.ReportStatus.RESOLVED
             report.action_taken = PostReport.ReportAction.POST_HIDDEN
 
@@ -2778,6 +2798,41 @@ class AdminPostReportViewSet(viewsets.ModelViewSet):
         elif action_type == 'warn_user':
             report.status = PostReport.ReportStatus.RESOLVED
             report.action_taken = PostReport.ReportAction.USER_WARNED
+
+            # Generate and deliver warning notification to reported_user
+            if report.reported_user:
+                tenant = report.tenant or getattr(report.reported_user, 'tenant', None) or getattr(request.user, 'tenant', None)
+                if not tenant:
+                    from apps.core.tenants.models import Tenant
+                    tenant = Tenant.objects.first()
+
+                content_type = "poll" if (report.poll_id or (isinstance(report.post_snapshot, dict) and report.post_snapshot.get('type') == 'poll')) else "post"
+                reason_display = report.get_reason_display()
+                if admin_notes:
+                    warning_body = f"Your {content_type} was reviewed and found in violation of our community guidelines ({reason_display}). Note from admin: {admin_notes}"
+                else:
+                    warning_body = f"Your {content_type} was reviewed and found in violation of our community guidelines ({reason_display}). Please ensure your future posts adhere to community standards."
+
+                if tenant:
+                    from apps.notifications.events import UserWarningEvent
+                    from apps.notifications.services import NotificationService
+                    event = UserWarningEvent(
+                        tenant_id=tenant.id,
+                        recipient_id=report.reported_user.id,
+                        entity_id=report.id,
+                        context_data={
+                            'title': 'Community Guidelines Warning',
+                            'body': warning_body,
+                            'report_id': str(report.id),
+                            'content_type': content_type,
+                            'post_id': str(report.post_id) if report.post_id else None,
+                            'poll_id': str(report.poll_id) if report.poll_id else None,
+                            'reason': report.reason,
+                            'admin_notes': admin_notes,
+                            'idempotency_key': f"user_warning:{report.id}:{timezone.now().timestamp()}"
+                        }
+                    )
+                    NotificationService.handle_event(event)
 
         elif action_type == 'block_user':
             if report.reported_user:

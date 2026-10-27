@@ -353,6 +353,8 @@ class NotificationService:
                 lambda iid=inbox_item.id: NotificationService._enqueue_deliver(iid)
             )
 
+        return inbox_item
+
     @staticmethod
     def _enqueue_deliver(inbox_item_id) -> None:
         from apps.notifications.tasks import deliver_inbox_task
@@ -456,6 +458,14 @@ class NotificationService:
                 NotificationType.MEMBERSHIP,
                 DeliveryPolicy.PUSH_ONLY,
                 False,
+            ),
+            'user_warning': (
+                'Community Guidelines Warning',
+                'Your content was reviewed and found in violation of our community guidelines.',
+                NotificationPriority.HIGH,
+                NotificationType.SYSTEM,
+                DeliveryPolicy.PUSH_AND_EMAIL,
+                True,   # Mandatory — ignores user preference opt-out
             ),
         }
 

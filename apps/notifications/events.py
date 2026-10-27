@@ -120,3 +120,9 @@ class MembershipExpiringEvent(NotificationEvent):
 class RewardEarnedEvent(NotificationEvent):
     """Emitted when a client earns points, badges, or unlocks a reward."""
     _event_type = 'reward_earned'
+
+
+@dataclass
+class UserWarningEvent(NotificationEvent):
+    """Emitted when an admin issues a community guidelines warning to a user."""
+    _event_type = 'user_warning'

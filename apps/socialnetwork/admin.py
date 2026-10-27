@@ -22,4 +22,6 @@ class UserBlockAdmin(admin.ModelAdmin):
 class PostReportAdmin(admin.ModelAdmin):
     list_display = ('id', 'reporter', 'reported_user', 'reason', 'status', 'action_taken', 'tenant', 'created_at')
     search_fields = ('reporter__email', 'reported_user__email', 'description', 'admin_notes')
-    list_filter = ('status', 'reason', 'action_taken', 'created_at')
+    list_filter = ('status', 'reason', 'action_taken', 'created_at')
+    raw_id_fields = ('reporter', 'reported_user', 'post', 'poll', 'reviewed_by')
+

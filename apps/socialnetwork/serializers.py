@@ -711,7 +711,10 @@ class PostReportSerializer(serializers.ModelSerializer):
     reporter = UserMinimalSerializer(read_only=True)
     reported_user = UserMinimalSerializer(read_only=True)
     post = SocialPostSerializer(read_only=True)
-    post_id = serializers.UUIDField(write_only=True, required=False)
+    poll = PollSerializer(read_only=True)
+    post_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+    poll_id = serializers.UUIDField(write_only=True, required=False, allow_null=True)
+    content_type = serializers.SerializerMethodField()
     reason_display = serializers.CharField(source='get_reason_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     action_taken_display = serializers.CharField(source='get_action_taken_display', read_only=True)
@@ -719,20 +722,28 @@ class PostReportSerializer(serializers.ModelSerializer):
     class Meta:
         model = PostReport
         fields = [
-            'id', 'reporter', 'reported_user', 'post', 'post_id',
-            'post_snapshot', 'reason', 'reason_display', 'description',
+            'id', 'reporter', 'reported_user', 'post', 'poll', 'post_id', 'poll_id',
+            'content_type', 'post_snapshot', 'reason', 'reason_display', 'description',
             'status', 'status_display', 'action_taken', 'action_taken_display',
             'created_at', 'updated_at'
         ]
         read_only_fields = [
-            'id', 'reporter', 'reported_user', 'post', 'post_snapshot',
-            'status', 'status_display', 'action_taken', 'action_taken_display',
-            'created_at', 'updated_at'
+            'id', 'reporter', 'reported_user', 'post', 'poll', 'content_type',
+            'post_snapshot', 'status', 'status_display', 'action_taken',
+            'action_taken_display', 'created_at', 'updated_at'
         ]
+
+    def get_content_type(self, obj):
+        if obj.poll_id or (isinstance(obj.post_snapshot, dict) and obj.post_snapshot.get('type') == 'poll'):
+            return 'poll'
+        return 'post'
 
 
 class PostReportCreateSerializer(serializers.ModelSerializer):
-    post_id = serializers.UUIDField(required=True)
+    post_id = serializers.UUIDField(required=False, allow_null=True)
+    poll_id = serializers.UUIDField(required=False, allow_null=True)
+    post = serializers.UUIDField(required=False, allow_null=True, write_only=True)
+    poll = serializers.UUIDField(required=False, allow_null=True, write_only=True)
     reason = serializers.ChoiceField(
         choices=PostReport.ReportReason.choices,
         default=PostReport.ReportReason.OTHER
@@ -741,30 +752,82 @@ class PostReportCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = PostReport
-        fields = ['post_id', 'reason', 'description']
+        fields = ['post_id', 'poll_id', 'post', 'poll', 'reason', 'description']
 
-    def validate_post_id(self, value):
-        post = SocialPost.objects.filter(id=value).first()
-        if not post:
-            raise serializers.ValidationError("Post does not exist.")
-        request = self.context.get('request')
-        if request and request.user.is_authenticated and post.user_id == request.user.id:
-            raise serializers.ValidationError("You cannot report your own post.")
-        return value
+    def to_internal_value(self, data):
+        ret = super().to_internal_value(data)
+        if ret.get('poll') and not ret.get('poll_id'):
+            ret['poll_id'] = ret['poll']
+        if ret.get('post') and not ret.get('post_id'):
+            ret['post_id'] = ret['post']
+        return ret
 
     def validate(self, attrs):
         post_id = attrs.get('post_id')
+        poll_id = attrs.get('poll_id')
         request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            existing = PostReport.objects.filter(
-                reporter=request.user,
-                post_id=post_id,
-                status__in=[PostReport.ReportStatus.PENDING, PostReport.ReportStatus.UNDER_REVIEW]
-            ).first()
-            if existing:
-                raise serializers.ValidationError(
-                    "You have already reported this post. Your report is currently under review."
-                )
+
+        if not post_id and not poll_id:
+            raise serializers.ValidationError({
+                'post_id': "Either post_id or poll_id is required."
+            })
+
+        resolved_post = None
+        resolved_poll = None
+
+        if poll_id:
+            resolved_poll = Poll.objects.filter(id=poll_id).first()
+            if not resolved_poll:
+                raise serializers.ValidationError({'poll_id': "Poll does not exist."})
+            if request and request.user.is_authenticated and resolved_poll.user_id == request.user.id:
+                raise serializers.ValidationError({'poll_id': "You cannot report your own poll."})
+            if request and request.user.is_authenticated:
+                existing = PostReport.objects.filter(
+                    reporter=request.user,
+                    poll=resolved_poll,
+                    status__in=[PostReport.ReportStatus.PENDING, PostReport.ReportStatus.UNDER_REVIEW]
+                ).first()
+                if existing:
+                    raise serializers.ValidationError(
+                        "You have already reported this poll. Your report is currently under review."
+                    )
+        elif post_id:
+            # Check if post_id references a SocialPost
+            resolved_post = SocialPost.objects.filter(id=post_id).first()
+            if resolved_post:
+                if request and request.user.is_authenticated and resolved_post.user_id == request.user.id:
+                    raise serializers.ValidationError({'post_id': "You cannot report your own post."})
+                if request and request.user.is_authenticated:
+                    existing = PostReport.objects.filter(
+                        reporter=request.user,
+                        post=resolved_post,
+                        status__in=[PostReport.ReportStatus.PENDING, PostReport.ReportStatus.UNDER_REVIEW]
+                    ).first()
+                    if existing:
+                        raise serializers.ValidationError(
+                            "You have already reported this post. Your report is currently under review."
+                        )
+            else:
+                # Check if it was a Poll ID passed in post_id
+                resolved_poll = Poll.objects.filter(id=post_id).first()
+                if resolved_poll:
+                    if request and request.user.is_authenticated and resolved_poll.user_id == request.user.id:
+                        raise serializers.ValidationError({'post_id': "You cannot report your own poll."})
+                    if request and request.user.is_authenticated:
+                        existing = PostReport.objects.filter(
+                            reporter=request.user,
+                            poll=resolved_poll,
+                            status__in=[PostReport.ReportStatus.PENDING, PostReport.ReportStatus.UNDER_REVIEW]
+                        ).first()
+                        if existing:
+                            raise serializers.ValidationError(
+                                "You have already reported this poll. Your report is currently under review."
+                            )
+                else:
+                    raise serializers.ValidationError({'post_id': "Post does not exist."})
+
+        attrs['resolved_post'] = resolved_post
+        attrs['resolved_poll'] = resolved_poll
         return attrs
 
 
@@ -781,7 +844,9 @@ class AdminPostReportSerializer(serializers.ModelSerializer):
     reporter = UserMinimalSerializer(read_only=True)
     reported_user = UserMinimalSerializer(read_only=True)
     post = SocialPostSerializer(read_only=True)
+    poll = PollSerializer(read_only=True)
     reviewed_by = UserMinimalSerializer(read_only=True)
+    content_type = serializers.SerializerMethodField()
     reason_display = serializers.CharField(source='get_reason_display', read_only=True)
     status_display = serializers.CharField(source='get_status_display', read_only=True)
     action_taken_display = serializers.CharField(source='get_action_taken_display', read_only=True)
@@ -791,22 +856,29 @@ class AdminPostReportSerializer(serializers.ModelSerializer):
         model = PostReport
         fields = [
             'id', 'tenant', 'tenant_name', 'reporter', 'reported_user',
-            'post', 'post_snapshot', 'reason', 'reason_display',
+            'post', 'poll', 'content_type', 'post_snapshot', 'reason', 'reason_display',
             'description', 'status', 'status_display',
             'admin_notes', 'action_taken', 'action_taken_display',
             'reviewed_by', 'reviewed_at', 'created_at', 'updated_at'
         ]
         read_only_fields = [
             'id', 'tenant', 'tenant_name', 'reporter', 'reported_user',
-            'post', 'post_snapshot', 'reviewed_by', 'reviewed_at',
+            'post', 'poll', 'content_type', 'post_snapshot', 'reviewed_by', 'reviewed_at',
             'created_at', 'updated_at'
         ]
+
+    def get_content_type(self, obj):
+        if obj.poll_id or (isinstance(obj.post_snapshot, dict) and obj.post_snapshot.get('type') == 'poll'):
+            return 'poll'
+        return 'post'
 
 
 class AdminReportActionSerializer(serializers.Serializer):
     action = serializers.ChoiceField(choices=[
         ('delete_post', 'Delete Post'),
+        ('delete_poll', 'Delete Poll'),
         ('hide_post', 'Hide Post'),
+        ('hide_poll', 'Hide Poll'),
         ('dismiss', 'Dismiss Report'),
         ('warn_user', 'Warn User'),
         ('block_user', 'Block User'),
