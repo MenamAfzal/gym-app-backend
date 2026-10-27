@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
 from core_models.base_models import BaseModel, TenantAwareModel
 
@@ -163,6 +164,23 @@ class TenantBillingSubscription(TenantAwareModel):
         default=False,
         help_text="Whether the Gym Admin has requested plan cancellation at the end of the billing period",
     )
+
+    @property
+    def is_entitled(self) -> bool:
+        """
+        Evaluates whether this subscription currently entitles the tenant to its features.
+        The subscription is entitled if its status is ACTIVE and the current billing cycle
+        has not expired. If cancel_at_period_end is True, access remains active until current_period_end.
+        """
+        if self.status != self.StatusChoices.ACTIVE:
+            return False
+        if self.current_period_end:
+            cpe = self.current_period_end
+            if timezone.is_naive(cpe):
+                cpe = timezone.make_aware(cpe, timezone.utc)
+            if cpe < timezone.now():
+                return False
+        return True
 
     class Meta:
         verbose_name = "Tenant Billing Subscription"

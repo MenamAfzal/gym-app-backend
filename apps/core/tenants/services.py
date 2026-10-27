@@ -89,7 +89,19 @@ class TenantEntitlementService:
             for entitlement in plan_entitlements:
                 entitlements[entitlement.feature.key] = entitlement.value
         
-        # Step 2: Apply tenant-specific overrides
+        # Step 2: Incorporate active features from TenantBillingSubscription
+        from apps.payments.models import TenantBillingSubscription
+        active_billing_subs = (
+            TenantBillingSubscription.all_objects
+            .filter(tenant=tenant, status=TenantBillingSubscription.StatusChoices.ACTIVE)
+            .prefetch_related('active_features')
+        )
+        for billing_sub in active_billing_subs:
+            if billing_sub.is_entitled:
+                for bf in billing_sub.active_features.all():
+                    entitlements[bf.code] = True
+        
+        # Step 3: Apply tenant-specific overrides
         now = timezone.now()
         overrides = TenantEntitlementOverride.objects.filter(
             tenant=tenant

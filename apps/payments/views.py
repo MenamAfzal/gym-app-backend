@@ -493,7 +493,7 @@ class TenantBillingSubscriptionView(APIView):
             )
 
         active_subs = (
-            TenantBillingSubscription.objects
+            TenantBillingSubscription.all_objects
             .filter(tenant=tenant)
             .exclude(status__in=[
                 TenantBillingSubscription.StatusChoices.CANCELED,
@@ -562,19 +562,9 @@ class TenantBillingSubscriptionView(APIView):
                         e
                     )
 
-        # Build list of active subscriptions with customized feature current_period_end dates
-        from .billing_serializers import TenantBillingSubscriptionSerializer, BillingFeatureSerializer
-        serializer_data = []
-        for sub in active_subs:
-            sub_data = TenantBillingSubscriptionSerializer(sub).data
-            # Set each feature's current_period_end matching the subscription's own end date
-            features_with_dates = []
-            for feat in sub.active_features.all():
-                feat_data = BillingFeatureSerializer(feat).data
-                feat_data['current_period_end'] = sub.current_period_end.isoformat() if sub.current_period_end else None
-                features_with_dates.append(feat_data)
-            sub_data['active_features'] = features_with_dates
-            serializer_data.append(sub_data)
+        # Build list of active subscriptions with customized feature entitlement status & end dates
+        from .billing_serializers import TenantBillingSubscriptionSerializer
+        serializer_data = [TenantBillingSubscriptionSerializer(sub).data for sub in active_subs]
 
         return Response(serializer_data, status=status.HTTP_200_OK)
 
