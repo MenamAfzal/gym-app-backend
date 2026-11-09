@@ -165,6 +165,10 @@ class TenantBillingSubscription(TenantAwareModel):
         default=False,
         help_text="Whether the Gym Admin has requested plan cancellation at the end of the billing period",
     )
+    platform_features = models.JSONField(
+        default=dict,
+        blank=True
+    )
 
     @property
     def is_entitled(self) -> bool:

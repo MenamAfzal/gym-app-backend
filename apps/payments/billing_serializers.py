@@ -1,3 +1,4 @@
+from django.db import models
 from rest_framework import serializers
 from .models import BillingFeature, BillingPlan, TenantBillingSubscription
 
@@ -88,6 +89,8 @@ class GymEntitledFeatureSerializer(serializers.ModelSerializer):
 class TenantBillingSubscriptionSerializer(serializers.ModelSerializer):
     billing_plan = BillingPlanSerializer(read_only=True)
     active_features = serializers.SerializerMethodField()
+    android = serializers.SerializerMethodField()
+    ios = serializers.SerializerMethodField()
     is_entitled = serializers.BooleanField(read_only=True)
 
     class Meta:
@@ -96,6 +99,8 @@ class TenantBillingSubscriptionSerializer(serializers.ModelSerializer):
             "id",
             "billing_plan",
             "active_features",
+            "android",
+            "ios",
             "status",
             "current_period_end",
             "cancel_at_period_end",
@@ -106,6 +111,53 @@ class TenantBillingSubscriptionSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = fields
+
+    def _get_platform_features(self, obj, platform_name):
+        import uuid
+        platform_features = getattr(obj, "platform_features", None) or {}
+        custom_keys = platform_features.get(platform_name)
+
+        if custom_keys is not None:
+            uuid_keys = []
+            code_keys = []
+            for k in custom_keys:
+                k_str = str(k)
+                try:
+                    uuid.UUID(k_str)
+                    uuid_keys.append(k_str)
+                except (ValueError, AttributeError):
+                    code_keys.append(k_str)
+
+            q_filter = models.Q(code__in=code_keys)
+            if uuid_keys:
+                q_filter |= models.Q(id__in=uuid_keys)
+
+            features = BillingFeature.objects.filter(q_filter)
+            is_customized = True
+        else:
+            features = obj.active_features.all()
+            is_customized = False
+
+        serializer = GymEntitledFeatureSerializer(
+            features,
+            many=True,
+            context={"subscription": obj}
+        )
+        data = serializer.data
+        return {
+            "platform": platform_name,
+            "is_customized": is_customized,
+            "features": data,
+            "active_features": data,
+            "entitlements": {f["code"]: True for f in data if f.get("code")},
+            "feature_codes": [f["code"] for f in data if f.get("code")]
+        }
+
+    def get_android(self, obj):
+        return self._get_platform_features(obj, "android")
+
+    def get_ios(self, obj):
+        return self._get_platform_features(obj, "ios")
 
     def get_active_features(self, obj):
         features = obj.active_features.all()

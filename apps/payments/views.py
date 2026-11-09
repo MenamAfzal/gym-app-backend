@@ -668,6 +668,126 @@ class TenantBillingSubscriptionCancelView(APIView):
             )
 
 
+class TenantSubscriptionPlatformFeaturesView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def _resolve_subscription(self, request, subscription_id=None):
+        user = request.user
+        tenant = getattr(user, 'tenant', None)
+        if (user.is_superuser or getattr(user, 'role', None) == UserRole.PLATFORM_ADMIN) and not tenant:
+            tenant_id = request.query_params.get('tenant_id') or request.data.get('tenant_id')
+            if tenant_id:
+                from apps.core.tenants.models import Tenant
+                tenant = Tenant.objects.filter(id=tenant_id).first()
+
+        if not tenant:
+            return None, Response({'error': 'No tenant context found.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if subscription_id:
+            sub = TenantBillingSubscription.all_objects.filter(id=subscription_id, tenant=tenant).first()
+        else:
+            sub = (
+                TenantBillingSubscription.all_objects
+                .filter(tenant=tenant)
+                .exclude(status__in=[
+                    TenantBillingSubscription.StatusChoices.CANCELED,
+                    TenantBillingSubscription.StatusChoices.INCOMPLETE
+                ])
+                .order_by('-created_at')
+                .first()
+            )
+
+        if not sub:
+            return None, Response({'error': 'No active billing subscription found for this tenant.'}, status=status.HTTP_404_NOT_FOUND)
+
+        return sub, None
+
+    def get(self, request, subscription_id=None):
+        sub, err = self._resolve_subscription(request, subscription_id)
+        if err:
+            return err
+        from .billing_serializers import TenantBillingSubscriptionSerializer
+        serializer = TenantBillingSubscriptionSerializer(sub)
+        return Response({
+            'subscription_id': str(sub.id),
+            'android': serializer.data.get('android'),
+            'ios': serializer.data.get('ios')
+        }, status=status.HTTP_200_OK)
+
+    def post(self, request, subscription_id=None):
+        return self._update_platform_features(request, subscription_id)
+
+    def patch(self, request, subscription_id=None):
+        return self._update_platform_features(request, subscription_id)
+
+    def _update_platform_features(self, request, subscription_id=None):
+        sub, err = self._resolve_subscription(request, subscription_id)
+        if err:
+            return err
+
+        data = request.data
+        platform_features = dict(sub.platform_features or {})
+
+        platform = data.get('platform')
+        if platform:
+            platform = str(platform).strip().lower()
+            if platform not in ['android', 'ios']:
+                return Response({'error': "Platform must be 'android' or 'ios'."}, status=status.HTTP_400_BAD_REQUEST)
+
+            action = str(data.get('action', 'set')).lower()
+            if action == 'reset':
+                platform_features.pop(platform, None)
+            elif action == 'add':
+                feature_val = data.get('feature') or data.get('feature_code') or data.get('feature_id')
+                if not feature_val:
+                    return Response({'error': 'feature is required for add action.'}, status=status.HTTP_400_BAD_REQUEST)
+                current_list = list(platform_features.get(platform, []))
+                if not platform_features.get(platform):
+                    current_list = [f.code for f in sub.active_features.all()]
+                if str(feature_val) not in current_list:
+                    current_list.append(str(feature_val))
+                platform_features[platform] = current_list
+            elif action == 'remove':
+                feature_val = data.get('feature') or data.get('feature_code') or data.get('feature_id')
+                if not feature_val:
+                    return Response({'error': 'feature is required for remove action.'}, status=status.HTTP_400_BAD_REQUEST)
+                current_list = list(platform_features.get(platform, []))
+                if not platform_features.get(platform):
+                    current_list = [f.code for f in sub.active_features.all()]
+                if str(feature_val) in current_list:
+                    current_list.remove(str(feature_val))
+                platform_features[platform] = current_list
+            else:
+                features = data.get('features')
+                if features is None:
+                    return Response({'error': 'features list is required when setting platform features.'}, status=status.HTTP_400_BAD_REQUEST)
+                platform_features[platform] = [str(f) for f in features]
+        else:
+            if 'android' in data:
+                android_val = data.get('android')
+                if android_val is None:
+                    platform_features.pop('android', None)
+                else:
+                    platform_features['android'] = [str(f) for f in android_val]
+            if 'ios' in data:
+                ios_val = data.get('ios')
+                if ios_val is None:
+                    platform_features.pop('ios', None)
+                else:
+                    platform_features['ios'] = [str(f) for f in ios_val]
+
+        sub.platform_features = platform_features
+        sub.save(update_fields=['platform_features'])
+
+        from .billing_serializers import TenantBillingSubscriptionSerializer
+        serializer = TenantBillingSubscriptionSerializer(sub)
+        return Response({
+            'subscription_id': str(sub.id),
+            'android': serializer.data.get('android'),
+            'ios': serializer.data.get('ios')
+        }, status=status.HTTP_200_OK)
+
+
 class CreateCheckoutSessionView(APIView):
     permission_classes = [IsAuthenticated]
 

@@ -9,10 +9,13 @@ from rest_framework.test import APIClient
 from apps.core.tenants.models import Tenant
 from apps.payments.checkout_service import CheckoutIntegrationService
 from apps.payments.models import (
+    BillingFeature,
+    BillingPlan,
     CheckoutVerificationChallenge,
     ExternalCheckoutSession,
     PlatformLedger,
     StripeProcessedEvent,
+    TenantBillingSubscription,
     TenantCheckoutConfig,
 )
 from apps.payments.tasks import purge_old_checkout_tracking_data_task
@@ -421,3 +424,59 @@ class CheckoutIntegrationTests(TestCase):
         self.assertIsNone(session.fbc)
         self.assertIsNotNone(session.tracking_purged_at)
         self.assertEqual(session.price_snapshot, Decimal('120.00'))
+
+    def test_subscription_platform_features_customization(self):
+        plan = BillingPlan.objects.create(name='Pro Plan', slug='pro', is_public=True)
+        feat_a = BillingFeature.objects.create(name='Feature A', code='feat_a', price=Decimal('10.00'), is_active=True)
+        feat_b = BillingFeature.objects.create(name='Feature B', code='feat_b', price=Decimal('20.00'), is_active=True)
+
+        billing_sub = TenantBillingSubscription.objects.create(
+            tenant=self.tenant_a,
+            billing_plan=plan,
+            status=TenantBillingSubscription.StatusChoices.ACTIVE
+        )
+        billing_sub.active_features.add(feat_a)
+
+        self.client.force_authenticate(user=self.owner_a)
+
+        res_get = self.client.get('/api/v1/payments/billing/subscription/')
+        self.assertEqual(res_get.status_code, 200)
+        self.assertTrue(len(res_get.data) >= 1)
+        sub_data = res_get.data[0]
+        self.assertIn('android', sub_data)
+        self.assertIn('ios', sub_data)
+        self.assertFalse(sub_data['android']['is_customized'])
+        self.assertFalse(sub_data['ios']['is_customized'])
+        self.assertEqual(sub_data['android']['feature_codes'], ['feat_a'])
+        self.assertEqual(sub_data['ios']['feature_codes'], ['feat_a'])
+
+        res_patch = self.client.patch('/api/v1/payments/billing/subscription/platform-features/', {
+            'platform': 'android',
+            'features': ['feat_a', 'feat_b']
+        }, format='json')
+        self.assertEqual(res_patch.status_code, 200)
+        self.assertTrue(res_patch.data['android']['is_customized'])
+        self.assertIn('feat_b', res_patch.data['android']['feature_codes'])
+
+        res_get_updated = self.client.get('/api/v1/payments/billing/subscription/')
+        updated_sub = res_get_updated.data[0]
+        self.assertTrue(updated_sub['android']['is_customized'])
+        self.assertEqual(set(updated_sub['android']['feature_codes']), {'feat_a', 'feat_b'})
+        self.assertFalse(updated_sub['ios']['is_customized'])
+        self.assertEqual(updated_sub['ios']['feature_codes'], ['feat_a'])
+
+        res_action_remove = self.client.post('/api/v1/payments/billing/subscription/platform-features/', {
+            'platform': 'android',
+            'action': 'remove',
+            'feature': 'feat_b'
+        }, format='json')
+        self.assertEqual(res_action_remove.status_code, 200)
+        self.assertEqual(res_action_remove.data['android']['feature_codes'], ['feat_a'])
+
+        res_action_reset = self.client.post('/api/v1/payments/billing/subscription/platform-features/', {
+            'platform': 'android',
+            'action': 'reset'
+        }, format='json')
+        self.assertEqual(res_action_reset.status_code, 200)
+        self.assertFalse(res_action_reset.data['android']['is_customized'])
+        self.assertEqual(res_action_reset.data['android']['feature_codes'], ['feat_a'])

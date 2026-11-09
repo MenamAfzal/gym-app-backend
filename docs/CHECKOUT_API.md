@@ -328,3 +328,227 @@ Sets customer mobile app password and returns SimpleJWT tokens.
 }
 ```
 
+---
+
+## 3. Subscription & Mobile Platform Features API (Gym Owner / Admin)
+
+Endpoints for retrieving gym tenant subscription status and managing platform-specific feature gates (`android` and `ios`).
+
+### 3.1. Retrieve Current Subscription & Platform Features
+
+Returns the active subscription plan, entitlements, and the `android` and `ios` platform feature objects. By default, both platforms inherit all active plan features with `is_customized: false`.
+
+- **Method**: `GET`
+- **Path**: `/api/v1/payments/billing/subscription/`
+- **Headers**:
+  - `Authorization: Bearer <gym_owner_jwt_access_token>`
+
+#### Success Response (`200 OK`):
+```json
+[
+  {
+    "id": "7f8a9b1c-2d3e-4f5a-6b7c-8d9e0f1a2b3c",
+    "billing_plan": {
+      "id": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+      "name": "Standard Plan",
+      "slug": "standard",
+      "allowed_feature_count": 5,
+      "is_public": true
+    },
+    "active_features": [
+      {
+        "id": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6e",
+        "name": "Class Booking",
+        "code": "class_booking",
+        "description": "Enables group class scheduling",
+        "price": "29.00",
+        "billing_cycle": "monthly",
+        "is_active": true,
+        "platform_is_active": true,
+        "is_entitled": true,
+        "current_period_end": "2026-12-09T00:00:00Z"
+      }
+    ],
+    "android": {
+      "platform": "android",
+      "is_customized": false,
+      "features": [
+        {
+          "id": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6e",
+          "name": "Class Booking",
+          "code": "class_booking",
+          "description": "Enables group class scheduling",
+          "price": "29.00",
+          "billing_cycle": "monthly",
+          "is_active": true,
+          "platform_is_active": true,
+          "is_entitled": true,
+          "current_period_end": "2026-12-09T00:00:00Z"
+        }
+      ],
+      "active_features": [
+        {
+          "id": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6e",
+          "name": "Class Booking",
+          "code": "class_booking",
+          "description": "Enables group class scheduling",
+          "price": "29.00",
+          "billing_cycle": "monthly",
+          "is_active": true,
+          "platform_is_active": true,
+          "is_entitled": true,
+          "current_period_end": "2026-12-09T00:00:00Z"
+        }
+      ],
+      "entitlements": {
+        "class_booking": true
+      },
+      "feature_codes": [
+        "class_booking"
+      ]
+    },
+    "ios": {
+      "platform": "ios",
+      "is_customized": false,
+      "features": [
+        {
+          "id": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6e",
+          "name": "Class Booking",
+          "code": "class_booking",
+          "description": "Enables group class scheduling",
+          "price": "29.00",
+          "billing_cycle": "monthly",
+          "is_active": true,
+          "platform_is_active": true,
+          "is_entitled": true,
+          "current_period_end": "2026-12-09T00:00:00Z"
+        }
+      ],
+      "active_features": [
+        {
+          "id": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6e",
+          "name": "Class Booking",
+          "code": "class_booking",
+          "description": "Enables group class scheduling",
+          "price": "29.00",
+          "billing_cycle": "monthly",
+          "is_active": true,
+          "platform_is_active": true,
+          "is_entitled": true,
+          "current_period_end": "2026-12-09T00:00:00Z"
+        }
+      ],
+      "entitlements": {
+        "class_booking": true
+      },
+      "feature_codes": [
+        "class_booking"
+      ]
+    },
+    "status": "active",
+    "current_period_end": "2026-12-09T00:00:00Z",
+    "cancel_at_period_end": false,
+    "is_entitled": true
+  }
+]
+```
+
+---
+
+### 3.2. Manage Platform Features
+
+Customizes, adds, removes, or resets feature access specifically for Android or iOS.
+
+- **Method**: `PATCH` / `POST` / `GET`
+- **Path**: `/api/v1/payments/billing/subscription/platform-features/`
+- **Alternative Path (by ID)**: `/api/v1/payments/billing/subscription/{subscription_id}/platform-features/`
+- **Headers**:
+  - `Content-Type: application/json`
+  - `Authorization: Bearer <gym_owner_jwt_access_token>`
+
+#### Usage 1: Explicit Platform Replacement (`PATCH`)
+Replaces the feature list for a given platform.
+```json
+{
+  "platform": "android",
+  "features": ["class_booking", "workout_tracking"]
+}
+```
+
+#### Usage 2: Bulk Multi-Platform Replacement (`PATCH`)
+Sets both platforms simultaneously.
+```json
+{
+  "android": ["class_booking", "workout_tracking"],
+  "ios": ["class_booking"]
+}
+```
+
+#### Usage 3: Add a Single Feature to a Platform (`POST`)
+Adds one feature to an existing platform list.
+```json
+{
+  "platform": "android",
+  "action": "add",
+  "feature": "workout_tracking"
+}
+```
+
+#### Usage 4: Remove a Single Feature from a Platform (`POST`)
+Removes one feature from a platform list.
+```json
+{
+  "platform": "android",
+  "action": "remove",
+  "feature": "workout_tracking"
+}
+```
+
+#### Usage 5: Reset Platform Back to Subscription Defaults (`POST`)
+Clears the custom override so the platform inherits all tenant subscription features again.
+```json
+{
+  "platform": "android",
+  "action": "reset"
+}
+```
+
+#### Success Response (`200 OK`):
+```json
+{
+  "subscription_id": "7f8a9b1c-2d3e-4f5a-6b7c-8d9e0f1a2b3c",
+  "android": {
+    "platform": "android",
+    "is_customized": true,
+    "features": [
+      {
+        "id": "a1b2c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6e",
+        "name": "Class Booking",
+        "code": "class_booking",
+        "description": "Enables group class scheduling",
+        "price": "29.00",
+        "billing_cycle": "monthly",
+        "is_active": true,
+        "platform_is_active": true,
+        "is_entitled": true,
+        "current_period_end": "2026-12-09T00:00:00Z"
+      }
+    ],
+    "active_features": [],
+    "entitlements": {
+      "class_booking": true
+    },
+    "feature_codes": [
+      "class_booking"
+    ]
+  },
+  "ios": {
+    "platform": "ios",
+    "is_customized": false,
+    "features": [],
+    "active_features": [],
+    "entitlements": {},
+    "feature_codes": []
+  }
+}
+```

@@ -15,6 +15,7 @@ from .views import (
     BillingPlanListView,
     TenantBillingSubscriptionView,
     TenantBillingSubscriptionCancelView,
+    TenantSubscriptionPlatformFeaturesView,
     PackageCheckoutView,
     PackageCancelView,
     TenantFinanceSummaryAPIView,
@@ -74,6 +75,16 @@ urlpatterns = [
         'billing/subscription/',
         TenantBillingSubscriptionView.as_view(),
         name='billing-subscription',
+    ),
+    path(
+        'billing/subscription/platform-features/',
+        TenantSubscriptionPlatformFeaturesView.as_view(),
+        name='billing-subscription-platform-features',
+    ),
+    path(
+        'billing/subscription/<uuid:subscription_id>/platform-features/',
+        TenantSubscriptionPlatformFeaturesView.as_view(),
+        name='billing-subscription-platform-features-detail',
     ),
     path(
         'billing/subscription/cancel/',
