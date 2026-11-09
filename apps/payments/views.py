@@ -38,6 +38,26 @@ from rest_framework import status, viewsets
 from apps.users.models import UserRole
 from .serializers import PlatformLedgerSerializer, TenantPayoutSerializer, TenantSubscriptionSerializer, FeatureToggleSerializer
 
+
+def _resolve_tenant_for_request(request):
+    user = request.user
+    tenant = getattr(user, 'tenant', None)
+    if (user.is_superuser or user.is_staff or getattr(user, 'role', None) == UserRole.PLATFORM_ADMIN) and not tenant:
+        tenant_id = (
+            request.headers.get('X-Tenant-Id')
+            or request.headers.get('X-Tenant-ID')
+            or request.query_params.get('tenant_id')
+        )
+        if not tenant_id and hasattr(request, 'data') and isinstance(request.data, dict):
+            tenant_id = request.data.get('tenant_id')
+        if tenant_id:
+            from apps.core.tenants.models import Tenant
+            tenant = Tenant.objects.filter(id=tenant_id).first()
+        elif hasattr(request, 'tenant') and request.tenant:
+            tenant = request.tenant
+    return tenant
+
+
 class TenantLedgerViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Allows Gym Owners to see their own payout and fee ledgers.
@@ -127,7 +147,7 @@ class StripeConnectOnboardingView(APIView):
         elif user.role != UserRole.GYM_OWNER and not (user.is_staff or user.is_superuser or user.role == UserRole.PLATFORM_ADMIN):
             return Response({"error": "Only Gym Owners can set up payouts."}, status=status.HTTP_403_FORBIDDEN)
             
-        tenant = user.tenant
+        tenant = _resolve_tenant_for_request(request)
         if not tenant:
             return Response({"error": "No tenant associated with this user."}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -484,8 +504,7 @@ class TenantBillingSubscriptionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        user = request.user
-        tenant = getattr(user, 'tenant', None)
+        tenant = _resolve_tenant_for_request(request)
         if not tenant:
             return Response(
                 {"error": "No tenant associated with your account."},
@@ -587,7 +606,7 @@ class TenantBillingSubscriptionCancelView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        tenant = getattr(user, 'tenant', None)
+        tenant = _resolve_tenant_for_request(request)
         if not tenant:
             return Response(
                 {"error": "No tenant associated with your account."},
@@ -672,13 +691,14 @@ class TenantSubscriptionPlatformFeaturesView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _resolve_subscription(self, request, subscription_id=None):
+        tenant = _resolve_tenant_for_request(request)
         user = request.user
-        tenant = getattr(user, 'tenant', None)
-        if (user.is_superuser or getattr(user, 'role', None) == UserRole.PLATFORM_ADMIN) and not tenant:
-            tenant_id = request.query_params.get('tenant_id') or request.data.get('tenant_id')
-            if tenant_id:
-                from apps.core.tenants.models import Tenant
-                tenant = Tenant.objects.filter(id=tenant_id).first()
+        is_admin = user.is_superuser or user.is_staff or getattr(user, 'role', None) == UserRole.PLATFORM_ADMIN
+
+        if not tenant and subscription_id and is_admin:
+            sub = TenantBillingSubscription.all_objects.filter(id=subscription_id).first()
+            if sub:
+                return sub, None
 
         if not tenant:
             return None, Response({'error': 'No tenant context found.'}, status=status.HTTP_400_BAD_REQUEST)
@@ -1099,7 +1119,7 @@ class TenantFinanceSummaryAPIView(APIView):
         elif user.role != UserRole.GYM_OWNER and not (user.is_staff or user.is_superuser or user.role == UserRole.PLATFORM_ADMIN):
             return Response({"error": "Only Gym Owners can view financial summaries."}, status=status.HTTP_403_FORBIDDEN)
 
-        tenant = user.tenant
+        tenant = _resolve_tenant_for_request(request)
         if not tenant:
             return Response({"error": "No tenant associated with your account."}, status=status.HTTP_400_BAD_REQUEST)
 

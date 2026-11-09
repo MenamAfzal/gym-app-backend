@@ -507,3 +507,62 @@ class CheckoutIntegrationTests(TestCase):
             )
             self.assertEqual(res_blocked.status_code, 403)
             self.assertEqual(res_blocked.data['detail'], 'Origin is not allowed.')
+
+    def test_platform_admin_selects_tenant_and_changes_platform_features(self):
+        admin_user = User.objects.create_user(
+            email='superadmin@fitverx.com',
+            password='AdminPassword123!',
+            role=UserRole.PLATFORM_ADMIN,
+            is_staff=True,
+            is_superuser=True
+        )
+
+        plan = BillingPlan.objects.create(name='Pro Plan', slug='pro', allowed_feature_count=10, is_public=True)
+        feat_a = BillingFeature.objects.create(name='Feature A', code='feat_a', price=Decimal('10.00'), is_active=True)
+        feat_b = BillingFeature.objects.create(name='Feature B', code='feat_b', price=Decimal('20.00'), is_active=True)
+
+        billing_sub = TenantBillingSubscription.objects.create(
+            tenant=self.tenant_a,
+            billing_plan=plan,
+            status=TenantBillingSubscription.StatusChoices.ACTIVE
+        )
+        billing_sub.active_features.add(feat_a, feat_b)
+
+        self.client.force_authenticate(user=admin_user)
+
+        res_get = self.client.get(
+            '/api/v1/payments/billing/subscription/',
+            HTTP_X_TENANT_ID=str(self.tenant_a.id)
+        )
+        self.assertEqual(res_get.status_code, 200)
+        self.assertTrue(len(res_get.data) >= 1)
+        sub_data = res_get.data[0]
+        self.assertFalse(sub_data['android']['is_customized'])
+        self.assertFalse(sub_data['ios']['is_customized'])
+        self.assertEqual(set(sub_data['android']['feature_codes']), {'feat_a', 'feat_b'})
+        self.assertEqual(set(sub_data['ios']['feature_codes']), {'feat_a', 'feat_b'})
+
+        res_patch = self.client.patch(
+            '/api/v1/payments/billing/subscription/platform-features/',
+            {
+                'android': ['feat_a'],
+                'ios': ['feat_b']
+            },
+            HTTP_X_TENANT_ID=str(self.tenant_a.id),
+            format='json'
+        )
+        self.assertEqual(res_patch.status_code, 200)
+        self.assertTrue(res_patch.data['android']['is_customized'])
+        self.assertEqual(res_patch.data['android']['feature_codes'], ['feat_a'])
+        self.assertTrue(res_patch.data['ios']['is_customized'])
+        self.assertEqual(res_patch.data['ios']['feature_codes'], ['feat_b'])
+
+        res_get_updated = self.client.get(
+            '/api/v1/payments/billing/subscription/',
+            HTTP_X_TENANT_ID=str(self.tenant_a.id)
+        )
+        updated_sub = res_get_updated.data[0]
+        self.assertTrue(updated_sub['android']['is_customized'])
+        self.assertEqual(updated_sub['android']['feature_codes'], ['feat_a'])
+        self.assertTrue(updated_sub['ios']['is_customized'])
+        self.assertEqual(updated_sub['ios']['feature_codes'], ['feat_b'])
