@@ -199,6 +199,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         )
 
         # 4. Enforce tenant match
+        target_tenant = None
         if tenant_id:
             try:
                 target_tenant = Tenant.objects.get(id=tenant_id)
@@ -232,7 +233,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             'is_platform_admin': is_platform_admin
         }
         
-        active_tenant = target_tenant if (tenant_id and not is_platform_admin) else self.user.tenant
+        active_tenant = target_tenant if (target_tenant and not is_platform_admin) else self.user.tenant
         if active_tenant:
             data['user']['tenant_id'] = str(active_tenant.id)
             data['user']['tenant_name'] = active_tenant.name
