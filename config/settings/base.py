@@ -72,7 +72,15 @@ CORS_ALLOW_HEADERS = list(default_headers) + [
     'x-checkout-token',
     'x-tenant-id',
 ]
-FRONTEND_CHECKOUT_URL = os.environ.get('FRONTEND_CHECKOUT_URL', 'https://checkout.fitverx.com')
+FRONTEND_CHECKOUT_URL = os.environ.get('FRONTEND_CHECKOUT_URL', '')
+_raw_checkout_origins = os.environ.get('CHECKOUT_ALLOWED_ORIGINS', '')
+CHECKOUT_ALLOWED_ORIGINS = [
+    origin.strip().rstrip('/')
+    for origin in _raw_checkout_origins.split(',')
+    if origin.strip()
+]
+if FRONTEND_CHECKOUT_URL and FRONTEND_CHECKOUT_URL.rstrip('/') not in CHECKOUT_ALLOWED_ORIGINS:
+    CHECKOUT_ALLOWED_ORIGINS.append(FRONTEND_CHECKOUT_URL.rstrip('/'))
 
 TEMPLATES = [
     {

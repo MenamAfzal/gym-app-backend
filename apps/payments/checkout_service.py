@@ -43,17 +43,43 @@ def resolve_tenant_by_identifier(identifier: str) -> Tenant:
 
 class CheckoutIntegrationService:
     @staticmethod
+    def _is_origin_allowed(origin, config):
+        if not origin or not config or not config.allowed_origins:
+            return True
+        clean_origin = origin.rstrip('/').lower()
+
+        allowed_system_origins = [
+            str(o).rstrip('/').lower()
+            for o in getattr(settings, 'CHECKOUT_ALLOWED_ORIGINS', [])
+            if o
+        ]
+        frontend_checkout_url = getattr(settings, 'FRONTEND_CHECKOUT_URL', None)
+        if frontend_checkout_url:
+            allowed_system_origins.append(str(frontend_checkout_url).rstrip('/').lower())
+
+        if clean_origin in allowed_system_origins:
+            return True
+
+        if getattr(settings, 'DEBUG', False) and ('localhost' in clean_origin or '127.0.0.1' in clean_origin):
+            return True
+        for allowed in config.allowed_origins:
+            clean_allowed = str(allowed).rstrip('/').lower()
+            if clean_origin == clean_allowed:
+                return True
+            if not clean_allowed.startswith('http://') and not clean_allowed.startswith('https://'):
+                if clean_origin in [f'https://{clean_allowed}', f'http://{clean_allowed}']:
+                    return True
+        return False
+
+    @staticmethod
     def get_public_gym_info(tenant_identifier, origin=None):
         tenant = resolve_tenant_by_identifier(tenant_identifier)
         config = getattr(tenant, 'checkout_config', None)
         if not config or not config.is_enabled:
             raise NotFound('Website checkout is not enabled for this gym.')
 
-        if config.allowed_origins and origin:
-            clean_origin = origin.rstrip('/')
-            clean_allowed = [o.rstrip('/') for o in config.allowed_origins]
-            if clean_origin not in clean_allowed:
-                raise PermissionDenied('Origin is not allowed.')
+        if not CheckoutIntegrationService._is_origin_allowed(origin, config):
+            raise PermissionDenied('Origin is not allowed.')
 
         return tenant
 
@@ -64,11 +90,8 @@ class CheckoutIntegrationService:
         if not config or not config.is_enabled:
             raise NotFound('Website checkout is not enabled for this gym.')
 
-        if config.allowed_origins and origin:
-            clean_origin = origin.rstrip('/')
-            clean_allowed = [o.rstrip('/') for o in config.allowed_origins]
-            if clean_origin not in clean_allowed:
-                raise PermissionDenied('Origin is not allowed.')
+        if not CheckoutIntegrationService._is_origin_allowed(origin, config):
+            raise PermissionDenied('Origin is not allowed.')
 
         queryset = PackageType.all_objects.filter(
             tenant=tenant,
@@ -94,11 +117,8 @@ class CheckoutIntegrationService:
         if not config or not config.is_enabled:
             raise NotFound('Website checkout is not enabled for this gym.')
 
-        if config.allowed_origins and origin:
-            clean_origin = origin.rstrip('/')
-            clean_allowed = [o.rstrip('/') for o in config.allowed_origins]
-            if clean_origin not in clean_allowed:
-                raise PermissionDenied('Origin is not allowed.')
+        if not CheckoutIntegrationService._is_origin_allowed(origin, config):
+            raise PermissionDenied('Origin is not allowed.')
 
         package_type_id = validated_data.get('package_type_id')
         package_type = PackageType.all_objects.filter(
@@ -339,7 +359,7 @@ class CheckoutIntegrationService:
             ):
                 raise ValidationError({'detail': 'Payment gateway price is out of sync with package snapshot.'})
 
-        frontend_checkout_url = getattr(settings, 'FRONTEND_CHECKOUT_URL', 'https://checkout.fitverx.com')
+        frontend_checkout_url = getattr(settings, 'FRONTEND_CHECKOUT_URL', '') or getattr(settings, 'FRONTEND_URL', '')
         default_success_url = f'{frontend_checkout_url}/sessions/{session.id}/status?gateway_status=success'
         default_cancel_url = f'{frontend_checkout_url}/sessions/{session.id}?gateway_status=cancel'
 

@@ -480,3 +480,30 @@ class CheckoutIntegrationTests(TestCase):
         self.assertEqual(res_action_reset.status_code, 200)
         self.assertFalse(res_action_reset.data['android']['is_customized'])
         self.assertEqual(res_action_reset.data['android']['feature_codes'], ['feat_a'])
+
+    def test_allowed_origins_validation(self):
+        TenantCheckoutConfig.objects.create(
+            tenant=self.tenant_a,
+            is_enabled=True,
+            allowed_origins=['https://mygym.com']
+        )
+
+        with self.settings(CHECKOUT_ALLOWED_ORIGINS=['https://checkout.fitverx.com']):
+            res_official = self.client.get(
+                f'/api/v1/checkout/gym/{self.tenant_a.subdomain}/packages/',
+                HTTP_ORIGIN='https://checkout.fitverx.com'
+            )
+            self.assertEqual(res_official.status_code, 200)
+
+            res_allowed_custom = self.client.get(
+                f'/api/v1/checkout/gym/{self.tenant_a.subdomain}/packages/',
+                HTTP_ORIGIN='https://mygym.com'
+            )
+            self.assertEqual(res_allowed_custom.status_code, 200)
+
+            res_blocked = self.client.get(
+                f'/api/v1/checkout/gym/{self.tenant_a.subdomain}/packages/',
+                HTTP_ORIGIN='https://unauthorized-site.com'
+            )
+            self.assertEqual(res_blocked.status_code, 403)
+            self.assertEqual(res_blocked.data['detail'], 'Origin is not allowed.')
