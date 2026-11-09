@@ -235,6 +235,7 @@ class UserProfile(UUIDMixin, TimestampMixin):
 class OTPPurpose(models.TextChoices):
     REGISTRATION = "registration", "Registration"
     PASSWORD_RESET = "password_reset", "Password reset"
+    CHECKOUT = "checkout", "Checkout"
 
 class EmailOTP(models.Model):
     """
@@ -422,4 +423,27 @@ class StaffRegistrationRequest(UUIDMixin, TimestampMixin, TenantMixin):
         return f"{self.email} ({self.role}) - {self.status}"
 
 
-    
+class TenantCustomerAccess(UUIDMixin, TimestampMixin):
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='tenant_accesses'
+    )
+    tenant = models.ForeignKey(
+        Tenant,
+        on_delete=models.CASCADE,
+        related_name='customer_accesses'
+    )
+    role = models.CharField(max_length=20, default=UserRole.CLIENT)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'tenant'], name='unique_user_tenant_access')
+        ]
+        indexes = [
+            models.Index(fields=['user', 'tenant', 'is_active']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.email} -> {self.tenant.name} ({self.role})"

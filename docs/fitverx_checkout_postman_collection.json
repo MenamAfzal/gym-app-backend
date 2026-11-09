@@ -1,0 +1,278 @@
+{
+  "info": {
+    "_postman_id": "a9b1c2d3-e4f5-4678-90ab-cdef12345678",
+    "name": "Fitverx Public Checkout API",
+    "description": "Production REST API collection for the Fitverx standalone checkout frontend (checkout.fitverx.com). Covers public gym lookup, package catalog, session creation, OTP verification, Stripe payment initiation, payment polling, completion summary, and password establishment.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8000/api/v1/checkout",
+      "type": "string"
+    },
+    {
+      "key": "tenantId",
+      "value": "alpha",
+      "type": "string"
+    },
+    {
+      "key": "sessionId",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "sessionToken",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "packageTypeId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Gym Information & Packages",
+      "item": [
+        {
+          "name": "Retrieve Public Gym Information",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/gym/{{tenantId}}/",
+              "host": ["{{baseUrl}}"],
+              "path": ["gym", "{{tenantId}}", ""]
+            },
+            "description": "Returns public gym information including branding, logo, payment methods, and checkout settings."
+          },
+          "response": []
+        },
+        {
+          "name": "Retrieve Available Packages",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/gym/{{tenantId}}/packages/",
+              "host": ["{{baseUrl}}"],
+              "path": ["gym", "{{tenantId}}", "packages", ""]
+            },
+            "description": "Returns public purchasable packages enabled by the gym owner with server-calculated prices."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "2. Session Lifecycle & Verification",
+      "item": [
+        {
+          "name": "Create Checkout Session",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var jsonData = pm.response.json();",
+                  "if (jsonData.session_id) {",
+                  "    pm.collectionVariables.set('sessionId', jsonData.session_id);",
+                  "}",
+                  "if (jsonData.session_token) {",
+                  "    pm.collectionVariables.set('sessionToken', jsonData.session_token);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{tenantId}}\",\n  \"package_type_id\": \"{{packageTypeId}}\",\n  \"email\": \"customer@example.com\",\n  \"first_name\": \"Alex\",\n  \"last_name\": \"Morgan\",\n  \"phone_number\": \"+14155552671\",\n  \"fbp\": \"fb.1.1596403882.1767243688\",\n  \"fbc\": \"fb.1.1596403882.IwAR0example\",\n  \"source_url\": \"https://gymsite.com/pricing\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sessions/",
+              "host": ["{{baseUrl}}"],
+              "path": ["sessions", ""]
+            },
+            "description": "Initiates checkout session, locks price snapshot, generates 256-bit token, dispatches OTP."
+          },
+          "response": []
+        },
+        {
+          "name": "Retrieve Session Details",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Checkout-Token",
+                "value": "{{sessionToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/",
+              "host": ["{{baseUrl}}"],
+              "path": ["sessions", "{{sessionId}}", ""]
+            },
+            "description": "Retrieves the current state of an active checkout session."
+          },
+          "response": []
+        },
+        {
+          "name": "Verify Session OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Checkout-Token",
+                "value": "{{sessionToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"otp_code\": \"123456\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/otp/verify/",
+              "host": ["{{baseUrl}}"],
+              "path": ["sessions", "{{sessionId}}", "otp", "verify", ""]
+            },
+            "description": "Verifies 6-digit email OTP. Capped at 5 attempts to protect against brute-force attacks."
+          },
+          "response": []
+        },
+        {
+          "name": "Resend Session OTP",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "X-Checkout-Token",
+                "value": "{{sessionToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/otp/resend/",
+              "host": ["{{baseUrl}}"],
+              "path": ["sessions", "{{sessionId}}", "otp", "resend", ""]
+            },
+            "description": "Dispatches a fresh 6-digit OTP code to the customer email (60-second cooldown)."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "3. Payment & Completion",
+      "item": [
+        {
+          "name": "Initiate Payment",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Checkout-Token",
+                "value": "{{sessionToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"return_url\": \"https://checkout.fitverx.com/success\",\n  \"cancel_url\": \"https://checkout.fitverx.com/cancel\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/initiate-payment/",
+              "host": ["{{baseUrl}}"],
+              "path": ["sessions", "{{sessionId}}", "initiate-payment", ""]
+            },
+            "description": "Creates Stripe Checkout Session after validating price parity against Stripe catalog."
+          },
+          "response": []
+        },
+        {
+          "name": "Poll Payment Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Checkout-Token",
+                "value": "{{sessionToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/payment-status/",
+              "host": ["{{baseUrl}}"],
+              "path": ["sessions", "{{sessionId}}", "payment-status", ""]
+            },
+            "description": "Polls payment completion while awaiting asynchronous Stripe webhook fulfillment."
+          },
+          "response": []
+        },
+        {
+          "name": "Retrieve Completion Summary",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Checkout-Token",
+                "value": "{{sessionToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/completion/",
+              "host": ["{{baseUrl}}"],
+              "path": ["sessions", "{{sessionId}}", "completion", ""]
+            },
+            "description": "Retrieves post-payment confirmation, purchased credits, and password setup requirement flag."
+          },
+          "response": []
+        },
+        {
+          "name": "Customer Password Setup",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Checkout-Token",
+                "value": "{{sessionToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"FitverxPass123!\",\n  \"confirm_password\": \"FitverxPass123!\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/set-password/",
+              "host": ["{{baseUrl}}"],
+              "path": ["sessions", "{{sessionId}}", "set-password", ""]
+            },
+            "description": "Sets customer mobile app password and returns SimpleJWT access and refresh tokens."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
+

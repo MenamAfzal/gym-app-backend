@@ -67,6 +67,12 @@ MIDDLEWARE = [
 ROOT_URLCONF = 'config.urls'
 AUTH_USER_MODEL = 'users.User'
 CORS_ALLOW_ALL_ORIGINS = True
+from corsheaders.defaults import default_headers
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    'x-checkout-token',
+    'x-tenant-id',
+]
+FRONTEND_CHECKOUT_URL = os.environ.get('FRONTEND_CHECKOUT_URL', 'https://checkout.fitverx.com')
 
 TEMPLATES = [
     {
@@ -110,6 +116,7 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_DIRS = [BASE_DIR / 'static']
 
 
 # Media files (Stored locally on server filesystem)

@@ -21,6 +21,7 @@ from django.conf.urls.static import static
 from apps.food_logger.views import AnalyzeFoodAPIView
 from apps.rewards.views import ReferralJoinLandingView
 from apps.core.tenants.affiliate_views import AffiliateJoinLandingView
+from apps.payments.checkout_dashboard_views import TenantWebsiteIntegrationDashboardView
 
 from apps.users.views import (
     StaffRegistrationRequestCreateView,
@@ -38,6 +39,8 @@ urlpatterns = [
     path('join-gym/<str:code>', AffiliateJoinLandingView.as_view(), name='root-affiliate-join-landing-code-no-slash'),
     path('join-gym/', AffiliateJoinLandingView.as_view(), name='root-affiliate-join-landing'),
     path('join-gym', AffiliateJoinLandingView.as_view(), name='root-affiliate-join-landing-no-slash'),
+    path('portal/integrations/website/', TenantWebsiteIntegrationDashboardView.as_view(), name='portal-website-integration'),
+    path('api/v1/checkout/', include('apps.payments.checkout_urls')),
  
     path('ai/analyze-food/', AnalyzeFoodAPIView.as_view(), name='top-ai-analyze-food'),
     path('api/v1/ai/analyze-food/', AnalyzeFoodAPIView.as_view(), name='v1-ai-analyze-food'),

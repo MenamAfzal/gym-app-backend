@@ -21,6 +21,12 @@ from .views import (
     TenantPayoutListView,
     PlatformTenantFinanceBreakdownAPIView,
 )
+from apps.payments.checkout_dashboard_views import (
+    TenantCheckoutConfigAdminView,
+    TenantWebsiteIntegrationDashboardView,
+    WidgetEmbedCodeView,
+    WidgetPreviewView,
+)
 
 router = DefaultRouter()
 router.register(r'tenant-ledgers', TenantLedgerViewSet, basename='tenant-ledger')
@@ -102,5 +108,25 @@ urlpatterns = [
         'platform/finance/tenants/',
         PlatformTenantFinanceBreakdownAPIView.as_view(),
         name='platform-tenant-finance-breakdown',
+    ),
+    path(
+        'checkout-config/',
+        TenantCheckoutConfigAdminView.as_view(),
+        name='checkout-config-admin',
+    ),
+    path(
+        'checkout-config/preview/',
+        WidgetPreviewView.as_view(),
+        name='checkout-config-preview',
+    ),
+    path(
+        'checkout-config/embed-snippet/',
+        WidgetEmbedCodeView.as_view(),
+        name='checkout-config-embed-snippet',
+    ),
+    path(
+        'checkout-config/dashboard-ui/',
+        TenantWebsiteIntegrationDashboardView.as_view(),
+        name='checkout-config-dashboard-ui',
     ),
 ]

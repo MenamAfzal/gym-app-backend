@@ -408,9 +408,6 @@ class AuthService:
 
     @staticmethod
     def verify_email_otp(email: str, code: str, purpose: str, request=None):
-        """
-        Verifies the provided code against the hash.
-        """
         now = timezone.now()
         otp = EmailOTP.objects.filter(
             email=email, purpose=purpose, used=False, expires_at__gte=now
@@ -419,15 +416,27 @@ class AuthService:
         if not otp:
             raise serializers.ValidationError({"otp": "Invalid or expired OTP."})
 
+        if otp.attempts >= 5:
+            otp.used = True
+            otp.save(update_fields=['used'])
+            raise serializers.ValidationError({"otp": "Maximum verification attempts exceeded. Please request a new code."})
+
         if not otp.check_code(code):
             otp.attempts += 1
-            otp.save()
+            if otp.attempts >= 5:
+                otp.used = True
+                otp.save(update_fields=['attempts', 'used'])
+                raise serializers.ValidationError({"otp": "Maximum verification attempts exceeded. Please request a new code."})
+            otp.save(update_fields=['attempts'])
             raise serializers.ValidationError({"otp": "Invalid code."})
 
-        # Mark used
-        otp.used = True
-        otp.save()
-        return True
+        with transaction.atomic():
+            locked_otp = EmailOTP.objects.select_for_update().filter(id=otp.id, used=False).first()
+            if not locked_otp:
+                raise serializers.ValidationError({"otp": "OTP already used."})
+            locked_otp.used = True
+            locked_otp.save(update_fields=['used'])
+            return True
 
     @staticmethod
     @transaction.atomic

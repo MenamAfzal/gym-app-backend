@@ -1,3 +1,4 @@
+import uuid
 from django.db import models
 from django.utils import timezone
 from django.core.validators import MinValueValidator, MaxValueValidator
@@ -305,4 +306,196 @@ class TenantPayout(TenantAwareModel):
 
     def __str__(self):
         return f"Payout - {self.amount} {self.currency} ({self.status})"
+
+
+class TenantCheckoutConfig(BaseModel):
+    tenant = models.OneToOneField(
+        'tenants.Tenant',
+        on_delete=models.CASCADE,
+        related_name='checkout_config'
+    )
+    is_enabled = models.BooleanField(default=False)
+    allowed_origins = models.JSONField(default=list, blank=True)
+    enabled_package_ids = models.JSONField(default=list, blank=True)
+    theme_primary_color = models.CharField(max_length=20, default='#000000')
+    widget_layout = models.CharField(max_length=20, default='grid')
+    widget_button_text = models.CharField(max_length=50, default='Select Plan')
+    show_location_filter = models.BooleanField(default=True)
+    require_phone_number = models.BooleanField(default=False)
+    terms_url = models.URLField(null=True, blank=True)
+    success_redirect_url = models.URLField(null=True, blank=True)
+    cancel_redirect_url = models.URLField(null=True, blank=True)
+    meta_pixel_id = models.CharField(max_length=64, null=True, blank=True)
+    meta_capi_access_token = models.TextField(null=True, blank=True)
+    meta_test_event_code = models.CharField(max_length=64, null=True, blank=True)
+
+    def __str__(self):
+        return f"CheckoutConfig - {self.tenant.name} (enabled={self.is_enabled})"
+
+
+class CheckoutVerificationChallenge(BaseModel):
+    tenant = models.ForeignKey(
+        'tenants.Tenant',
+        on_delete=models.CASCADE,
+        related_name='checkout_challenges'
+    )
+    package_type = models.ForeignKey(
+        'scheduling.PackageType',
+        on_delete=models.CASCADE,
+        related_name='checkout_challenges'
+    )
+    email = models.EmailField(db_index=True)
+    otp_hash = models.CharField(max_length=64)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    expires_at = models.DateTimeField(db_index=True)
+    is_verified = models.BooleanField(default=False)
+    session_created = models.BooleanField(default=False)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['tenant', 'package_type', 'email']),
+            models.Index(fields=['expires_at', 'is_verified']),
+        ]
+
+    def __str__(self):
+        return f"Challenge {self.id} ({self.email})"
+
+
+class ExternalCheckoutSession(TenantAwareModel):
+    class StatusChoices(models.TextChoices):
+        PENDING_VERIFICATION = 'PENDING_VERIFICATION', 'Pending Verification'
+        READY_FOR_PAYMENT = 'READY_FOR_PAYMENT', 'Ready For Payment'
+        PAYMENT_PENDING = 'PAYMENT_PENDING', 'Payment Pending'
+        COMPLETED = 'COMPLETED', 'Completed'
+        PAYMENT_FAILED = 'PAYMENT_FAILED', 'Payment Failed'
+        EXPIRED = 'EXPIRED', 'Expired'
+        CANCELLED = 'CANCELLED', 'Cancelled'
+        PRICE_MISMATCH = 'PRICE_MISMATCH', 'Price Mismatch'
+
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    challenge = models.ForeignKey(
+        CheckoutVerificationChallenge,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='checkout_sessions'
+    )
+    package_type = models.ForeignKey(
+        'scheduling.PackageType',
+        on_delete=models.PROTECT,
+        related_name='external_checkout_sessions'
+    )
+    email = models.EmailField(db_index=True)
+    first_name = models.CharField(max_length=150, blank=True)
+    last_name = models.CharField(max_length=150, blank=True)
+    phone_number = models.CharField(max_length=25, blank=True)
+    is_verified = models.BooleanField(default=False)
+    otp_hash = models.CharField(max_length=64, blank=True, null=True)
+    otp_attempts = models.PositiveSmallIntegerField(default=0)
+    otp_expires_at = models.DateTimeField(null=True, blank=True)
+    otp_last_sent_at = models.DateTimeField(null=True, blank=True)
+    price_snapshot = models.DecimalField(max_digits=10, decimal_places=2)
+    currency = models.CharField(max_length=3, default='usd')
+    billing_cycle_snapshot = models.CharField(max_length=20)
+    credit_count_snapshot = models.PositiveIntegerField()
+    validity_days_snapshot = models.PositiveIntegerField()
+    status = models.CharField(
+        max_length=25,
+        choices=StatusChoices.choices,
+        default=StatusChoices.PENDING_VERIFICATION
+    )
+    stripe_checkout_session_id = models.CharField(
+        max_length=255,
+        unique=True,
+        null=True,
+        blank=True
+    )
+    stripe_subscription_id = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        db_index=True
+    )
+    customer_user = models.ForeignKey(
+        'users.User',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='checkout_sessions'
+    )
+    created_package = models.OneToOneField(
+        'scheduling.Package',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='checkout_session'
+    )
+    payment_record = models.OneToOneField(
+        'scheduling.Payment',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='checkout_session'
+    )
+    is_new_customer = models.BooleanField(default=False)
+    initiate_event_id = models.UUIDField(default=uuid.uuid4)
+    purchase_event_id = models.UUIDField(default=uuid.uuid4)
+    fbp = models.CharField(max_length=255, null=True, blank=True)
+    fbc = models.CharField(max_length=255, null=True, blank=True)
+    client_ip_address = models.GenericIPAddressField(null=True, blank=True)
+    client_user_agent = models.TextField(null=True, blank=True)
+    source_url = models.URLField(max_length=500, null=True, blank=True)
+    tracking_purged_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(db_index=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['tenant', 'status', 'expires_at']),
+            models.Index(fields=['tenant', 'email', 'status']),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(price_snapshot__gt=0),
+                name='checkout_session_positive_price'
+            )
+        ]
+
+    def __str__(self):
+        return f"CheckoutSession {self.id} ({self.email} - {self.status})"
+
+    @property
+    def payment_status(self):
+        if self.status == self.StatusChoices.COMPLETED:
+            return 'successful'
+        if self.status == self.StatusChoices.PAYMENT_PENDING:
+            return 'processing'
+        if self.status in [self.StatusChoices.PENDING_VERIFICATION, self.StatusChoices.READY_FOR_PAYMENT]:
+            return 'pending'
+        if self.status in [self.StatusChoices.PAYMENT_FAILED, self.StatusChoices.PRICE_MISMATCH]:
+            return 'failed'
+        if self.status == self.StatusChoices.EXPIRED:
+            return 'expired'
+        if self.status == self.StatusChoices.CANCELLED:
+            return 'cancelled'
+        return 'pending'
+
+    @property
+    def can_proceed(self):
+        return (
+            self.is_verified
+            and self.status in [self.StatusChoices.READY_FOR_PAYMENT, self.StatusChoices.PAYMENT_PENDING]
+            and self.expires_at > timezone.now()
+        )
+
+
+
+class StripeProcessedEvent(BaseModel):
+    event_id = models.CharField(max_length=255, unique=True, db_index=True)
+    event_type = models.CharField(max_length=100)
+    processed_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.event_type} ({self.event_id})"
+
 

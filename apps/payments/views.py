@@ -777,6 +777,13 @@ def stripe_checkout_webhook(request):
                 StripePackageService.handle_checkout_session_completed(session_dict)
             except Exception as exc:
                 logger.exception("Error handling package checkout session: %s", exc)
+        elif metadata.get('type') == 'external_package_checkout':
+            try:
+                from apps.payments.checkout_service import CheckoutIntegrationService
+                event_dict = event if isinstance(event, dict) else (event.to_dict() if hasattr(event, 'to_dict') else {'id': getattr(event, 'id', None), 'type': event_type, 'data': {'object': session_dict}})
+                CheckoutIntegrationService.fulfill_checkout_webhook(event_dict)
+            except Exception as exc:
+                logger.exception("Error handling external package checkout: %s", exc)
         else:
             try:
                 billing_sub = FeatureBillingService.fulfill_checkout(session_dict)

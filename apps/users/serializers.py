@@ -4,7 +4,8 @@ User Serializers
 from rest_framework import serializers, exceptions
 from apps.users.models import (
     User, UserProfile, UserRole, OTPPurpose, GenderChoices,
-    ManagerPermissionPolicy, StaffRegistrationRequest, StaffRequestStatus
+    ManagerPermissionPolicy, StaffRegistrationRequest, StaffRequestStatus,
+    TenantCustomerAccess
 )
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer, TokenRefreshSerializer
 from rest_framework_simplejwt.settings import api_settings
@@ -211,32 +212,38 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                     "detail": "This gym/tenant account is inactive."
                 })
 
-            # Prevent user from logging into a different tenant
             if not is_platform_admin and self.user.tenant_id != target_tenant.id:
-                raise serializers.ValidationError({
-                    "detail": "User credentials do not match the specified gym/tenant."
-                })
+                has_access = self.user.tenant_accesses.filter(tenant=target_tenant, is_active=True).exists()
+                if not has_access:
+                    raise serializers.ValidationError({
+                        "detail": "User credentials do not match the specified gym/tenant."
+                    })
         else:
-            # If tenant_id was not provided and user is NOT a platform admin, require it
             if not is_platform_admin:
                 raise serializers.ValidationError({
                     "tenant_id": "tenant_id is required to login."
                 })
 
-        # Add custom data to the Response Body
         data['user'] = {
             'id': str(self.user.id),
             'email': self.user.email,
             'role': self.user.role,
             'nickname': self.user.profile.nickname if hasattr(self.user, 'profile') and self.user.profile else "",
-            # Helper for frontend routing
             'is_platform_admin': is_platform_admin
         }
         
-        if self.user.tenant:
-            data['user']['tenant_id'] = str(self.user.tenant.id)
-            data['user']['tenant_name'] = self.user.tenant.name
-            data['user']['tenant_subdomain'] = self.user.tenant.subdomain
+        active_tenant = target_tenant if (tenant_id and not is_platform_admin) else self.user.tenant
+        if active_tenant:
+            data['user']['tenant_id'] = str(active_tenant.id)
+            data['user']['tenant_name'] = active_tenant.name
+            data['user']['tenant_subdomain'] = active_tenant.subdomain
+
+        if target_tenant and target_tenant.id != getattr(self.user, 'tenant_id', None):
+            refresh = self.get_token(self.user)
+            refresh['tenant_id'] = str(target_tenant.id)
+            refresh['tenant_name'] = target_tenant.name
+            data['refresh'] = str(refresh)
+            data['access'] = str(refresh.access_token)
             
         return data
 
