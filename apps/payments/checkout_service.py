@@ -393,8 +393,10 @@ class CheckoutIntegrationService:
         return {
             'session_id': str(session.id),
             'gateway': 'stripe',
+            'checkout_url': stripe_session.url,
             'stripe_checkout_url': stripe_session.url,
             'stripe_session_id': stripe_session.id,
+            'publishable_key': getattr(settings, 'STRIPE_PUBLISHABLE_KEY', None) or getattr(settings, 'STRIPE_PUBLIC_KEY', None),
             'client_secret': getattr(stripe_session, 'client_secret', None),
             'status': session.status,
         }
