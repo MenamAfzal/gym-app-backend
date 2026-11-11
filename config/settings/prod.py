@@ -20,13 +20,35 @@ DATABASES = {
 CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
 CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/1")
 
-EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND')
+EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+if EMAIL_BACKEND:
+    EMAIL_BACKEND = EMAIL_BACKEND.strip("'\"")
 EMAIL_HOST = os.environ.get('EMAIL_HOST')
+if EMAIL_HOST:
+    EMAIL_HOST = EMAIL_HOST.strip("'\"")
 EMAIL_PORT = int(os.environ.get('EMAIL_PORT', 587))
-EMAIL_USE_TLS = os.environ.get('EMAIL_USE_TLS', 'True').lower() == 'true'
+_env_ssl = os.environ.get('EMAIL_USE_SSL')
+_env_tls = os.environ.get('EMAIL_USE_TLS')
+if _env_ssl is not None:
+    EMAIL_USE_SSL = _env_ssl.strip("'\"").lower() == 'true'
+else:
+    EMAIL_USE_SSL = EMAIL_PORT == 465
+if EMAIL_USE_SSL:
+    EMAIL_USE_TLS = False
+elif _env_tls is not None:
+    EMAIL_USE_TLS = _env_tls.strip("'\"").lower() == 'true'
+else:
+    EMAIL_USE_TLS = EMAIL_PORT == 587
 EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER')
+if EMAIL_HOST_USER:
+    EMAIL_HOST_USER = EMAIL_HOST_USER.strip("'\"")
 EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD')
+if EMAIL_HOST_PASSWORD:
+    EMAIL_HOST_PASSWORD = EMAIL_HOST_PASSWORD.strip("'\"")
 DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', default=EMAIL_HOST_USER)
+if DEFAULT_FROM_EMAIL:
+    DEFAULT_FROM_EMAIL = DEFAULT_FROM_EMAIL.strip("'\"")
+EMAIL_TIMEOUT = int(os.environ.get('EMAIL_TIMEOUT', 10))
 
 CACHES = {
     "default": {
