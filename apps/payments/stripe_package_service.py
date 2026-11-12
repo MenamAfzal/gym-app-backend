@@ -7,6 +7,11 @@ from apps.core.tenants.context import bypass_tenant_isolation
 logger = logging.getLogger(__name__)
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
+ZERO_DECIMAL_CURRENCIES = {
+    'bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga',
+    'pyg', 'rwf', 'ugx', 'vnd', 'vuv', 'xaf', 'xof', 'xpf',
+}
+
 class StripePackageService:
     @staticmethod
     def sync_package_to_stripe(package_type: PackageType) -> None:
@@ -58,7 +63,11 @@ class StripePackageService:
                 )
                 logger.info(f"Updated Stripe Product {product_id} for PackageType {package_type.id}")
  
-            amount_cents = int(package_type.price * 100)
+            currency = (tenant.currency or 'usd').lower() if tenant and hasattr(tenant, 'currency') and tenant.currency else 'usd'
+            if currency in ZERO_DECIMAL_CURRENCIES:
+                amount_cents = int(round(package_type.price))
+            else:
+                amount_cents = int(round(package_type.price * 100))
             
             should_create_price = False
             if not price_id:
@@ -66,11 +75,16 @@ class StripePackageService:
             else:
                 try:
                     existing_price = stripe.Price.retrieve(price_id)
-                    if existing_price.unit_amount != amount_cents or not existing_price.active or existing_price.recurring.get('interval') != stripe_interval:
-                       
+                    existing_curr = (existing_price.currency or '').lower()
+                    if (
+                        existing_price.unit_amount != amount_cents
+                        or not existing_price.active
+                        or existing_price.recurring.get('interval') != stripe_interval
+                        or existing_curr != currency
+                    ):
                         stripe.Price.modify(price_id, active=False)
                         should_create_price = True
-                        logger.info(f"Price amount/interval changed or inactive. Deactivated price {price_id} on Stripe.")
+                        logger.info(f"Price amount/interval/currency changed or inactive. Deactivated price {price_id} on Stripe.")
                 except stripe.error.StripeError as e:
                     logger.error(f"Error retrieving Stripe Price {price_id}: {str(e)}")
                     should_create_price = True
@@ -79,7 +93,7 @@ class StripePackageService:
                 new_price = stripe.Price.create(
                     product=product_id,
                     unit_amount=amount_cents,
-                    currency="usd",
+                    currency=currency,
                     recurring={"interval": stripe_interval},
                     metadata={
                         "tenant_id": str(tenant.id),
@@ -120,6 +134,14 @@ class StripePackageService:
         except Exception as e:
             logger.error(f"Unexpected error archiving PackageType {package_type.id}: {str(e)}")
             pass
+
+    @staticmethod
+    def sync_all_tenant_packages_to_stripe(tenant):
+        if not tenant:
+            return
+        packages = PackageType.all_objects.filter(tenant=tenant, is_active=True)
+        for package in packages:
+            StripePackageService.sync_package_to_stripe(package)
 
     @staticmethod
     def handle_checkout_session_completed(session) -> None:

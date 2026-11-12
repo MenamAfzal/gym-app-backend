@@ -4,6 +4,7 @@ from apps.payments.models import (
     DEFAULT_HEALTH_COMMITMENT_CHECKBOX_LABEL,
     DEFAULT_HEALTH_COMMITMENT_TITLE,
     HealthCommitmentSignature,
+    SUPPORTED_STRIPE_CURRENCIES,
     TenantCheckoutConfig,
 )
 from apps.scheduling.models import PackageType
@@ -54,6 +55,7 @@ class TenantCheckoutConfigAdminSerializer(serializers.ModelSerializer):
             'welcome_closing_text',
             'welcome_tagline',
             'welcome_reply_to_email',
+            'currency',
             'embed_snippet',
         ]
 
@@ -91,6 +93,12 @@ class TenantCheckoutConfigAdminSerializer(serializers.ModelSerializer):
         ):
             if field_name in attrs and not (attrs[field_name] and attrs[field_name].strip()):
                 raise serializers.ValidationError({field_name: 'This field cannot be blank.'})
+        if 'currency' in attrs and attrs['currency']:
+            clean_curr = str(attrs['currency']).strip().lower()
+            valid_codes = {c['code'] for c in SUPPORTED_STRIPE_CURRENCIES}
+            if clean_curr not in valid_codes:
+                raise serializers.ValidationError({'currency': f"Currency '{clean_curr}' is not supported."})
+            attrs['currency'] = clean_curr
         return attrs
 
     def get_is_meta_capi_configured(self, obj):
@@ -110,6 +118,7 @@ class TenantCheckoutConfigAdminSerializer(serializers.ModelSerializer):
                 'location_name': p.location.name if p.location else '',
                 'billing_cycle': p.billing_cycle,
                 'credit_count': p.credit_count,
+                'currency': (tenant.currency or 'usd'),
                 'is_featured': p.is_featured,
                 'feature_badge': p.feature_badge,
             }
@@ -145,10 +154,15 @@ class TenantCheckoutConfigAdminSerializer(serializers.ModelSerializer):
             ]
             validated_data['enabled_package_ids'] = validated_packages
 
+        previous_currency = instance.currency
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
 
         instance.save()
+        if 'currency' in validated_data and validated_data['currency'] != previous_currency:
+            from apps.payments.stripe_package_service import StripePackageService
+            StripePackageService.sync_all_tenant_packages_to_stripe(instance.tenant)
+
         return instance
 
 

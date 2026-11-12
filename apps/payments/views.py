@@ -1223,8 +1223,14 @@ class TenantFinanceSummaryAPIView(APIView):
         # 8. Payout History list serialization
         payouts_data = TenantPayoutSerializer(payouts, many=True).data
 
+        from apps.payments.checkout_service import CheckoutIntegrationService
+        tenant_currency = (tenant.currency or 'usd').lower()
+        currency_symbol = CheckoutIntegrationService.CURRENCY_SYMBOLS.get(tenant_currency, '$')
+
         return Response({
             "summary": {
+                "currency": tenant_currency,
+                "currency_symbol": currency_symbol,
                 "total_sales": str(total_sales_gross),
                 "total_platform_fees": str(total_platform_fees),
                 "total_net_earnings": str(total_net_earned),

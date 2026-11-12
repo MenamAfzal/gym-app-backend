@@ -1037,3 +1037,104 @@ class CheckoutIntegrationTests(TestCase):
         self.assertEqual(res_pkg_update.status_code, 200)
         self.assertTrue(res_pkg_update.data['is_featured'])
         self.assertEqual(res_pkg_update.data['feature_badge'], 'Best Value')
+
+    @patch('stripe.Price.retrieve')
+    @patch('stripe.Price.create')
+    @patch('stripe.Product.create')
+    def test_tenant_specific_currency_flow(
+        self,
+        mock_product_create,
+        mock_price_create,
+        mock_price_retrieve,
+    ):
+        mock_product_create.return_value = MagicMock(id='prod_curr_001')
+        mock_price_create.return_value = MagicMock(id='price_curr_001')
+        mock_price_retrieve.return_value = MagicMock(
+            active=True,
+            unit_amount=12000,
+            currency='eur',
+            recurring={'interval': 'month'},
+        )
+
+        self.client.force_authenticate(user=self.owner_a)
+        res_curr_list = self.client.get('/api/v1/payments/checkout-config/currencies/')
+        self.assertEqual(res_curr_list.status_code, 200)
+        curr_codes = [c['code'] for c in res_curr_list.data['currencies']]
+        self.assertIn('eur', curr_codes)
+        self.assertIn('gbp', curr_codes)
+        self.assertIn('usd', curr_codes)
+
+        res_patch_curr = self.client.patch(
+            '/api/v1/payments/checkout-config/',
+            {'currency': 'eur', 'is_enabled': True},
+            format='json',
+        )
+        self.assertEqual(res_patch_curr.status_code, 200)
+        self.assertEqual(res_patch_curr.data['currency'], 'eur')
+
+        self.tenant_a.refresh_from_db()
+        self.assertEqual(self.tenant_a.currency, 'eur')
+        self.tenant_b.refresh_from_db()
+        self.assertEqual(self.tenant_b.currency, 'usd')
+
+        res_finance = self.client.get('/api/v1/payments/tenant/finance/summary/')
+        self.assertEqual(res_finance.status_code, 200)
+        self.assertEqual(res_finance.data['summary']['currency'], 'eur')
+        self.assertEqual(res_finance.data['summary']['currency_symbol'], '€')
+
+        self.client.force_authenticate(user=None)
+        res_gym_info = self.client.get('/api/v1/checkout/gym/alpha/')
+        self.assertEqual(res_gym_info.status_code, 200)
+        self.assertEqual(res_gym_info.data['currency'], 'eur')
+
+        res_gym_packages = self.client.get('/api/v1/checkout/gym/alpha/packages/')
+        self.assertEqual(res_gym_packages.status_code, 200)
+        self.assertTrue(len(res_gym_packages.data['packages']) >= 1)
+        self.assertEqual(res_gym_packages.data['packages'][0]['currency'], 'eur')
+
+        res_session = self.client.post('/api/v1/checkout/sessions/', {
+            'tenant_id': 'alpha',
+            'package_type_id': str(self.package_type_a.id),
+            'email': 'euro.user@example.com',
+            'first_name': 'Euro',
+            'last_name': 'Customer',
+        })
+        self.assertEqual(res_session.status_code, 201)
+        session_id = res_session.data['session_id']
+        session_token = res_session.data['session_token']
+
+        session = ExternalCheckoutSession.all_objects.get(id=session_id)
+        self.assertEqual(session.currency, 'eur')
+
+        session.is_verified = True
+        session.health_commitment_accepted = True
+        session.status = ExternalCheckoutSession.StatusChoices.READY_FOR_PAYMENT
+        session.save(update_fields=['is_verified', 'health_commitment_accepted', 'status'])
+
+        with patch('apps.payments.tasks.send_checkout_welcome_email_task.delay'):
+            fulfill_res = CheckoutIntegrationService.fulfill_checkout_webhook({
+                'id': 'evt_eur_001',
+                'type': 'checkout.session.completed',
+                'data': {
+                    'object': {
+                        'id': 'cs_eur_001',
+                        'amount_total': 12000,
+                        'currency': 'eur',
+                        'subscription': 'sub_eur_001',
+                        'metadata': {
+                            'type': 'external_package_checkout',
+                            'checkout_session_id': str(session_id),
+                        },
+                    }
+                },
+            })
+        self.assertEqual(fulfill_res['status'], 'fulfilled')
+
+        res_comp = self.client.get(
+            f'/api/v1/checkout/sessions/{session_id}/completion/',
+            headers={'X-Checkout-Token': session_token},
+        )
+        self.assertEqual(res_comp.status_code, 200)
+        self.assertEqual(res_comp.data['welcome']['purchase_confirmation']['amount_paid'], '€120.00')
+        self.assertEqual(res_comp.data['welcome']['purchase_confirmation']['currency'], 'EUR')
+        self.assertEqual(res_comp.data['welcome']['purchase_confirmation']['currency_symbol'], '€')

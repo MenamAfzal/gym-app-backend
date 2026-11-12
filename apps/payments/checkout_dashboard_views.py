@@ -19,6 +19,7 @@ from apps.payments.models import (
     DEFAULT_WELCOME_HEADLINE,
     DEFAULT_WELCOME_INTRO_TEXT,
     HealthCommitmentSignature,
+    SUPPORTED_STRIPE_CURRENCIES,
     TenantCheckoutConfig,
 )
 from apps.users.models import UserRole
@@ -334,4 +335,11 @@ class WelcomeTemplateResetDefaultView(APIView):
 
         serializer = TenantCheckoutConfigAdminSerializer(config, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class CheckoutCurrenciesListView(APIView):
+    permission_classes = [IsAuthenticated, IsTenantAdminOrOwner]
+
+    def get(self, request):
+        return Response({'currencies': SUPPORTED_STRIPE_CURRENCIES}, status=status.HTTP_200_OK)
 

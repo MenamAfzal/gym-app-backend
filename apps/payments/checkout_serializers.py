@@ -24,7 +24,7 @@ def build_health_commitment_config_payload(config):
 
 class PublicGymInfoSerializer(serializers.ModelSerializer):
     logo_url = serializers.SerializerMethodField()
-    currency = serializers.CharField(default='usd', read_only=True)
+    currency = serializers.CharField(read_only=True)
     available_payment_methods = serializers.SerializerMethodField()
     checkout_settings = serializers.SerializerMethodField()
 
@@ -72,7 +72,7 @@ class PublicPackageSerializer(serializers.ModelSerializer):
     location_id = serializers.UUIDField(source='location.id', read_only=True)
     location_name = serializers.CharField(source='location.name', read_only=True)
     location_address = serializers.CharField(source='location.address', read_only=True)
-    currency = serializers.CharField(default='usd', read_only=True)
+    currency = serializers.CharField(source='tenant.currency', read_only=True)
 
     class Meta:
         model = PackageType

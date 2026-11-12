@@ -448,13 +448,14 @@ class ClassSessionSerializer(serializers.ModelSerializer):
 
 class PackageTypeSerializer(serializers.ModelSerializer):
     location_name = serializers.CharField(source='location.name', read_only=True)
+    currency = serializers.CharField(source='tenant.currency', read_only=True)
     subscriber_count = serializers.SerializerMethodField()
 
     class Meta:
         model = PackageType
         fields = [
             'id', 'location', 'location_name', 'name', 'credit_count', 
-            'price', 'validity_days', 'billing_cycle', 'is_active',
+            'price', 'currency', 'validity_days', 'billing_cycle', 'is_active',
             'is_featured', 'feature_badge',
             'stripe_product_id', 'stripe_price_id', 'subscriber_count', 'created_at'
         ]

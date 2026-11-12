@@ -85,6 +85,7 @@ class OnboardTenantSerializer(serializers.Serializer):
     owner_email = serializers.EmailField()
     owner_password = serializers.CharField(write_only=True, min_length=8)
     initial_plan_id = serializers.UUIDField(required=False, allow_null=True)
+    currency = serializers.CharField(max_length=3, required=False, default='usd')
     logo = serializers.ImageField(required=False, allow_null=True)
     branding = serializers.JSONField(required=False, default=dict)
     referred_by_id = serializers.CharField(required=False, allow_null=True, allow_blank=True)
@@ -154,7 +155,7 @@ class TenantSerializer(serializers.ModelSerializer):
     class Meta:
         model = Tenant
         fields = [
-            'id', 'name', 'subdomain', 'logo', 'branding', 
+            'id', 'name', 'subdomain', 'logo', 'branding', 'currency',
             'is_active', 'created_at', 
             'current_subscription', 'entitlements',
             'referred_by', 'affiliate_partner', 'referred_by_id'

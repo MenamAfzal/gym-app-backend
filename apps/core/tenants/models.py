@@ -39,6 +39,12 @@ class Tenant(UUIDMixin, TimestampMixin):
         default=True,
         help_text="Whether this tenant is active"
     )
+    currency = models.CharField(
+        max_length=3,
+        default='usd',
+        db_index=True,
+        help_text="Primary operating currency for the gym"
+    )
 
     stripe_customer_id = models.CharField(
         max_length=255, 

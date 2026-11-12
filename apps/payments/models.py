@@ -59,6 +59,29 @@ DEFAULT_WELCOME_BODY_TEXT = (
 )
 DEFAULT_WELCOME_CLOSING_TEXT = "The {tenant_name} Team"
 
+SUPPORTED_STRIPE_CURRENCIES = [
+    {'code': 'usd', 'name': 'US Dollar', 'symbol': '$', 'decimal_places': 2},
+    {'code': 'eur', 'name': 'Euro', 'symbol': '€', 'decimal_places': 2},
+    {'code': 'gbp', 'name': 'British Pound', 'symbol': '£', 'decimal_places': 2},
+    {'code': 'cad', 'name': 'Canadian Dollar', 'symbol': 'CA$', 'decimal_places': 2},
+    {'code': 'aud', 'name': 'Australian Dollar', 'symbol': 'A$', 'decimal_places': 2},
+    {'code': 'nzd', 'name': 'New Zealand Dollar', 'symbol': 'NZ$', 'decimal_places': 2},
+    {'code': 'chf', 'name': 'Swiss Franc', 'symbol': 'CHF ', 'decimal_places': 2},
+    {'code': 'aed', 'name': 'UAE Dirham', 'symbol': 'AED ', 'decimal_places': 2},
+    {'code': 'sar', 'name': 'Saudi Riyal', 'symbol': 'SAR ', 'decimal_places': 2},
+    {'code': 'sgd', 'name': 'Singapore Dollar', 'symbol': 'S$', 'decimal_places': 2},
+    {'code': 'hkd', 'name': 'Hong Kong Dollar', 'symbol': 'HK$', 'decimal_places': 2},
+    {'code': 'sek', 'name': 'Swedish Krona', 'symbol': 'kr ', 'decimal_places': 2},
+    {'code': 'nok', 'name': 'Norwegian Krone', 'symbol': 'kr ', 'decimal_places': 2},
+    {'code': 'dkk', 'name': 'Danish Krone', 'symbol': 'kr ', 'decimal_places': 2},
+    {'code': 'pln', 'name': 'Polish Zloty', 'symbol': 'zł ', 'decimal_places': 2},
+    {'code': 'zar', 'name': 'South African Rand', 'symbol': 'R ', 'decimal_places': 2},
+    {'code': 'inr', 'name': 'Indian Rupee', 'symbol': '₹', 'decimal_places': 2},
+    {'code': 'brl', 'name': 'Brazilian Real', 'symbol': 'R$', 'decimal_places': 2},
+    {'code': 'mxn', 'name': 'Mexican Peso', 'symbol': 'MX$', 'decimal_places': 2},
+    {'code': 'jpy', 'name': 'Japanese Yen', 'symbol': '¥', 'decimal_places': 0},
+]
+
 
 class PlatformSettings(BaseModel):
     platform_fee_percentage = models.DecimalField(
@@ -413,8 +436,17 @@ class TenantCheckoutConfig(BaseModel):
     )
     welcome_tagline = models.CharField(max_length=255, blank=True, default="")
     welcome_reply_to_email = models.EmailField(blank=True, default="")
+    currency = models.CharField(max_length=3, default='usd', blank=True)
 
     def save(self, *args, **kwargs):
+        if self.currency:
+            self.currency = str(self.currency).strip().lower()
+            if self.tenant and self.tenant.currency != self.currency:
+                self.tenant.currency = self.currency
+                self.tenant.save(update_fields=['currency'])
+        elif self.tenant and self.tenant.currency:
+            self.currency = self.tenant.currency.strip().lower()
+
         if self.pk:
             previous = TenantCheckoutConfig.objects.filter(pk=self.pk).values(
                 'health_commitment_title',

@@ -263,7 +263,7 @@ class CheckoutIntegrationService:
             last_name=validated_data.get('last_name', '').strip(),
             phone_number=validated_data.get('phone_number', '').strip(),
             price_snapshot=package_type.price,
-            currency='usd',
+            currency=(tenant.currency or 'usd').lower() if tenant else 'usd',
             billing_cycle_snapshot=package_type.billing_cycle,
             credit_count_snapshot=package_type.credit_count,
             validity_days_snapshot=package_type.validity_days,
@@ -475,7 +475,7 @@ class CheckoutIntegrationService:
         except Exception as e:
             raise ValidationError({'detail': f'Unable to verify price with payment gateway: {e}'})
 
-        expected_cents = int(session.price_snapshot * 100)
+        expected_cents = CheckoutIntegrationService.get_stripe_amount(session.price_snapshot, session.currency)
         if (
             not stripe_price.active
             or stripe_price.currency.lower() != session.currency.lower()
@@ -585,7 +585,7 @@ class CheckoutIntegrationService:
 
             stripe_amount_total = data_object.get('amount_total')
             stripe_currency = (data_object.get('currency') or '').lower()
-            expected_amount = int(session.price_snapshot * 100)
+            expected_amount = CheckoutIntegrationService.get_stripe_amount(session.price_snapshot, session.currency)
 
             if stripe_amount_total is not None and (
                 stripe_amount_total != expected_amount or stripe_currency != session.currency.lower()
@@ -725,15 +725,40 @@ class CheckoutIntegrationService:
 
         return {'status': 'fulfilled', 'package_id': str(package.id)}
 
+    ZERO_DECIMAL_CURRENCIES = {
+        'bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga',
+        'pyg', 'rwf', 'ugx', 'vnd', 'vuv', 'xaf', 'xof', 'xpf',
+    }
+
     CURRENCY_SYMBOLS = {
         'usd': '$',
-        'gbp': '£',
         'eur': '€',
+        'gbp': '£',
         'cad': 'CA$',
         'aud': 'A$',
         'nzd': 'NZ$',
         'chf': 'CHF ',
+        'aed': 'AED ',
+        'sar': 'SAR ',
+        'sgd': 'S$',
+        'hkd': 'HK$',
+        'sek': 'kr ',
+        'nok': 'kr ',
+        'dkk': 'kr ',
+        'pln': 'zł ',
+        'zar': 'R ',
+        'inr': '₹',
+        'brl': 'R$',
+        'mxn': 'MX$',
+        'jpy': '¥',
     }
+
+    @staticmethod
+    def get_stripe_amount(amount, currency):
+        code = (currency or '').lower()
+        if code in CheckoutIntegrationService.ZERO_DECIMAL_CURRENCIES:
+            return int(round(amount))
+        return int(round(amount * 100))
 
     @staticmethod
     def generate_agreement_access_token(session_id):
@@ -776,7 +801,10 @@ class CheckoutIntegrationService:
     def _format_currency_amount(amount, currency_code):
         code = (currency_code or 'usd').lower()
         symbol = CheckoutIntegrationService.CURRENCY_SYMBOLS.get(code, f'{code.upper()} ')
-        formatted = f'{Decimal(amount or 0):.2f}'
+        if code in CheckoutIntegrationService.ZERO_DECIMAL_CURRENCIES:
+            formatted = f'{Decimal(amount or 0):.0f}'
+        else:
+            formatted = f'{Decimal(amount or 0):.2f}'
         return symbol, f'{symbol}{formatted}'
 
     @staticmethod
