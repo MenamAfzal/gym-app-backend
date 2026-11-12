@@ -1,5 +1,11 @@
 from rest_framework import serializers
-from apps.payments.models import TenantCheckoutConfig
+from apps.payments.models import (
+    DEFAULT_HEALTH_COMMITMENT_BODY,
+    DEFAULT_HEALTH_COMMITMENT_CHECKBOX_LABEL,
+    DEFAULT_HEALTH_COMMITMENT_TITLE,
+    HealthCommitmentSignature,
+    TenantCheckoutConfig,
+)
 from apps.scheduling.models import PackageType
 
 
@@ -13,6 +19,7 @@ class TenantCheckoutConfigAdminSerializer(serializers.ModelSerializer):
         allow_blank=True,
         allow_null=True
     )
+    health_commitment_version = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = TenantCheckoutConfig
@@ -26,6 +33,11 @@ class TenantCheckoutConfigAdminSerializer(serializers.ModelSerializer):
             'widget_button_text',
             'show_location_filter',
             'require_phone_number',
+            'require_health_commitment',
+            'health_commitment_title',
+            'health_commitment_body',
+            'health_commitment_checkbox_label',
+            'health_commitment_version',
             'terms_url',
             'success_redirect_url',
             'cancel_redirect_url',
@@ -33,8 +45,53 @@ class TenantCheckoutConfigAdminSerializer(serializers.ModelSerializer):
             'meta_capi_access_token',
             'is_meta_capi_configured',
             'meta_test_event_code',
+            'welcome_email_subject',
+            'welcome_headline',
+            'welcome_intro_text',
+            'welcome_additional_benefits',
+            'welcome_agreement_note',
+            'welcome_body_text',
+            'welcome_closing_text',
+            'welcome_tagline',
+            'welcome_reply_to_email',
             'embed_snippet',
         ]
+
+    def validate(self, attrs):
+        instance = self.instance
+        require_hc = attrs.get(
+            'require_health_commitment',
+            instance.require_health_commitment if instance else True
+        )
+        title = attrs.get(
+            'health_commitment_title',
+            instance.health_commitment_title if instance else DEFAULT_HEALTH_COMMITMENT_TITLE
+        )
+        body = attrs.get(
+            'health_commitment_body',
+            instance.health_commitment_body if instance else DEFAULT_HEALTH_COMMITMENT_BODY
+        )
+        label = attrs.get(
+            'health_commitment_checkbox_label',
+            instance.health_commitment_checkbox_label if instance else DEFAULT_HEALTH_COMMITMENT_CHECKBOX_LABEL
+        )
+        if require_hc:
+            if not (title and title.strip()):
+                raise serializers.ValidationError({'health_commitment_title': 'Title is required when health commitment is enabled.'})
+            if not (body and body.strip()):
+                raise serializers.ValidationError({'health_commitment_body': 'Statement text is required when health commitment is enabled.'})
+            if not (label and label.strip()):
+                raise serializers.ValidationError({'health_commitment_checkbox_label': 'Checkbox label is required when health commitment is enabled.'})
+        for field_name in (
+            'welcome_email_subject',
+            'welcome_headline',
+            'welcome_intro_text',
+            'welcome_body_text',
+            'welcome_closing_text',
+        ):
+            if field_name in attrs and not (attrs[field_name] and attrs[field_name].strip()):
+                raise serializers.ValidationError({field_name: 'This field cannot be blank.'})
+        return attrs
 
     def get_is_meta_capi_configured(self, obj):
         return bool(obj.meta_capi_access_token)
@@ -91,4 +148,28 @@ class TenantCheckoutConfigAdminSerializer(serializers.ModelSerializer):
 
         instance.save()
         return instance
+
+
+class HealthCommitmentSignatureSerializer(serializers.ModelSerializer):
+    checkout_session_id = serializers.UUIDField(source='checkout_session.id', read_only=True)
+    user_id = serializers.UUIDField(source='user.id', read_only=True)
+
+    class Meta:
+        model = HealthCommitmentSignature
+        fields = [
+            'id',
+            'user_id',
+            'checkout_session_id',
+            'signer_name',
+            'signer_email',
+            'statement_version',
+            'statement_title',
+            'statement_body',
+            'checkbox_label',
+            'accepted',
+            'signed_at',
+            'ip_address',
+            'source',
+        ]
+        read_only_fields = fields
 

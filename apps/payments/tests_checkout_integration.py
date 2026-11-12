@@ -2,6 +2,8 @@ import hashlib
 from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import patch, MagicMock
+from django.core import mail
+from django.core.cache import cache
 from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -12,13 +14,19 @@ from apps.payments.models import (
     BillingFeature,
     BillingPlan,
     CheckoutVerificationChallenge,
+    DEFAULT_HEALTH_COMMITMENT_BODY,
+    DEFAULT_WELCOME_EMAIL_SUBJECT,
     ExternalCheckoutSession,
+    HealthCommitmentSignature,
     PlatformLedger,
     StripeProcessedEvent,
     TenantBillingSubscription,
     TenantCheckoutConfig,
 )
-from apps.payments.tasks import purge_old_checkout_tracking_data_task
+from apps.payments.tasks import (
+    purge_old_checkout_tracking_data_task,
+    send_checkout_welcome_email_task,
+)
 from apps.scheduling.models import Location, Package, PackageType, Payment
 from apps.users.models import EmailOTP, OTPPurpose, TenantCustomerAccess, User, UserRole
 from apps.users.services import AuthService
@@ -26,6 +34,7 @@ from apps.users.services import AuthService
 
 class CheckoutIntegrationTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.client = APIClient()
         self.tenant_a = Tenant.objects.create(name='Alpha Gym', subdomain='alpha', is_active=True)
         self.tenant_b = Tenant.objects.create(name='Beta Fitness', subdomain='beta', is_active=True)
@@ -566,3 +575,387 @@ class CheckoutIntegrationTests(TestCase):
         self.assertEqual(updated_sub['android']['feature_codes'], ['feat_a'])
         self.assertTrue(updated_sub['ios']['is_customized'])
         self.assertEqual(updated_sub['ios']['feature_codes'], ['feat_b'])
+
+    @patch('stripe.checkout.Session.create')
+    @patch('stripe.Price.retrieve')
+    @patch('stripe.Subscription.retrieve')
+    def test_health_commitment_customization_gate_and_signed_document_audit(
+        self, mock_sub_retrieve, mock_price_retrieve, mock_stripe_session_create
+    ):
+        mock_price_retrieve.return_value = MagicMock(active=True, currency='usd', unit_amount=12000)
+        mock_stripe_session_create.return_value = MagicMock(
+            id='cs_hc_test_001',
+            url='https://checkout.stripe.com/pay/cs_hc_test_001',
+            client_secret=None
+        )
+        mock_sub_retrieve.return_value = {'current_period_end': 1770000000}
+
+        self.package_type_a.stripe_price_id = 'price_hc_test_001'
+        self.package_type_a.save()
+
+        TenantCheckoutConfig.objects.create(tenant=self.tenant_a, is_enabled=True)
+        TenantCheckoutConfig.objects.create(tenant=self.tenant_b, is_enabled=True)
+
+        self.client.force_authenticate(user=self.owner_a)
+        res_cfg = self.client.get('/api/v1/payments/checkout-config/')
+        self.assertEqual(res_cfg.status_code, 200)
+        self.assertTrue(res_cfg.data['require_health_commitment'])
+        self.assertEqual(res_cfg.data['health_commitment_version'], 1)
+        self.assertEqual(res_cfg.data['health_commitment_body'], DEFAULT_HEALTH_COMMITMENT_BODY)
+
+        custom_body = 'Alpha Gym Custom Safety Statement: Lift responsibly and report discomfort.'
+        custom_label = 'I electronically sign Alpha Gym Safety Statement.'
+        res_patch = self.client.patch('/api/v1/payments/checkout-config/', {
+            'health_commitment_title': 'Alpha Safety Waiver',
+            'health_commitment_body': custom_body,
+            'health_commitment_checkbox_label': custom_label,
+        }, format='json')
+        self.assertEqual(res_patch.status_code, 200)
+        self.assertEqual(res_patch.data['health_commitment_version'], 2)
+
+        self.client.force_authenticate(user=None)
+        res_gym_b = self.client.get(f'/api/v1/checkout/gym/{self.tenant_b.subdomain}/')
+        self.assertEqual(res_gym_b.status_code, 200)
+        self.assertEqual(
+            res_gym_b.data['checkout_settings']['health_commitment']['body'],
+            DEFAULT_HEALTH_COMMITMENT_BODY
+        )
+        self.assertEqual(res_gym_b.data['checkout_settings']['health_commitment']['version'], 1)
+
+        res_gym_a = self.client.get(f'/api/v1/checkout/gym/{self.tenant_a.subdomain}/')
+        self.assertEqual(res_gym_a.status_code, 200)
+        self.assertEqual(res_gym_a.data['checkout_settings']['health_commitment']['body'], custom_body)
+        self.assertEqual(res_gym_a.data['checkout_settings']['health_commitment']['version'], 2)
+
+        res_create = self.client.post('/api/v1/checkout/sessions/', {
+            'tenant_id': 'alpha',
+            'package_type_id': str(self.package_type_a.id),
+            'email': 'waiver_signer@example.com',
+            'first_name': 'Jane',
+            'last_name': 'Doe',
+        })
+        self.assertEqual(res_create.status_code, 201)
+        session_id = res_create.data['session_id']
+        session_token = res_create.data['session_token']
+        self.assertFalse(res_create.data['health_commitment']['accepted'])
+        self.assertFalse(res_create.data['can_initiate_payment'])
+
+        session = ExternalCheckoutSession.all_objects.get(id=session_id)
+        test_code = '654321'
+        session.otp_hash = hashlib.sha256(test_code.encode('utf-8')).hexdigest()
+        session.otp_expires_at = timezone.now() + timedelta(minutes=5)
+        session.save()
+
+        res_verify = self.client.post(
+            f'/api/v1/checkout/sessions/{session_id}/otp/verify/',
+            {'otp_code': test_code},
+            headers={'X-Checkout-Token': session_token}
+        )
+        self.assertEqual(res_verify.status_code, 200)
+
+        res_blocked_pay = self.client.post(
+            f'/api/v1/checkout/sessions/{session_id}/initiate-payment/',
+            {},
+            headers={'X-Checkout-Token': session_token}
+        )
+        self.assertEqual(res_blocked_pay.status_code, 400)
+        self.assertEqual(res_blocked_pay.data['code'], 'HEALTH_COMMITMENT_REQUIRED')
+
+        res_unticked = self.client.post(
+            f'/api/v1/checkout/sessions/{session_id}/health-commitment/',
+            {'accepted': False},
+            headers={'X-Checkout-Token': session_token},
+            format='json'
+        )
+        self.assertEqual(res_unticked.status_code, 400)
+
+        res_sign = self.client.post(
+            f'/api/v1/checkout/sessions/{session_id}/health-commitment/',
+            {'accepted': True, 'signer_name': 'Jane Doe'},
+            headers={'X-Checkout-Token': session_token},
+            REMOTE_ADDR='203.0.113.42',
+            HTTP_USER_AGENT='FitverxTestBrowser/1.0',
+            format='json'
+        )
+        self.assertEqual(res_sign.status_code, 200)
+        self.assertTrue(res_sign.data['accepted'])
+        self.assertEqual(res_sign.data['version'], 2)
+
+        res_pay = self.client.post(
+            f'/api/v1/checkout/sessions/{session_id}/initiate-payment/',
+            {},
+            headers={'X-Checkout-Token': session_token},
+            format='json'
+        )
+        self.assertEqual(res_pay.status_code, 200)
+        self.assertEqual(res_pay.data['checkout_url'], 'https://checkout.stripe.com/pay/cs_hc_test_001')
+
+        self.client.force_authenticate(user=self.owner_a)
+        self.client.post('/api/v1/payments/checkout-config/health-commitment/reset/')
+        self.client.force_authenticate(user=None)
+
+        webhook_event = {
+            'id': 'evt_hc_test_001',
+            'type': 'checkout.session.completed',
+            'data': {
+                'object': {
+                    'id': 'cs_hc_test_001',
+                    'amount_total': 12000,
+                    'currency': 'usd',
+                    'subscription': 'sub_hc_test_001',
+                    'metadata': {
+                        'type': 'external_package_checkout',
+                        'checkout_session_id': str(session_id)
+                    }
+                }
+            }
+        }
+        fulfill_res = CheckoutIntegrationService.fulfill_checkout_webhook(webhook_event)
+        self.assertEqual(fulfill_res['status'], 'fulfilled')
+
+        signature = HealthCommitmentSignature.all_objects.get(checkout_session_id=session_id)
+        self.assertEqual(signature.tenant, self.tenant_a)
+        self.assertEqual(signature.signer_name, 'Jane Doe')
+        self.assertEqual(signature.signer_email, 'waiver_signer@example.com')
+        self.assertEqual(signature.statement_version, 2)
+        self.assertEqual(signature.statement_body, custom_body)
+        self.assertEqual(signature.checkbox_label, custom_label)
+        self.assertEqual(signature.ip_address, '203.0.113.42')
+
+        ExternalCheckoutSession.all_objects.filter(id=session_id).update(
+            created_at=timezone.now() - timedelta(days=35)
+        )
+        purge_old_checkout_tracking_data_task()
+        signature.refresh_from_db()
+        self.assertEqual(signature.ip_address, '203.0.113.42')
+
+        self.client.force_authenticate(user=self.owner_a)
+        res_sigs_a = self.client.get('/api/v1/payments/checkout-config/health-commitment/signatures/')
+        self.assertEqual(res_sigs_a.status_code, 200)
+        self.assertEqual(len(res_sigs_a.data['signatures']), 1)
+
+        owner_b = User.objects.create_user(
+            email='ownerb_hc@example.com',
+            password='Password123!',
+            tenant=self.tenant_b,
+            role=UserRole.GYM_OWNER
+        )
+        self.client.force_authenticate(user=owner_b)
+        res_sigs_b = self.client.get('/api/v1/payments/checkout-config/health-commitment/signatures/')
+        self.assertEqual(res_sigs_b.status_code, 200)
+        self.assertEqual(len(res_sigs_b.data['signatures']), 0)
+
+    @patch('stripe.checkout.Session.create')
+    @patch('stripe.Price.retrieve')
+    def test_health_commitment_inline_acceptance_paths(self, mock_price_retrieve, mock_stripe_session_create):
+        mock_price_retrieve.return_value = MagicMock(active=True, currency='usd', unit_amount=12000)
+        mock_stripe_session_create.return_value = MagicMock(
+            id='cs_inline_hc_001',
+            url='https://checkout.stripe.com/pay/cs_inline_hc_001',
+            client_secret=None
+        )
+        self.package_type_a.stripe_price_id = 'price_inline_hc_001'
+        self.package_type_a.save()
+
+        TenantCheckoutConfig.objects.create(tenant=self.tenant_a, is_enabled=True)
+
+        res_create = self.client.post('/api/v1/checkout/sessions/', {
+            'tenant_id': 'alpha',
+            'package_type_id': str(self.package_type_a.id),
+            'email': 'inline_hc@example.com',
+            'first_name': 'Inline',
+            'last_name': 'Signer',
+        })
+        self.assertEqual(res_create.status_code, 201)
+        session_id = res_create.data['session_id']
+        session_token = res_create.data['session_token']
+
+        session = ExternalCheckoutSession.all_objects.get(id=session_id)
+        session.is_verified = True
+        session.status = ExternalCheckoutSession.StatusChoices.READY_FOR_PAYMENT
+        session.save(update_fields=['is_verified', 'status'])
+
+        res_pay = self.client.post(
+            f'/api/v1/checkout/sessions/{session_id}/initiate-payment/',
+            {
+                'health_commitment_accepted': True,
+                'health_commitment_signer_name': 'Inline Signer'
+            },
+            headers={'X-Checkout-Token': session_token},
+            format='json'
+        )
+        self.assertEqual(res_pay.status_code, 200)
+        session.refresh_from_db()
+        self.assertTrue(session.health_commitment_accepted)
+        self.assertEqual(session.health_commitment_signer_name, 'Inline Signer')
+
+    @patch('stripe.checkout.Session.create')
+    @patch('stripe.Price.retrieve')
+    def test_welcome_screen_customization_agreement_download_and_email(
+        self,
+        mock_price_retrieve,
+        mock_stripe_session_create,
+    ):
+        mock_price_retrieve.return_value = MagicMock(active=True, currency='gbp', unit_amount=12000)
+        mock_stripe_session_create.return_value = MagicMock(
+            id='cs_welcome_001',
+            url='https://checkout.stripe.com/pay/cs_welcome_001',
+            client_secret=None
+        )
+        self.package_type_a.stripe_price_id = 'price_welcome_001'
+        self.package_type_a.save()
+
+        self.client.force_authenticate(user=self.owner_a)
+        res_bad = self.client.patch('/api/v1/payments/checkout-config/', {
+            'welcome_headline': '   ',
+        }, format='json')
+        self.assertEqual(res_bad.status_code, 400)
+
+        res_cfg = self.client.patch('/api/v1/payments/checkout-config/', {
+            'is_enabled': True,
+            'welcome_email_subject': 'Welcome to {tenant_name} — your purchase is confirmed',
+            'welcome_headline': 'Welcome to {tenant_name}!',
+            'welcome_intro_text': (
+                'Thank you for joining us and purchasing {package_name}. '
+                'We have received your payment.'
+            ),
+            'welcome_additional_benefits': 'Priority class booking access',
+            'welcome_body_text': 'We are getting everything ready at {tenant_name} to welcome you.',
+            'welcome_closing_text': 'The {tenant_name} Team',
+            'welcome_tagline': 'Stronger Every Day',
+            'welcome_reply_to_email': 'support@alphagym.example.com',
+        }, format='json')
+        self.assertEqual(res_cfg.status_code, 200)
+        self.assertEqual(res_cfg.data['welcome_tagline'], 'Stronger Every Day')
+
+        self.client.force_authenticate(user=None)
+        res_create = self.client.post('/api/v1/checkout/sessions/', {
+            'tenant_id': 'alpha',
+            'package_type_id': str(self.package_type_a.id),
+            'email': 'welcome.client@example.com',
+            'first_name': 'Alice',
+            'last_name': 'Walker',
+        })
+        self.assertEqual(res_create.status_code, 201)
+        session_id = res_create.data['session_id']
+        session_token = res_create.data['session_token']
+
+        session = ExternalCheckoutSession.all_objects.get(id=session_id)
+        session.currency = 'gbp'
+        session.is_verified = True
+        session.status = ExternalCheckoutSession.StatusChoices.READY_FOR_PAYMENT
+        session.save(update_fields=['currency', 'is_verified', 'status'])
+
+        res_sign = self.client.post(
+            f'/api/v1/checkout/sessions/{session_id}/health-commitment/',
+            {'accepted': True, 'signer_name': 'Alice Walker'},
+            headers={'X-Checkout-Token': session_token},
+            format='json',
+        )
+        self.assertEqual(res_sign.status_code, 200)
+
+        res_pay = self.client.post(
+            f'/api/v1/checkout/sessions/{session_id}/initiate-payment/',
+            {},
+            headers={'X-Checkout-Token': session_token},
+            format='json',
+        )
+        self.assertEqual(res_pay.status_code, 200)
+
+        with patch('apps.payments.tasks.send_checkout_welcome_email_task.delay'):
+            fulfill_res = CheckoutIntegrationService.fulfill_checkout_webhook({
+                'id': 'evt_welcome_001',
+                'type': 'checkout.session.completed',
+                'data': {
+                    'object': {
+                        'id': 'cs_welcome_001',
+                        'amount_total': 12000,
+                        'currency': 'gbp',
+                        'subscription': 'sub_welcome_001',
+                        'metadata': {
+                            'type': 'external_package_checkout',
+                            'checkout_session_id': str(session_id),
+                        },
+                    }
+                },
+            })
+        self.assertEqual(fulfill_res['status'], 'fulfilled')
+
+        res_comp = self.client.get(
+            f'/api/v1/checkout/sessions/{session_id}/completion/',
+            headers={'X-Checkout-Token': session_token},
+        )
+        self.assertEqual(res_comp.status_code, 200)
+        welcome = res_comp.data['welcome']
+        self.assertEqual(welcome['tenant_name'], 'Alpha Gym')
+        self.assertEqual(welcome['subject'], 'Welcome to Alpha Gym — your purchase is confirmed')
+        self.assertEqual(welcome['headline'], 'Welcome to Alpha Gym!')
+        self.assertEqual(welcome['greeting'], 'Hi Alice,')
+        self.assertIn(self.package_type_a.name, welcome['intro'])
+        self.assertEqual(welcome['purchase_confirmation']['amount_paid'], '£120.00')
+        self.assertIn('Priority class booking access', welcome['purchase_confirmation']['whats_included'])
+        self.assertEqual(
+            welcome['purchase_confirmation']['payment_arrangement'],
+            'Recurring monthly payment of £120.00',
+        )
+        self.assertTrue(welcome['agreement']['signed'])
+        self.assertIn(f'/api/v1/checkout/sessions/{session_id}/agreement/?access=', welcome['agreement']['view_url'])
+        self.assertEqual(welcome['closing'], 'The Alpha Gym Team')
+        self.assertEqual(welcome['tagline'], 'Stronger Every Day')
+        self.assertIn('We are getting everything ready at Alpha Gym', welcome['custom_body'])
+
+        self.assertIn(
+            f'/api/v1/checkout/sessions/{session_id}/agreement/?access=',
+            res_comp.data['health_commitment']['view_url'],
+        )
+
+        res_unauth = self.client.get(f'/api/v1/checkout/sessions/{session_id}/agreement/')
+        self.assertEqual(res_unauth.status_code, 403)
+
+        res_bad_sig = self.client.get(f'/api/v1/checkout/sessions/{session_id}/agreement/?access=invalid')
+        self.assertEqual(res_bad_sig.status_code, 403)
+
+        access_token = CheckoutIntegrationService.generate_agreement_access_token(session_id)
+        res_html = self.client.get(
+            f'/api/v1/checkout/sessions/{session_id}/agreement/?access={access_token}&format=html'
+        )
+        self.assertEqual(res_html.status_code, 200)
+        self.assertIn('Alice Walker', res_html.content.decode('utf-8'))
+        self.assertIn('Alpha Gym', res_html.content.decode('utf-8'))
+
+        res_dl = self.client.get(
+            f'/api/v1/checkout/sessions/{session_id}/agreement/?access={access_token}&format=html&download=1'
+        )
+        self.assertEqual(res_dl.status_code, 200)
+        self.assertIn('attachment;', res_dl['Content-Disposition'])
+
+        res_json = self.client.get(
+            f'/api/v1/checkout/sessions/{session_id}/agreement/',
+            headers={'X-Checkout-Token': session_token},
+        )
+        self.assertEqual(res_json.status_code, 200)
+        self.assertEqual(res_json.data['signer_email'], 'welcome.client@example.com')
+
+        mail.outbox = []
+        send_checkout_welcome_email_task(str(session_id))
+        self.assertEqual(len(mail.outbox), 1)
+        sent = mail.outbox[0]
+        self.assertEqual(sent.to, ['welcome.client@example.com'])
+        self.assertEqual(sent.reply_to, ['support@alphagym.example.com'])
+        self.assertEqual(sent.subject, 'Welcome to Alpha Gym — your purchase is confirmed')
+        self.assertIn('Hi Alice,', sent.body)
+        self.assertIn('£120.00', sent.body)
+        self.assertIn(f'/api/v1/checkout/sessions/{session_id}/agreement/?access={access_token}', sent.body)
+        self.assertIn('The Alpha Gym Team', sent.body)
+        self.assertIn('Stronger Every Day', sent.body)
+        self.assertEqual(len(sent.alternatives), 1)
+        html_body, mime_type = sent.alternatives[0]
+        self.assertEqual(mime_type, 'text/html')
+        self.assertIn('View &amp; Download Signed Agreement', html_body)
+        self.assertIn('Alice', html_body)
+
+        self.client.force_authenticate(user=self.owner_a)
+        res_reset = self.client.post('/api/v1/payments/checkout-config/welcome/reset/')
+        self.assertEqual(res_reset.status_code, 200)
+        self.assertEqual(res_reset.data['welcome_email_subject'], DEFAULT_WELCOME_EMAIL_SUBJECT)
+        self.assertEqual(res_reset.data['welcome_tagline'], '')

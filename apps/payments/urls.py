@@ -23,8 +23,11 @@ from .views import (
     PlatformTenantFinanceBreakdownAPIView,
 )
 from apps.payments.checkout_dashboard_views import (
+    HealthCommitmentResetDefaultView,
+    HealthCommitmentSignatureListView,
     TenantCheckoutConfigAdminView,
     TenantWebsiteIntegrationDashboardView,
+    WelcomeTemplateResetDefaultView,
     WidgetEmbedCodeView,
     WidgetPreviewView,
 )
@@ -124,6 +127,21 @@ urlpatterns = [
         'checkout-config/',
         TenantCheckoutConfigAdminView.as_view(),
         name='checkout-config-admin',
+    ),
+    path(
+        'checkout-config/health-commitment/reset/',
+        HealthCommitmentResetDefaultView.as_view(),
+        name='checkout-config-health-commitment-reset',
+    ),
+    path(
+        'checkout-config/health-commitment/signatures/',
+        HealthCommitmentSignatureListView.as_view(),
+        name='checkout-config-health-commitment-signatures',
+    ),
+    path(
+        'checkout-config/welcome/reset/',
+        WelcomeTemplateResetDefaultView.as_view(),
+        name='checkout-config-welcome-reset',
     ),
     path(
         'checkout-config/preview/',

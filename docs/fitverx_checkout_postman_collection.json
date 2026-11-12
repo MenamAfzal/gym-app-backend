@@ -183,6 +183,33 @@
             "description": "Dispatches a fresh 6-digit OTP code to the customer email (60-second cooldown)."
           },
           "response": []
+        },
+        {
+          "name": "Accept & Sign Health Commitment Statement",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-Checkout-Token",
+                "value": "{{sessionToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"accepted\": true,\n  \"signer_name\": \"Alex Morgan\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/health-commitment/",
+              "host": ["{{baseUrl}}"],
+              "path": ["sessions", "{{sessionId}}", "health-commitment", ""]
+            },
+            "description": "Records electronic signature (tick box acceptance + timestamp + IP + immutable snapshot) prior to payment."
+          },
+          "response": []
         }
       ]
     },
@@ -250,7 +277,32 @@
               "host": ["{{baseUrl}}"],
               "path": ["sessions", "{{sessionId}}", "completion", ""]
             },
-            "description": "Retrieves post-payment confirmation, purchased credits, and password setup requirement flag."
+            "description": "Retrieves post-payment confirmation, tenant-customized welcome screen payload, signed agreement links, and password setup requirement flag."
+          },
+          "response": []
+        },
+        {
+          "name": "View / Download Signed Agreement",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "X-Checkout-Token",
+                "value": "{{sessionToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/sessions/{{sessionId}}/agreement/?format=html",
+              "host": ["{{baseUrl}}"],
+              "path": ["sessions", "{{sessionId}}", "agreement", ""],
+              "query": [
+                {
+                  "key": "format",
+                  "value": "html"
+                }
+              ]
+            },
+            "description": "Returns the customer's signed Health Commitment Statement in HTML or JSON (accepts ?access=<hmac> or X-Checkout-Token; add &download=1 to download)."
           },
           "response": []
         },
@@ -375,6 +427,122 @@
               "path": ["billing", "subscription", "platform-features", ""]
             },
             "description": "Performs atomic add, remove, or reset action on platform features."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "5. Health Commitment Statement Admin",
+      "item": [
+        {
+          "name": "Customize Health Commitment Statement (PATCH)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"require_health_commitment\": true,\n  \"health_commitment_title\": \"Health Commitment Statement\",\n  \"health_commitment_body\": \"Custom gym statement text...\",\n  \"health_commitment_checkbox_label\": \"I have read and agree to the Health Commitment Statement.\"\n}"
+            },
+            "url": {
+              "raw": "{{paymentsBaseUrl}}/checkout-config/",
+              "host": ["{{paymentsBaseUrl}}"],
+              "path": ["checkout-config", ""]
+            },
+            "description": "Updates tenant-specific Health Commitment Statement and auto-increments version."
+          },
+          "response": []
+        },
+        {
+          "name": "Reset Health Commitment Statement to Default",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{paymentsBaseUrl}}/checkout-config/health-commitment/reset/",
+              "host": ["{{paymentsBaseUrl}}"],
+              "path": ["checkout-config", "health-commitment", "reset", ""]
+            },
+            "description": "Resets tenant Health Commitment Statement back to the default text."
+          },
+          "response": []
+        },
+        {
+          "name": "List Signed Health Commitment Documents",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{paymentsBaseUrl}}/checkout-config/health-commitment/signatures/",
+              "host": ["{{paymentsBaseUrl}}"],
+              "path": ["checkout-config", "health-commitment", "signatures", ""]
+            },
+            "description": "Lists signed Health Commitment Statements for the tenant."
+          },
+          "response": []
+        },
+        {
+          "name": "Update Tenant Welcome Screen & Email Config",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"welcome_email_subject\": \"Welcome to {tenant_name} — your purchase is confirmed\",\n  \"welcome_headline\": \"Welcome to {tenant_name}!\",\n  \"welcome_intro_text\": \"Thank you for joining us and purchasing {package_name}. We've received your payment, and we're delighted to welcome you to our growing community.\",\n  \"welcome_additional_benefits\": \"\",\n  \"welcome_body_text\": \"We'll be in touch with details of our timetable and how to reserve your first session.\",\n  \"welcome_closing_text\": \"The {tenant_name} Team\",\n  \"welcome_tagline\": \"Move with Purpose\",\n  \"welcome_reply_to_email\": \"hello@yourgym.example.com\"\n}"
+            },
+            "url": {
+              "raw": "{{paymentsBaseUrl}}/checkout-config/",
+              "host": ["{{paymentsBaseUrl}}"],
+              "path": ["checkout-config", ""]
+            },
+            "description": "Customizes the tenant-specific Welcome Screen and Welcome Email template."
+          },
+          "response": []
+        },
+        {
+          "name": "Reset Welcome Template to Default",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{ownerToken}}"
+              }
+            ],
+            "url": {
+              "raw": "{{paymentsBaseUrl}}/checkout-config/welcome/reset/",
+              "host": ["{{paymentsBaseUrl}}"],
+              "path": ["checkout-config", "welcome", "reset", ""]
+            },
+            "description": "Resets tenant Welcome Screen & Email content back to defaults."
           },
           "response": []
         }

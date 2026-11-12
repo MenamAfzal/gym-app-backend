@@ -1,4 +1,7 @@
+from django.http import HttpResponse
+from django.template.loader import render_to_string
 from rest_framework import status
+from rest_framework.negotiation import DefaultContentNegotiation
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import AnonRateThrottle
@@ -6,6 +9,7 @@ from rest_framework.views import APIView
 
 from apps.payments.models import ExternalCheckoutSession
 from apps.payments.checkout_serializers import (
+    AcceptHealthCommitmentSerializer,
     CheckoutCompletionSerializer,
     CheckoutSessionDetailSerializer,
     CreateCheckoutSessionSerializer,
@@ -15,6 +19,16 @@ from apps.payments.checkout_serializers import (
     VerifySessionOTPSerializer,
 )
 from apps.payments.checkout_service import CheckoutIntegrationService
+
+
+def _extract_client_metadata(request):
+    forwarded_for = request.META.get('HTTP_X_FORWARDED_FOR')
+    if forwarded_for:
+        ip_address = forwarded_for.split(',')[0].strip()
+    else:
+        ip_address = request.META.get('REMOTE_ADDR')
+    user_agent = request.META.get('HTTP_USER_AGENT', '')
+    return ip_address, user_agent
 
 
 def get_session_token_from_request(request):
@@ -69,9 +83,12 @@ class CreateCheckoutSessionView(APIView):
         serializer = CreateCheckoutSessionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         origin = request.headers.get('Origin')
+        ip_address, user_agent = _extract_client_metadata(request)
         result = CheckoutIntegrationService.create_checkout_session(
             validated_data=serializer.validated_data,
-            origin=origin
+            origin=origin,
+            ip_address=ip_address,
+            user_agent=user_agent
         )
         session = result['session']
         session_token = result['session_token']
@@ -130,6 +147,26 @@ class CheckoutSessionDetailView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+class SessionHealthCommitmentView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [CheckoutRateThrottle]
+
+    def post(self, request, session_id):
+        token = get_session_token_from_request(request)
+        session = CheckoutIntegrationService.authenticate_session(session_id, token)
+        serializer = AcceptHealthCommitmentSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        ip_address, user_agent = _extract_client_metadata(request)
+        result = CheckoutIntegrationService.accept_health_commitment(
+            session=session,
+            accepted=serializer.validated_data['accepted'],
+            signer_name=serializer.validated_data.get('signer_name', ''),
+            ip_address=ip_address,
+            user_agent=user_agent
+        )
+        return Response(result, status=status.HTTP_200_OK)
+
+
 class InitiateSessionPaymentView(APIView):
     permission_classes = [AllowAny]
     throttle_classes = [CheckoutRateThrottle]
@@ -139,10 +176,17 @@ class InitiateSessionPaymentView(APIView):
         session = CheckoutIntegrationService.authenticate_session(session_id, token)
         return_url = request.data.get('return_url')
         cancel_url = request.data.get('cancel_url')
+        health_commitment_accepted = request.data.get('health_commitment_accepted')
+        signer_name = request.data.get('health_commitment_signer_name', '')
+        ip_address, user_agent = _extract_client_metadata(request)
         result = CheckoutIntegrationService.initiate_session_payment(
             session=session,
             return_url=return_url,
-            cancel_url=cancel_url
+            cancel_url=cancel_url,
+            health_commitment_accepted=bool(health_commitment_accepted) if health_commitment_accepted is not None else None,
+            signer_name=signer_name,
+            ip_address=ip_address,
+            user_agent=user_agent
         )
         return Response(result, status=status.HTTP_200_OK)
 
@@ -194,3 +238,51 @@ class SessionSetPasswordView(APIView):
             new_password=serializer.validated_data['new_password']
         )
         return Response(result, status=status.HTTP_200_OK)
+
+
+class _IgnoreFormatQueryNegotiation(DefaultContentNegotiation):
+    def select_renderer(self, request, renderers, format_suffix=None):
+        return (renderers[0], renderers[0].media_type)
+
+
+class SessionSignedAgreementView(APIView):
+    permission_classes = [AllowAny]
+    content_negotiation_class = _IgnoreFormatQueryNegotiation
+
+    def get(self, request, session_id):
+        access_token = (
+            request.query_params.get('access')
+            or request.query_params.get('signature')
+            or ''
+        ).strip() or None
+        checkout_token = get_session_token_from_request(request)
+        session = CheckoutIntegrationService.authorize_agreement_access(
+            session_id=session_id,
+            access_token=access_token,
+            checkout_token=checkout_token,
+        )
+        agreement = CheckoutIntegrationService.get_signed_agreement_document(session)
+
+        base_url = request.build_absolute_uri('/').rstrip('/')
+        resolved_token = access_token or CheckoutIntegrationService.generate_agreement_access_token(session.id)
+        view_url = f'{base_url}/api/v1/checkout/sessions/{session.id}/agreement/?access={resolved_token}&format=html'
+        download_url = f'{view_url}&download=1'
+
+        requested_format = (request.query_params.get('format') or '').strip().lower()
+        is_download = (request.query_params.get('download') or '').strip().lower() in ('1', 'true', 'yes')
+        if requested_format == 'html' or is_download:
+            html = render_to_string('payments/signed_agreement.html', {
+                'agreement': agreement,
+                'download_url': download_url,
+                'is_download': is_download,
+            })
+            response = HttpResponse(html, content_type='text/html; charset=utf-8')
+            if is_download:
+                response['Content-Disposition'] = f'attachment; filename="signed-agreement-{session.id}.html"'
+            return response
+
+        return Response({
+            **agreement,
+            'view_url': view_url,
+            'download_url': download_url,
+        }, status=status.HTTP_200_OK)

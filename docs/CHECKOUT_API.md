@@ -49,6 +49,14 @@ curl -X GET "https://api.fitverx.com/api/v1/checkout/gym/irontemple/"
   "available_payment_methods": ["card", "apple_pay", "google_pay"],
   "checkout_settings": {
     "require_phone_number": false,
+    "require_health_commitment": true,
+    "health_commitment": {
+      "required": true,
+      "title": "Health Commitment Statement",
+      "body": "Your health is your responsibility...",
+      "checkbox_label": "I have read and understood the Health Commitment Statement. By ticking this box, I confirm this acts as my electronic signature.",
+      "version": 1
+    },
     "terms_url": "https://irontemple.com/terms",
     "privacy_policy_url": "https://irontemple.com/privacy",
     "success_redirect_url": "https://irontemple.com/welcome",
@@ -111,6 +119,8 @@ Initiates a checkout session, takes a price snapshot, generates a 256-bit sessio
   "first_name": "Sarah",
   "last_name": "Connor",
   "phone_number": "+14155552671",
+  "health_commitment_accepted": false,
+  "health_commitment_signer_name": "Sarah Connor",
   "fbp": "fb.1.1596403882.1767243688",
   "fbc": "fb.1.1596403882.IwAR0example",
   "source_url": "https://irontemple.com/pricing"
@@ -222,9 +232,41 @@ Retrieves the current state of the session.
 
 ---
 
+### 2.6b. Accept & Sign Health Commitment Statement
+
+Records electronic signature (tick box acceptance + timestamp + IP + User-Agent + immutable text snapshot) prior to payment. Can also be passed inline during `POST /sessions/` or `POST /sessions/{session_id}/initiate-payment/`.
+
+- **Method**: `POST`
+- **Path**: `/sessions/{session_id}/health-commitment/`
+- **Headers**:
+  - `Content-Type: application/json`
+  - `X-Checkout-Token: <session_token>`
+
+#### Request Body:
+```json
+{
+  "accepted": true,
+  "signer_name": "Sarah Connor"
+}
+```
+
+#### Success Response (`200 OK`):
+```json
+{
+  "session_id": "5cb89267-33e9-4e50-a9fe-e4f0c474d2fe",
+  "accepted": true,
+  "accepted_at": "2026-11-12T10:15:00Z",
+  "signer_name": "Sarah Connor",
+  "version": 1,
+  "detail": "Health Commitment Statement signed successfully."
+}
+```
+
+---
+
 ### 2.7. Initiate Payment
 
-Validates that OTP verification passed, verifies price against Stripe platform catalog, and creates a Stripe Checkout session.
+Validates that OTP verification passed, **enforces Health Commitment Statement signature** when required by the tenant (`400` `HEALTH_COMMITMENT_REQUIRED` if unsigned), verifies price against Stripe platform catalog, and creates a Stripe Checkout session.
 
 - **Method**: `POST`
 - **Path**: `/sessions/{session_id}/initiate-payment/`
@@ -236,7 +278,9 @@ Validates that OTP verification passed, verifies price against Stripe platform c
 ```json
 {
   "return_url": "https://checkout.fitverx.com/order-summary",
-  "cancel_url": "https://checkout.fitverx.com/checkout"
+  "cancel_url": "https://checkout.fitverx.com/checkout",
+  "health_commitment_accepted": true,
+  "health_commitment_signer_name": "Sarah Connor"
 }
 ```
 
@@ -273,9 +317,9 @@ Polls payment completion while awaiting asynchronous Stripe webhook fulfillment.
 
 ---
 
-### 2.9. Retrieve Order Completion Summary
+### 2.9. Retrieve Order Completion Summary & Welcome Screen
 
-Retrieves post-payment details and onboarding flag.
+Retrieves post-payment membership confirmation, the tenant-customized welcome screen content (also emailed automatically to the customer's checkout email), signed agreement links, and onboarding flags.
 
 - **Method**: `GET`
 - **Path**: `/sessions/{session_id}/completion/`
@@ -286,18 +330,95 @@ Retrieves post-payment details and onboarding flag.
 ```json
 {
   "session_id": "5cb89267-33e9-4e50-a9fe-e4f0c474d2fe",
-  "gym_name": "Iron Temple Fitness",
-  "package_name": "Unlimited Monthly Membership",
-  "credits": 30,
-  "amount_paid": "99.00",
-  "currency": "usd",
-  "customer_email": "sarah.connor@example.com",
-  "customer_name": "Sarah Connor",
-  "package_expires_at": "2026-12-09T15:20:00Z",
-  "needs_password_setup": true,
-  "mobile_app_download_url": "https://fitverx.com/app"
+  "payment_status": "paid",
+  "membership": {
+    "id": "8a1c3f44-...",
+    "status": "active",
+    "package_name": "Unlimited Monthly Membership",
+    "credits_allocated": 30,
+    "credits_remaining": 30,
+    "purchased_at": "2026-11-12T10:16:00Z",
+    "expires_at": "2026-12-12T10:16:00Z"
+  },
+  "customer": {
+    "account_status": "new_account",
+    "email": "sarah.connor@example.com",
+    "password_setup_required": true
+  },
+  "health_commitment": {
+    "signed": true,
+    "signed_at": "2026-11-12T10:15:00Z",
+    "signer_name": "Sarah Connor",
+    "version": 1,
+    "title": "Health Commitment Statement",
+    "view_url": "https://api.fitverx.com/api/v1/checkout/sessions/5cb89267-.../agreement/?access=<hmac>&format=html",
+    "download_url": "https://api.fitverx.com/api/v1/checkout/sessions/5cb89267-.../agreement/?access=<hmac>&format=html&download=1"
+  },
+  "welcome": {
+    "tenant_name": "Iron Temple Fitness",
+    "subject": "Welcome to Iron Temple Fitness — your purchase is confirmed",
+    "headline": "Welcome to Iron Temple Fitness!",
+    "greeting": "Hi Sarah,",
+    "intro": "Thank you for joining us and purchasing Unlimited Monthly Membership. We've received your payment, and we're delighted to welcome you to our growing community.",
+    "purchase_confirmation": {
+      "title": "Your purchase confirmation",
+      "package_purchased": "Unlimited Monthly Membership",
+      "whats_included": "30 classes",
+      "credits": 30,
+      "additional_benefits": "",
+      "amount_paid": "$99.00",
+      "amount": "99.00",
+      "currency": "USD",
+      "currency_symbol": "$",
+      "payment_arrangement": "Recurring monthly payment of $99.00",
+      "validity_period": "30 days validity",
+      "items": [
+        { "label": "Package purchased", "value": "Unlimited Monthly Membership" },
+        { "label": "What's included", "value": "30 classes" },
+        { "label": "Amount paid", "value": "$99.00" },
+        { "label": "Payment arrangement", "value": "Recurring monthly payment of $99.00" },
+        { "label": "Minimum term or package validity", "value": "30 days validity" }
+      ]
+    },
+    "agreement": {
+      "title": "Your agreement",
+      "signed": true,
+      "signed_at": "2026-11-12T10:15:00Z",
+      "signer_name": "Sarah Connor",
+      "statement_title": "Health Commitment Statement",
+      "statement_version": 1,
+      "description": "You can view and download your signed agreement here:",
+      "view_url": "https://api.fitverx.com/api/v1/checkout/sessions/5cb89267-.../agreement/?access=<hmac>&format=html",
+      "download_url": "https://api.fitverx.com/api/v1/checkout/sessions/5cb89267-.../agreement/?access=<hmac>&format=html&download=1",
+      "note": "Please keep a copy for your records. It contains the terms that apply to your purchase, including any minimum commitment and payment arrangements."
+    },
+    "custom_body": "We'll be in touch with details of our timetable and how to book your sessions...",
+    "closing": "The Iron Temple Fitness Team",
+    "tagline": "",
+    "reply_to_email": "hello@irontemple.example.com",
+    "full_text": "Hi Sarah,\n\nWelcome to Iron Temple Fitness!..."
+  },
+  "mobile_app": {
+    "download_url_ios": "https://apps.apple.com/app/fitverx/id123456789",
+    "download_url_android": "https://play.google.com/store/apps/details?id=com.fitverx.app",
+    "deep_link": "fitverx://login?tenant_id=...&email=sarah.connor@example.com",
+    "instructions": "Install the Fitverx mobile app and sign in with your email to book classes and view your membership."
+  }
 }
 ```
+
+### 2.9a. View or Download Signed Agreement
+
+Returns the customer's signed Health Commitment Statement record as JSON or printable/downloadable HTML. Accepts either the session-scoped `X-Checkout-Token` header or the persistent signed `?access=` token included in the welcome screen and confirmation email.
+
+- **Method**: `GET`
+- **Path**: `/sessions/{session_id}/agreement/`
+- **Query Params (optional)**:
+  - `access=<hmac_token>` (required when `X-Checkout-Token` header is absent)
+  - `format=html` (renders printable HTML agreement page)
+  - `download=1` (adds `Content-Disposition: attachment` for file download)
+- **Headers**:
+  - `X-Checkout-Token: <session_token>` *(optional when `?access=` is provided)*
 
 ---
 
@@ -552,3 +673,85 @@ Clears the custom override so the platform inherits all tenant subscription feat
   }
 }
 ```
+
+---
+
+## 4. Health Commitment Statement Admin & Signed Documents API (Gym Owner / Platform Admin)
+
+### 4.1. Customize Tenant Health Commitment Statement
+
+Configured per tenant via `GET` / `PUT` / `PATCH /api/v1/payments/checkout-config/` (Platform Admins pass `X-Tenant-Id: <tenant_uuid>`). Updating the title, body, or checkbox label automatically increments `health_commitment_version`.
+
+```json
+{
+  "require_health_commitment": true,
+  "health_commitment_title": "Health Commitment Statement",
+  "health_commitment_body": "Your health is your responsibility...",
+  "health_commitment_checkbox_label": "I have read and understood the Health Commitment Statement. By ticking this box, I confirm this acts as my electronic signature."
+}
+```
+
+### 4.2. Reset to Default Statement
+
+- **Method**: `POST`
+- **Path**: `/api/v1/payments/checkout-config/health-commitment/reset/`
+- **Headers**: `Authorization: Bearer <token>` *(and `X-Tenant-Id` for Platform Admin)*
+
+### 4.3. List Signed Health Commitment Documents
+
+Retrieves immutable audit records of signed Health Commitment Statements for the tenant (supports optional `?email=` and `?user_id=` filters).
+
+- **Method**: `GET`
+- **Path**: `/api/v1/payments/checkout-config/health-commitment/signatures/`
+- **Headers**: `Authorization: Bearer <token>` *(and `X-Tenant-Id` for Platform Admin)*
+
+#### Success Response (`200 OK`):
+```json
+{
+  "signatures": [
+    {
+      "id": "b7c8d9e0-1234-5678-90ab-cdef12345678",
+      "user_id": "a1b2c3d4-...",
+      "checkout_session_id": "5cb89267-...",
+      "signer_name": "Sarah Connor",
+      "signer_email": "sarah.connor@example.com",
+      "statement_version": 1,
+      "statement_title": "Health Commitment Statement",
+      "statement_body": "...",
+      "checkbox_label": "...",
+      "accepted": true,
+      "signed_at": "2026-11-12T10:15:00Z",
+      "ip_address": "203.0.113.42",
+      "source": "website_checkout"
+    }
+  ]
+}
+```
+
+---
+
+## 5. Welcome Screen & Welcome Email Customization API (Gym Owner / Platform Admin)
+
+### 5.1. Customize Tenant Welcome Content
+
+Configured per tenant via `GET` / `PUT` / `PATCH /api/v1/payments/checkout-config/` (Platform Admins pass `X-Tenant-Id: <tenant_uuid>`). Supported placeholders in welcome text fields include `{tenant_name}`, `{first_name}`, `{{contact.first_name}}`, `{full_name}`, `{package_name}`, `{credits}`, `{amount}`, `{currency}`, `{payment_arrangement}`, `{validity}`, and `{agreement_url}`.
+
+```json
+{
+  "welcome_email_subject": "Welcome to {tenant_name} — your purchase is confirmed",
+  "welcome_headline": "Welcome to {tenant_name}!",
+  "welcome_intro_text": "Thank you for joining us and purchasing {package_name}. We've received your payment, and we're delighted to welcome you to our growing community.",
+  "welcome_additional_benefits": "Priority class booking access",
+  "welcome_agreement_note": "Please keep a copy for your records. It contains the terms that apply to your purchase, including any minimum commitment and payment arrangements.",
+  "welcome_body_text": "We'll be in touch as soon as classes are ready to book...",
+  "welcome_closing_text": "The {tenant_name} Team",
+  "welcome_tagline": "Move with Purpose",
+  "welcome_reply_to_email": "support@yourgym.example.com"
+}
+```
+
+### 5.2. Reset Welcome Content to Default
+
+- **Method**: `POST`
+- **Path**: `/api/v1/payments/checkout-config/welcome/reset/`
+- **Headers**: `Authorization: Bearer <token>` *(and `X-Tenant-Id` for Platform Admin)*

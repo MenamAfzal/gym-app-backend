@@ -4,8 +4,23 @@ from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.payments.checkout_dashboard_serializers import TenantCheckoutConfigAdminSerializer
-from apps.payments.models import TenantCheckoutConfig
+from apps.payments.checkout_dashboard_serializers import (
+    HealthCommitmentSignatureSerializer,
+    TenantCheckoutConfigAdminSerializer,
+)
+from apps.payments.models import (
+    DEFAULT_HEALTH_COMMITMENT_BODY,
+    DEFAULT_HEALTH_COMMITMENT_CHECKBOX_LABEL,
+    DEFAULT_HEALTH_COMMITMENT_TITLE,
+    DEFAULT_WELCOME_AGREEMENT_NOTE,
+    DEFAULT_WELCOME_BODY_TEXT,
+    DEFAULT_WELCOME_CLOSING_TEXT,
+    DEFAULT_WELCOME_EMAIL_SUBJECT,
+    DEFAULT_WELCOME_HEADLINE,
+    DEFAULT_WELCOME_INTRO_TEXT,
+    HealthCommitmentSignature,
+    TenantCheckoutConfig,
+)
 from apps.users.models import UserRole
 
 
@@ -254,4 +269,69 @@ class TenantWebsiteIntegrationDashboardView(APIView):
 </body>
 </html>"""
         return HttpResponse(html, content_type='text/html')
+
+
+class HealthCommitmentResetDefaultView(APIView):
+    permission_classes = [IsAuthenticated, IsTenantAdminOrOwner]
+
+    def post(self, request):
+        tenant = _resolve_tenant_for_admin(request)
+        if not tenant:
+            return Response({'detail': 'Tenant context not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        config, _ = TenantCheckoutConfig.objects.get_or_create(tenant=tenant)
+        config.health_commitment_title = DEFAULT_HEALTH_COMMITMENT_TITLE
+        config.health_commitment_body = DEFAULT_HEALTH_COMMITMENT_BODY
+        config.health_commitment_checkbox_label = DEFAULT_HEALTH_COMMITMENT_CHECKBOX_LABEL
+        config.save()
+
+        serializer = TenantCheckoutConfigAdminSerializer(config, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class HealthCommitmentSignatureListView(APIView):
+    permission_classes = [IsAuthenticated, IsTenantAdminOrOwner]
+
+    def get(self, request):
+        tenant = _resolve_tenant_for_admin(request)
+        if not tenant:
+            return Response({'detail': 'Tenant context not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        queryset = HealthCommitmentSignature.all_objects.filter(tenant=tenant).select_related(
+            'user',
+            'checkout_session'
+        )
+        email = request.query_params.get('email')
+        if email:
+            queryset = queryset.filter(signer_email__iexact=email.strip())
+
+        user_id = request.query_params.get('user_id')
+        if user_id:
+            queryset = queryset.filter(user_id=user_id)
+
+        serializer = HealthCommitmentSignatureSerializer(queryset[:200], many=True)
+        return Response({'signatures': serializer.data}, status=status.HTTP_200_OK)
+
+
+class WelcomeTemplateResetDefaultView(APIView):
+    permission_classes = [IsAuthenticated, IsTenantAdminOrOwner]
+
+    def post(self, request):
+        tenant = _resolve_tenant_for_admin(request)
+        if not tenant:
+            return Response({'detail': 'Tenant context not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        config, _ = TenantCheckoutConfig.objects.get_or_create(tenant=tenant)
+        config.welcome_email_subject = DEFAULT_WELCOME_EMAIL_SUBJECT
+        config.welcome_headline = DEFAULT_WELCOME_HEADLINE
+        config.welcome_intro_text = DEFAULT_WELCOME_INTRO_TEXT
+        config.welcome_additional_benefits = ''
+        config.welcome_agreement_note = DEFAULT_WELCOME_AGREEMENT_NOTE
+        config.welcome_body_text = DEFAULT_WELCOME_BODY_TEXT
+        config.welcome_closing_text = DEFAULT_WELCOME_CLOSING_TEXT
+        config.welcome_tagline = ''
+        config.save()
+
+        serializer = TenantCheckoutConfigAdminSerializer(config, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
 

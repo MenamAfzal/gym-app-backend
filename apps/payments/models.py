@@ -5,6 +5,61 @@ from django.core.validators import MinValueValidator, MaxValueValidator
 from core_models.base_models import BaseModel, TenantAwareModel
 
 
+DEFAULT_HEALTH_COMMITMENT_TITLE = "Health Commitment Statement"
+DEFAULT_HEALTH_COMMITMENT_BODY = (
+    "Your health is your responsibility. The management and staff of this organisation are dedicated "
+    "to helping you take every opportunity to enjoy the facilities that we offer. With this in mind, "
+    "we have carefully considered what we can reasonably expect of each other. This statement is for "
+    "guidance only. It is not a legally binding agreement between you and us and does not create any "
+    "obligations which you or we must adhere to.\n\n"
+    "Our Commitment to You:\n"
+    "1. We will respect your personal decisions, and allow you to make your own decisions about what "
+    "exercise you can carry out. However, we ask you not to exercise beyond what you consider to be "
+    "your own abilities.\n"
+    "2. We will make every reasonable effort to make sure that our equipment and facilities are in a "
+    "safe condition for you to use and enjoy.\n"
+    "3. We will take all reasonable steps to make sure that our staff are qualified to the fitness "
+    "industry standards.\n"
+    "4. If you tell us that you have a disability which puts you at a substantial disadvantage in "
+    "accessing our equipment and facilities, we will consider what adjustments, if any, are reasonable "
+    "for us to make.\n\n"
+    "Your Commitment To Us:\n"
+    "1. You should not exercise beyond your own abilities. If you know or are concerned that you have "
+    "a medical condition which might interfere with you exercising safely, before you use our equipment "
+    "and facilities you should get advice from a relevant medical professional and follow that advice.\n"
+    "2. You should make yourself aware of any rules and instructions, including warning notices. "
+    "Exercise carries its own risks. You should not carry out any activities which you have been told "
+    "are not suitable for you.\n"
+    "3. You should let us know immediately if you feel ill when using our equipment or facilities. "
+    "Our staff members are not qualified doctors, but there will be a person available who has had "
+    "first aid training.\n"
+    "4. If you have a disability, you must follow any reasonable instructions to allow you to exercise "
+    "safely."
+)
+DEFAULT_HEALTH_COMMITMENT_CHECKBOX_LABEL = (
+    "I have read and understood the Health Commitment Statement. By ticking this box, I confirm this "
+    "acts as my electronic signature."
+)
+
+DEFAULT_WELCOME_EMAIL_SUBJECT = "Welcome to {tenant_name} — your purchase is confirmed"
+DEFAULT_WELCOME_HEADLINE = "Welcome to {tenant_name}!"
+DEFAULT_WELCOME_INTRO_TEXT = (
+    "Thank you for joining us and purchasing {package_name}. "
+    "We've received your payment, and we're delighted to welcome you to our growing community."
+)
+DEFAULT_WELCOME_AGREEMENT_NOTE = (
+    "Please keep a copy for your records. It contains the terms that apply to your purchase, "
+    "including any minimum commitment and payment arrangements."
+)
+DEFAULT_WELCOME_BODY_TEXT = (
+    "We'll be in touch with details of our timetable and how to book your sessions.\n\n"
+    "In the meantime, if you have any questions about your purchase or getting started, "
+    "simply reply to this email and we'll be happy to help.\n\n"
+    "We can't wait to welcome you!"
+)
+DEFAULT_WELCOME_CLOSING_TEXT = "The {tenant_name} Team"
+
+
 class PlatformSettings(BaseModel):
     platform_fee_percentage = models.DecimalField(
         max_digits=5,
@@ -332,6 +387,48 @@ class TenantCheckoutConfig(BaseModel):
     meta_pixel_id = models.CharField(max_length=64, null=True, blank=True)
     meta_capi_access_token = models.TextField(null=True, blank=True)
     meta_test_event_code = models.CharField(max_length=64, null=True, blank=True)
+    require_health_commitment = models.BooleanField(default=True)
+    health_commitment_title = models.CharField(max_length=200, default=DEFAULT_HEALTH_COMMITMENT_TITLE)
+    health_commitment_body = models.TextField(default=DEFAULT_HEALTH_COMMITMENT_BODY)
+    health_commitment_checkbox_label = models.CharField(
+        max_length=500,
+        default=DEFAULT_HEALTH_COMMITMENT_CHECKBOX_LABEL
+    )
+    health_commitment_version = models.PositiveIntegerField(default=1)
+    welcome_email_subject = models.CharField(
+        max_length=255,
+        default=DEFAULT_WELCOME_EMAIL_SUBJECT
+    )
+    welcome_headline = models.CharField(
+        max_length=255,
+        default=DEFAULT_WELCOME_HEADLINE
+    )
+    welcome_intro_text = models.TextField(default=DEFAULT_WELCOME_INTRO_TEXT)
+    welcome_additional_benefits = models.CharField(max_length=500, blank=True, default="")
+    welcome_agreement_note = models.TextField(default=DEFAULT_WELCOME_AGREEMENT_NOTE)
+    welcome_body_text = models.TextField(default=DEFAULT_WELCOME_BODY_TEXT)
+    welcome_closing_text = models.CharField(
+        max_length=255,
+        default=DEFAULT_WELCOME_CLOSING_TEXT
+    )
+    welcome_tagline = models.CharField(max_length=255, blank=True, default="")
+    welcome_reply_to_email = models.EmailField(blank=True, default="")
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            previous = TenantCheckoutConfig.objects.filter(pk=self.pk).values(
+                'health_commitment_title',
+                'health_commitment_body',
+                'health_commitment_checkbox_label',
+                'health_commitment_version',
+            ).first()
+            if previous and (
+                previous['health_commitment_title'] != self.health_commitment_title
+                or previous['health_commitment_body'] != self.health_commitment_body
+                or previous['health_commitment_checkbox_label'] != self.health_commitment_checkbox_label
+            ):
+                self.health_commitment_version = (previous['health_commitment_version'] or 1) + 1
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"CheckoutConfig - {self.tenant.name} (enabled={self.is_enabled})"
@@ -450,6 +547,15 @@ class ExternalCheckoutSession(TenantAwareModel):
     client_user_agent = models.TextField(null=True, blank=True)
     source_url = models.URLField(max_length=500, null=True, blank=True)
     tracking_purged_at = models.DateTimeField(null=True, blank=True)
+    health_commitment_accepted = models.BooleanField(default=False)
+    health_commitment_accepted_at = models.DateTimeField(null=True, blank=True)
+    health_commitment_version_snapshot = models.PositiveIntegerField(null=True, blank=True)
+    health_commitment_title_snapshot = models.CharField(max_length=200, blank=True)
+    health_commitment_body_snapshot = models.TextField(blank=True)
+    health_commitment_checkbox_label_snapshot = models.CharField(max_length=500, blank=True)
+    health_commitment_signer_name = models.CharField(max_length=255, blank=True)
+    health_commitment_ip_address = models.GenericIPAddressField(null=True, blank=True)
+    health_commitment_user_agent = models.TextField(null=True, blank=True)
     expires_at = models.DateTimeField(db_index=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
@@ -501,5 +607,43 @@ class StripeProcessedEvent(BaseModel):
 
     def __str__(self):
         return f"{self.event_type} ({self.event_id})"
+
+
+class HealthCommitmentSignature(TenantAwareModel):
+    user = models.ForeignKey(
+        'users.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='health_commitment_signatures'
+    )
+    checkout_session = models.OneToOneField(
+        ExternalCheckoutSession,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='health_commitment_signature'
+    )
+    signer_name = models.CharField(max_length=255)
+    signer_email = models.EmailField(db_index=True)
+    statement_version = models.PositiveIntegerField(default=1)
+    statement_title = models.CharField(max_length=200)
+    statement_body = models.TextField()
+    checkbox_label = models.CharField(max_length=500)
+    accepted = models.BooleanField(default=True)
+    signed_at = models.DateTimeField(db_index=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(null=True, blank=True)
+    source = models.CharField(max_length=50, default='website_checkout')
+
+    class Meta:
+        ordering = ['-signed_at']
+        indexes = [
+            models.Index(fields=['tenant', 'signer_email', '-signed_at']),
+            models.Index(fields=['tenant', 'user', '-signed_at']),
+        ]
+
+    def __str__(self):
+        return f"HealthCommitmentSignature ({self.signer_email} v{self.statement_version})"
 
 

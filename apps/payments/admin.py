@@ -7,7 +7,9 @@ from .models import (
     TenantPayout,
     BillingFeature,
     BillingPlan,
+    HealthCommitmentSignature,
     TenantBillingSubscription,
+    TenantCheckoutConfig,
 )
 
 
@@ -130,6 +132,54 @@ class TenantBillingSubscriptionAdmin(TenantAdminMixin, admin.ModelAdmin):
             'fields': ('id', 'created_at', 'updated_at'),
             'classes': ('collapse',),
         }),
+    )
+
+
+@admin.register(TenantCheckoutConfig)
+class TenantCheckoutConfigAdmin(admin.ModelAdmin):
+    list_display = (
+        'tenant',
+        'is_enabled',
+        'require_health_commitment',
+        'health_commitment_version',
+        'updated_at',
+    )
+    list_filter = ('is_enabled', 'require_health_commitment')
+    search_fields = ('tenant__name', 'tenant__subdomain')
+    readonly_fields = ('id', 'health_commitment_version', 'created_at', 'updated_at')
+
+
+@admin.register(HealthCommitmentSignature)
+class HealthCommitmentSignatureAdmin(TenantAdminMixin, admin.ModelAdmin):
+    list_display = (
+        'signer_email',
+        'signer_name',
+        'tenant',
+        'statement_version',
+        'accepted',
+        'signed_at',
+        'source',
+    )
+    list_filter = ('accepted', 'statement_version', 'source', 'tenant')
+    search_fields = ('signer_email', 'signer_name', 'tenant__name')
+    readonly_fields = (
+        'id',
+        'tenant',
+        'user',
+        'checkout_session',
+        'signer_name',
+        'signer_email',
+        'statement_version',
+        'statement_title',
+        'statement_body',
+        'checkbox_label',
+        'accepted',
+        'signed_at',
+        'ip_address',
+        'user_agent',
+        'source',
+        'created_at',
+        'updated_at',
     )
 
 

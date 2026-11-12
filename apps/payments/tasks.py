@@ -57,17 +57,22 @@ def send_checkout_welcome_email_task(session_id):
     from datetime import timedelta
     from django.conf import settings
     from django.core.mail import EmailMultiAlternatives
+    from django.template.loader import render_to_string
     from django.utils import timezone
-    from django.utils.html import strip_tags
+    from apps.payments.checkout_service import CheckoutIntegrationService
     from apps.payments.models import ExternalCheckoutSession
     from apps.users.models import EmailOTP, OTPPurpose
 
-    session = ExternalCheckoutSession.all_objects.select_related('tenant', 'package_type').filter(id=session_id).first()
+    session = ExternalCheckoutSession.all_objects.select_related(
+        'tenant',
+        'package_type',
+        'created_package',
+        'customer_user',
+    ).filter(id=session_id).first()
     if not session:
         return
 
     tenant = session.tenant
-    package = session.package_type
     email = session.email
 
     code = ''
@@ -81,25 +86,37 @@ def send_checkout_welcome_email_task(session_id):
             expires_at=timezone.now() + timedelta(days=7)
         )
 
+    welcome = CheckoutIntegrationService.build_welcome_payload(session)
     app_deep_link = f'fitverx://login?tenant_id={tenant.id}'
-    subject = f'Welcome to {tenant.name} – Membership Confirmed!'
-    body_text = f"""Hello,
-
-Your membership for {package.name} at {tenant.name} has been successfully activated.
-
-Download the Fitverx mobile app to book classes and access workouts:
-{app_deep_link}
-"""
+    body_text = welcome['full_text']
     if session.is_new_customer:
-        body_text += f"\nYour one-time password setup verification code is: {code}\n"
+        body_text += (
+            f"\n\nFitverx Mobile App: {app_deep_link}"
+            f"\nYour one-time password setup verification code is: {code}\n"
+        )
+
+    html_message = render_to_string(
+        'payments/emails/checkout_welcome.html',
+        {
+            'welcome': welcome,
+            'is_new_customer': session.is_new_customer,
+            'otp_code': code,
+            'app_deep_link': app_deep_link,
+        },
+    )
 
     msg = EmailMultiAlternatives(
-        subject=subject,
+        subject=welcome['subject'],
         body=body_text,
         from_email=settings.DEFAULT_FROM_EMAIL,
-        to=[email]
+        to=[email],
+        reply_to=[welcome['reply_to_email']] if welcome.get('reply_to_email') else None,
     )
-    msg.send(fail_silently=True)
+    msg.attach_alternative(html_message, 'text/html')
+    try:
+        msg.send(fail_silently=False)
+    except Exception as exc:
+        logger.error(f"Failed sending checkout welcome email for session {session_id}: {exc}")
 
 
 @shared_task

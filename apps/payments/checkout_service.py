@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import secrets
 import uuid
 from datetime import timedelta
@@ -15,7 +16,17 @@ from rest_framework.exceptions import NotFound, PermissionDenied, ValidationErro
 from apps.core.tenants.models import Tenant
 from apps.payments.models import (
     CheckoutVerificationChallenge,
+    DEFAULT_HEALTH_COMMITMENT_BODY,
+    DEFAULT_HEALTH_COMMITMENT_CHECKBOX_LABEL,
+    DEFAULT_HEALTH_COMMITMENT_TITLE,
+    DEFAULT_WELCOME_AGREEMENT_NOTE,
+    DEFAULT_WELCOME_BODY_TEXT,
+    DEFAULT_WELCOME_CLOSING_TEXT,
+    DEFAULT_WELCOME_EMAIL_SUBJECT,
+    DEFAULT_WELCOME_HEADLINE,
+    DEFAULT_WELCOME_INTRO_TEXT,
     ExternalCheckoutSession,
+    HealthCommitmentSignature,
     StripeProcessedEvent,
     TenantCheckoutConfig,
 )
@@ -109,7 +120,90 @@ class CheckoutIntegrationService:
         return list(queryset)
 
     @staticmethod
-    def create_checkout_session(validated_data, origin=None):
+    def _get_health_commitment_snapshot_values(config):
+        if not config:
+            return (
+                True,
+                1,
+                DEFAULT_HEALTH_COMMITMENT_TITLE,
+                DEFAULT_HEALTH_COMMITMENT_BODY,
+                DEFAULT_HEALTH_COMMITMENT_CHECKBOX_LABEL,
+            )
+        return (
+            config.require_health_commitment,
+            config.health_commitment_version,
+            config.health_commitment_title,
+            config.health_commitment_body,
+            config.health_commitment_checkbox_label,
+        )
+
+    @staticmethod
+    def _apply_health_commitment_to_session(session, config, signer_name='', ip_address=None, user_agent=None):
+        now = timezone.now()
+        _, version, title, body, checkbox_label = CheckoutIntegrationService._get_health_commitment_snapshot_values(config)
+        resolved_signer = (
+            (signer_name or '').strip()
+            or f"{session.first_name} {session.last_name}".strip()
+            or session.email
+        )
+        session.health_commitment_accepted = True
+        session.health_commitment_accepted_at = now
+        session.health_commitment_version_snapshot = version
+        session.health_commitment_title_snapshot = title
+        session.health_commitment_body_snapshot = body
+        session.health_commitment_checkbox_label_snapshot = checkbox_label
+        session.health_commitment_signer_name = resolved_signer
+        session.health_commitment_ip_address = ip_address
+        session.health_commitment_user_agent = user_agent
+
+    @staticmethod
+    def accept_health_commitment(session, accepted=True, signer_name='', ip_address=None, user_agent=None):
+        now = timezone.now()
+        if session.expires_at <= now:
+            session.status = ExternalCheckoutSession.StatusChoices.EXPIRED
+            session.save(update_fields=['status'])
+            raise ValidationError({'detail': 'This checkout session has expired. Please create a new session.'})
+
+        if not accepted:
+            raise ValidationError({
+                'detail': 'You must accept the Health Commitment Statement to proceed.',
+                'code': 'HEALTH_COMMITMENT_REQUIRED'
+            })
+
+        config = getattr(session.tenant, 'checkout_config', None)
+        with transaction.atomic():
+            locked = ExternalCheckoutSession.all_objects.select_for_update().filter(id=session.id).first()
+            if not locked:
+                raise ValidationError({'detail': 'Checkout session not found.'})
+            CheckoutIntegrationService._apply_health_commitment_to_session(
+                locked,
+                config,
+                signer_name=signer_name,
+                ip_address=ip_address,
+                user_agent=user_agent
+            )
+            locked.save(update_fields=[
+                'health_commitment_accepted',
+                'health_commitment_accepted_at',
+                'health_commitment_version_snapshot',
+                'health_commitment_title_snapshot',
+                'health_commitment_body_snapshot',
+                'health_commitment_checkbox_label_snapshot',
+                'health_commitment_signer_name',
+                'health_commitment_ip_address',
+                'health_commitment_user_agent',
+            ])
+            return {
+                'session_id': str(locked.id),
+                'accepted': locked.health_commitment_accepted,
+                'accepted_at': locked.health_commitment_accepted_at,
+                'signer_name': locked.health_commitment_signer_name,
+                'version': locked.health_commitment_version_snapshot,
+                'detail': 'Health Commitment Statement signed successfully.',
+            }
+
+    @staticmethod
+    def create_checkout_session(validated_data, origin=None, ip_address=None, user_agent=None):
         tenant_identifier = validated_data.get('tenant_id')
         tenant = resolve_tenant_by_identifier(tenant_identifier)
 
@@ -160,7 +254,7 @@ class CheckoutIntegrationService:
         expires_at = now + timedelta(minutes=30)
         otp_expires_at = now + timedelta(minutes=5)
 
-        session = ExternalCheckoutSession.objects.create(
+        session = ExternalCheckoutSession(
             tenant=tenant,
             package_type=package_type,
             token_hash=token_hash,
@@ -181,9 +275,20 @@ class CheckoutIntegrationService:
             status=ExternalCheckoutSession.StatusChoices.PENDING_VERIFICATION,
             fbp=validated_data.get('fbp', '').strip() or None,
             fbc=validated_data.get('fbc', '').strip() or None,
+            client_ip_address=ip_address,
+            client_user_agent=user_agent,
             source_url=validated_data.get('source_url', '').strip() or None,
             expires_at=expires_at
         )
+        if validated_data.get('health_commitment_accepted'):
+            CheckoutIntegrationService._apply_health_commitment_to_session(
+                session,
+                config,
+                signer_name=validated_data.get('health_commitment_signer_name', ''),
+                ip_address=ip_address,
+                user_agent=user_agent
+            )
+        session.save()
 
         CheckoutIntegrationService._send_checkout_otp_email(
             email=email,
@@ -317,7 +422,15 @@ class CheckoutIntegrationService:
             return locked
 
     @staticmethod
-    def initiate_session_payment(session, return_url=None, cancel_url=None):
+    def initiate_session_payment(
+        session,
+        return_url=None,
+        cancel_url=None,
+        health_commitment_accepted=None,
+        signer_name='',
+        ip_address=None,
+        user_agent=None
+    ):
         if not session.is_verified:
             raise ValidationError({'detail': 'Email verification is required before initiating payment.'})
 
@@ -333,6 +446,24 @@ class CheckoutIntegrationService:
             ExternalCheckoutSession.StatusChoices.PAYMENT_FAILED
         ]:
             raise ValidationError({'detail': f'Cannot initiate payment for a session with status {session.status}.'})
+
+        if health_commitment_accepted and not session.health_commitment_accepted:
+            CheckoutIntegrationService.accept_health_commitment(
+                session=session,
+                accepted=True,
+                signer_name=signer_name,
+                ip_address=ip_address,
+                user_agent=user_agent
+            )
+            session.refresh_from_db()
+
+        config = getattr(session.tenant, 'checkout_config', None) if session.tenant else None
+        require_hc = config.require_health_commitment if config else True
+        if require_hc and not session.health_commitment_accepted:
+            raise ValidationError({
+                'detail': 'You must accept the Health Commitment Statement before proceeding to payment.',
+                'code': 'HEALTH_COMMITMENT_REQUIRED'
+            })
 
         package_type = session.package_type
         if not package_type.stripe_price_id:
@@ -554,6 +685,33 @@ class CheckoutIntegrationService:
                 'completed_at'
             ])
 
+            if session.health_commitment_accepted:
+                config = getattr(session.tenant, 'checkout_config', None) if session.tenant else None
+                _, version, title, body, checkbox_label = CheckoutIntegrationService._get_health_commitment_snapshot_values(config)
+                signer_name = (
+                    session.health_commitment_signer_name
+                    or f"{session.first_name} {session.last_name}".strip()
+                    or session.email
+                )
+                HealthCommitmentSignature.all_objects.get_or_create(
+                    checkout_session=session,
+                    defaults={
+                        'tenant': session.tenant,
+                        'user': user,
+                        'signer_name': signer_name,
+                        'signer_email': session.email,
+                        'statement_version': session.health_commitment_version_snapshot or version,
+                        'statement_title': session.health_commitment_title_snapshot or title,
+                        'statement_body': session.health_commitment_body_snapshot or body,
+                        'checkbox_label': session.health_commitment_checkbox_label_snapshot or checkbox_label,
+                        'accepted': True,
+                        'signed_at': session.health_commitment_accepted_at or now,
+                        'ip_address': session.health_commitment_ip_address or session.client_ip_address,
+                        'user_agent': session.health_commitment_user_agent or session.client_user_agent,
+                        'source': 'website_checkout',
+                    }
+                )
+
         from apps.payments.tasks import send_checkout_welcome_email_task, send_meta_capi_event_task
         send_checkout_welcome_email_task.delay(str(session.id))
         send_meta_capi_event_task.delay(str(session.id), 'Purchase')
@@ -566,3 +724,302 @@ class CheckoutIntegrationService:
             pass
 
         return {'status': 'fulfilled', 'package_id': str(package.id)}
+
+    CURRENCY_SYMBOLS = {
+        'usd': '$',
+        'gbp': '£',
+        'eur': '€',
+        'cad': 'CA$',
+        'aud': 'A$',
+        'nzd': 'NZ$',
+        'chf': 'CHF ',
+    }
+
+    @staticmethod
+    def generate_agreement_access_token(session_id):
+        secret = str(settings.SECRET_KEY).encode('utf-8')
+        message = f'agreement:{session_id}'.encode('utf-8')
+        return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+    @staticmethod
+    def verify_agreement_access_token(session_id, token):
+        if not session_id or not token:
+            return False
+        expected = CheckoutIntegrationService.generate_agreement_access_token(session_id)
+        return hmac.compare_digest(str(token).strip(), expected)
+
+    @staticmethod
+    def authorize_agreement_access(session_id, access_token=None, checkout_token=None):
+        if checkout_token:
+            return CheckoutIntegrationService.authenticate_session(session_id, checkout_token)
+        if access_token and CheckoutIntegrationService.verify_agreement_access_token(session_id, access_token):
+            session = ExternalCheckoutSession.all_objects.select_related(
+                'tenant',
+                'package_type',
+                'package_type__location',
+                'created_package',
+                'customer_user',
+            ).filter(id=session_id).first()
+            if not session:
+                raise NotFound('Checkout session not found.')
+            return session
+        raise PermissionDenied('Valid agreement access token or checkout session token is required.')
+
+    @staticmethod
+    def _render_welcome_template(text, tokens):
+        rendered = str(text or '')
+        for key, value in tokens.items():
+            rendered = rendered.replace(key, str(value))
+        return rendered
+
+    @staticmethod
+    def _format_currency_amount(amount, currency_code):
+        code = (currency_code or 'usd').lower()
+        symbol = CheckoutIntegrationService.CURRENCY_SYMBOLS.get(code, f'{code.upper()} ')
+        formatted = f'{Decimal(amount or 0):.2f}'
+        return symbol, f'{symbol}{formatted}'
+
+    @staticmethod
+    def get_signed_agreement_document(session):
+        signature = HealthCommitmentSignature.all_objects.filter(
+            tenant=session.tenant,
+            checkout_session=session,
+        ).first()
+        if signature:
+            return {
+                'session_id': str(session.id),
+                'tenant_name': session.tenant.name,
+                'signer_name': signature.signer_name,
+                'signer_email': signature.signer_email,
+                'signed_at': signature.signed_at,
+                'statement_version': signature.statement_version,
+                'statement_title': signature.statement_title,
+                'statement_body': signature.statement_body,
+                'checkbox_label': signature.checkbox_label,
+                'ip_address': signature.ip_address,
+                'source': signature.source,
+            }
+        if session.health_commitment_accepted:
+            signer_name = (
+                session.health_commitment_signer_name
+                or f'{session.first_name} {session.last_name}'.strip()
+                or session.email
+            )
+            return {
+                'session_id': str(session.id),
+                'tenant_name': session.tenant.name,
+                'signer_name': signer_name,
+                'signer_email': session.email,
+                'signed_at': session.health_commitment_accepted_at,
+                'statement_version': session.health_commitment_version_snapshot or 1,
+                'statement_title': session.health_commitment_title_snapshot or DEFAULT_HEALTH_COMMITMENT_TITLE,
+                'statement_body': session.health_commitment_body_snapshot or DEFAULT_HEALTH_COMMITMENT_BODY,
+                'checkbox_label': session.health_commitment_checkbox_label_snapshot or DEFAULT_HEALTH_COMMITMENT_CHECKBOX_LABEL,
+                'ip_address': session.health_commitment_ip_address or session.client_ip_address,
+                'source': 'website_checkout',
+            }
+        raise NotFound('No signed agreement was found for this checkout session.')
+
+    @staticmethod
+    def build_welcome_payload(session, base_url=None):
+        config = TenantCheckoutConfig.objects.filter(tenant=session.tenant).first()
+        tenant_name = session.tenant.name
+        first_name = (
+            session.first_name
+            or (session.customer_user.first_name if session.customer_user else '')
+            or 'there'
+        ).strip()
+        full_name = (
+            f'{session.first_name} {session.last_name}'.strip()
+            or (session.customer_user.get_full_name().strip() if session.customer_user else '')
+            or first_name
+        )
+        package_name = (
+            session.package_type.name if session.package_type else 'Membership Package'
+        )
+        credits = session.credit_count_snapshot or (
+            session.package_type.credit_count if session.package_type else 0
+        )
+        class_word = 'class' if credits == 1 else 'classes'
+        additional_benefits = (
+            config.welcome_additional_benefits.strip()
+            if config and config.welcome_additional_benefits
+            else ''
+        )
+        whats_included = f'{credits} {class_word}'
+        if additional_benefits:
+            whats_included = f'{whats_included} — {additional_benefits}'
+
+        currency_code = (session.currency or 'usd').lower()
+        currency_symbol, amount_formatted = CheckoutIntegrationService._format_currency_amount(
+            session.price_snapshot,
+            currency_code,
+        )
+
+        billing_cycle = session.billing_cycle_snapshot or (
+            session.package_type.billing_cycle if session.package_type else 'monthly'
+        )
+        is_recurring = bool(
+            (session.created_package and session.created_package.stripe_subscription_id)
+            or session.stripe_subscription_id
+            or billing_cycle
+        )
+        if is_recurring and billing_cycle:
+            payment_arrangement = f'Recurring {billing_cycle} payment of {amount_formatted}'
+        else:
+            payment_arrangement = f'One-off payment of {amount_formatted}'
+
+        validity_days = session.validity_days_snapshot or (
+            session.package_type.validity_days if session.package_type else 0
+        )
+        validity_period = (
+            f'{validity_days} days validity'
+            if validity_days
+            else 'Standard package validity'
+        )
+
+        signature = HealthCommitmentSignature.all_objects.filter(
+            tenant=session.tenant,
+            checkout_session=session,
+        ).first()
+        agreement_available = bool(signature or session.health_commitment_accepted)
+        agreement_view_url = None
+        agreement_download_url = None
+        if agreement_available:
+            resolved_base = (base_url or getattr(settings, 'BASE_URL', '') or '').rstrip('/')
+            access_token = CheckoutIntegrationService.generate_agreement_access_token(session.id)
+            base_agreement_path = f'/api/v1/checkout/sessions/{session.id}/agreement/?access={access_token}'
+            agreement_view_url = f'{resolved_base}{base_agreement_path}&format=html'
+            agreement_download_url = f'{resolved_base}{base_agreement_path}&format=html&download=1'
+
+        signer_name = (
+            signature.signer_name if signature else (
+                session.health_commitment_signer_name
+                or f'{session.first_name} {session.last_name}'.strip()
+                or session.email
+            )
+        )
+        signed_at = signature.signed_at if signature else session.health_commitment_accepted_at
+        statement_title = (
+            signature.statement_title if signature
+            else (session.health_commitment_title_snapshot or DEFAULT_HEALTH_COMMITMENT_TITLE)
+        )
+        statement_version = (
+            signature.statement_version if signature
+            else (session.health_commitment_version_snapshot or 1)
+        )
+
+        tokens = {
+            '{tenant_name}': tenant_name,
+            '{{tenant.name}}': tenant_name,
+            '{first_name}': first_name,
+            '{{contact.first_name}}': first_name,
+            '{full_name}': full_name,
+            '{package_name}': package_name,
+            '{credits}': str(credits),
+            '{amount}': amount_formatted,
+            '{currency}': currency_code.upper(),
+            '{payment_arrangement}': payment_arrangement,
+            '{validity}': validity_period,
+            '{agreement_url}': agreement_view_url or '',
+        }
+
+        raw_subject = config.welcome_email_subject if config else DEFAULT_WELCOME_EMAIL_SUBJECT
+        raw_headline = config.welcome_headline if config else DEFAULT_WELCOME_HEADLINE
+        raw_intro = config.welcome_intro_text if config else DEFAULT_WELCOME_INTRO_TEXT
+        raw_agreement_note = (
+            config.welcome_agreement_note if config else DEFAULT_WELCOME_AGREEMENT_NOTE
+        )
+        raw_body = config.welcome_body_text if config else DEFAULT_WELCOME_BODY_TEXT
+        raw_closing = config.welcome_closing_text if config else DEFAULT_WELCOME_CLOSING_TEXT
+        raw_tagline = config.welcome_tagline if config else ''
+        reply_to_email = (
+            config.welcome_reply_to_email.strip()
+            if config and config.welcome_reply_to_email
+            else ''
+        )
+
+        subject = CheckoutIntegrationService._render_welcome_template(raw_subject, tokens)
+        headline = CheckoutIntegrationService._render_welcome_template(raw_headline, tokens)
+        greeting = f'Hi {first_name},'
+        intro = CheckoutIntegrationService._render_welcome_template(raw_intro, tokens)
+        agreement_note = CheckoutIntegrationService._render_welcome_template(raw_agreement_note, tokens)
+        custom_body = CheckoutIntegrationService._render_welcome_template(raw_body, tokens)
+        closing = CheckoutIntegrationService._render_welcome_template(raw_closing, tokens)
+        tagline = CheckoutIntegrationService._render_welcome_template(raw_tagline, tokens).strip()
+
+        confirmation_items = [
+            {'label': 'Package purchased', 'value': package_name},
+            {'label': "What's included", 'value': whats_included},
+            {'label': 'Amount paid', 'value': amount_formatted},
+            {'label': 'Payment arrangement', 'value': payment_arrangement},
+            {'label': 'Minimum term or package validity', 'value': validity_period},
+        ]
+
+        text_lines = [
+            greeting,
+            '',
+            headline,
+            intro,
+            '',
+            'Your purchase confirmation',
+        ]
+        for item in confirmation_items:
+            text_lines.append(f'• {item["label"]}: {item["value"]}')
+
+        if agreement_available:
+            text_lines.extend([
+                '',
+                'Your agreement',
+                'You can view and download your signed agreement here:',
+                agreement_view_url,
+            ])
+            if agreement_note:
+                text_lines.append(agreement_note)
+
+        if custom_body:
+            text_lines.extend(['', custom_body])
+
+        if closing:
+            text_lines.extend(['', closing])
+        if tagline:
+            text_lines.append(tagline)
+
+        return {
+            'tenant_name': tenant_name,
+            'subject': subject,
+            'headline': headline,
+            'greeting': greeting,
+            'intro': intro,
+            'purchase_confirmation': {
+                'title': 'Your purchase confirmation',
+                'package_purchased': package_name,
+                'whats_included': whats_included,
+                'credits': credits,
+                'additional_benefits': additional_benefits,
+                'amount_paid': amount_formatted,
+                'amount': str(session.price_snapshot),
+                'currency': currency_code.upper(),
+                'currency_symbol': currency_symbol,
+                'payment_arrangement': payment_arrangement,
+                'validity_period': validity_period,
+                'items': confirmation_items,
+            },
+            'agreement': {
+                'title': 'Your agreement',
+                'signed': agreement_available,
+                'signed_at': signed_at,
+                'signer_name': signer_name if agreement_available else None,
+                'statement_title': statement_title if agreement_available else None,
+                'statement_version': statement_version if agreement_available else None,
+                'description': 'You can view and download your signed agreement here:' if agreement_available else None,
+                'view_url': agreement_view_url,
+                'download_url': agreement_download_url,
+                'note': agreement_note if agreement_available else '',
+            },
+            'custom_body': custom_body,
+            'closing': closing,
+            'tagline': tagline,
+            'reply_to_email': reply_to_email,
+            'full_text': '\n'.join(text_lines),
+        }

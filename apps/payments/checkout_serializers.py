@@ -1,7 +1,25 @@
 from rest_framework import serializers
 from apps.scheduling.models import PackageType
-from apps.payments.models import ExternalCheckoutSession, TenantCheckoutConfig
+from apps.payments.models import (
+    DEFAULT_HEALTH_COMMITMENT_BODY,
+    DEFAULT_HEALTH_COMMITMENT_CHECKBOX_LABEL,
+    DEFAULT_HEALTH_COMMITMENT_TITLE,
+    ExternalCheckoutSession,
+    TenantCheckoutConfig,
+)
 from apps.core.tenants.models import Tenant
+
+
+def build_health_commitment_config_payload(config):
+    return {
+        'required': config.require_health_commitment if config else True,
+        'title': config.health_commitment_title if config else DEFAULT_HEALTH_COMMITMENT_TITLE,
+        'body': config.health_commitment_body if config else DEFAULT_HEALTH_COMMITMENT_BODY,
+        'checkbox_label': (
+            config.health_commitment_checkbox_label if config else DEFAULT_HEALTH_COMMITMENT_CHECKBOX_LABEL
+        ),
+        'version': config.health_commitment_version if config else 1,
+    }
 
 
 class PublicGymInfoSerializer(serializers.ModelSerializer):
@@ -38,6 +56,8 @@ class PublicGymInfoSerializer(serializers.ModelSerializer):
         config = getattr(obj, 'checkout_config', None)
         return {
             'require_phone_number': config.require_phone_number if config else False,
+            'require_health_commitment': config.require_health_commitment if config else True,
+            'health_commitment': build_health_commitment_config_payload(config),
             'terms_url': config.terms_url if config else None,
             'privacy_policy_url': getattr(config, 'privacy_policy_url', None) if config else None,
             'success_redirect_url': config.success_redirect_url if config else None,
@@ -81,12 +101,24 @@ class CreateCheckoutSessionSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default='')
     last_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default='')
     phone_number = serializers.CharField(max_length=25, required=False, allow_blank=True, default='')
+    health_commitment_accepted = serializers.BooleanField(required=False, default=False)
+    health_commitment_signer_name = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
     fbp = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
     fbc = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
     source_url = serializers.URLField(max_length=500, required=False, allow_blank=True, default='')
 
     def validate_email(self, value):
         return value.strip().lower()
+
+
+class AcceptHealthCommitmentSerializer(serializers.Serializer):
+    accepted = serializers.BooleanField()
+    signer_name = serializers.CharField(max_length=255, required=False, allow_blank=True, default='')
+
+    def validate_accepted(self, value):
+        if not value:
+            raise serializers.ValidationError('You must tick the box to accept the Health Commitment Statement.')
+        return value
 
 
 class VerifySessionOTPSerializer(serializers.Serializer):
@@ -109,6 +141,8 @@ class CheckoutSessionDetailSerializer(serializers.ModelSerializer):
     pricing = serializers.SerializerMethodField()
     available_payment_methods = serializers.SerializerMethodField()
     tracking = serializers.SerializerMethodField()
+    health_commitment = serializers.SerializerMethodField()
+    can_initiate_payment = serializers.SerializerMethodField()
 
     class Meta:
         model = ExternalCheckoutSession
@@ -118,6 +152,7 @@ class CheckoutSessionDetailSerializer(serializers.ModelSerializer):
             'payment_status',
             'is_verified',
             'can_proceed',
+            'can_initiate_payment',
             'expires_at',
             'masked_email',
             'customer',
@@ -125,6 +160,7 @@ class CheckoutSessionDetailSerializer(serializers.ModelSerializer):
             'package',
             'pricing',
             'available_payment_methods',
+            'health_commitment',
             'tracking',
         ]
 
@@ -192,6 +228,26 @@ class CheckoutSessionDetailSerializer(serializers.ModelSerializer):
     def get_available_payment_methods(self, obj):
         return ['card', 'apple_pay', 'google_pay']
 
+    def get_health_commitment(self, obj):
+        config = getattr(obj.tenant, 'checkout_config', None) if obj.tenant else None
+        base_payload = build_health_commitment_config_payload(config)
+        default_signer = f"{obj.first_name} {obj.last_name}".strip() or obj.email
+        return {
+            'required': base_payload['required'],
+            'accepted': obj.health_commitment_accepted,
+            'accepted_at': obj.health_commitment_accepted_at,
+            'signer_name': obj.health_commitment_signer_name or default_signer,
+            'version': obj.health_commitment_version_snapshot or base_payload['version'],
+            'title': obj.health_commitment_title_snapshot or base_payload['title'],
+            'body': obj.health_commitment_body_snapshot or base_payload['body'],
+            'checkbox_label': obj.health_commitment_checkbox_label_snapshot or base_payload['checkbox_label'],
+        }
+
+    def get_can_initiate_payment(self, obj):
+        config = getattr(obj.tenant, 'checkout_config', None) if obj.tenant else None
+        hc_required = config.require_health_commitment if config else True
+        return bool(obj.can_proceed and (not hc_required or obj.health_commitment_accepted))
+
     def get_tracking(self, obj):
         return {
             'initiate_event_id': str(obj.initiate_event_id),
@@ -203,6 +259,8 @@ class CheckoutCompletionSerializer(serializers.ModelSerializer):
     session_id = serializers.UUIDField(source='id', read_only=True)
     membership = serializers.SerializerMethodField()
     customer = serializers.SerializerMethodField()
+    health_commitment = serializers.SerializerMethodField()
+    welcome = serializers.SerializerMethodField()
     mobile_app = serializers.SerializerMethodField()
 
     class Meta:
@@ -212,6 +270,8 @@ class CheckoutCompletionSerializer(serializers.ModelSerializer):
             'payment_status',
             'membership',
             'customer',
+            'health_commitment',
+            'welcome',
             'mobile_app',
         ]
 
@@ -235,6 +295,34 @@ class CheckoutCompletionSerializer(serializers.ModelSerializer):
             'email': obj.email,
             'password_setup_required': obj.is_new_customer and not (obj.customer_user and obj.customer_user.has_usable_password()),
         }
+
+    def _get_base_url(self):
+        request = self.context.get('request')
+        if request:
+            return request.build_absolute_uri('/').rstrip('/')
+        return None
+
+    def get_health_commitment(self, obj):
+        welcome_data = self.get_welcome(obj)
+        agreement = welcome_data.get('agreement', {})
+        return {
+            'signed': agreement.get('signed', obj.health_commitment_accepted),
+            'signed_at': agreement.get('signed_at', obj.health_commitment_accepted_at),
+            'signer_name': agreement.get('signer_name') or obj.health_commitment_signer_name or f"{obj.first_name} {obj.last_name}".strip() or obj.email,
+            'version': agreement.get('statement_version', obj.health_commitment_version_snapshot),
+            'title': agreement.get('statement_title', obj.health_commitment_title_snapshot),
+            'view_url': agreement.get('view_url'),
+            'download_url': agreement.get('download_url'),
+        }
+
+    def get_welcome(self, obj):
+        if not hasattr(self, '_cached_welcome'):
+            from apps.payments.checkout_service import CheckoutIntegrationService
+            self._cached_welcome = CheckoutIntegrationService.build_welcome_payload(
+                obj,
+                base_url=self._get_base_url(),
+            )
+        return self._cached_welcome
 
     def get_mobile_app(self, obj):
         tenant_id = str(obj.tenant_id)
