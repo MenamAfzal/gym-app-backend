@@ -93,6 +93,8 @@ curl -X GET "https://api.fitverx.com/api/v1/checkout/gym/irontemple/packages/"
     "billing_cycle": "monthly",
     "credit_count": 30,
     "validity_days": 30,
+    "is_featured": true,
+    "feature_badge": "Most Popular",
     "location_id": "c1f7f0c5-59b4-48ff-98c4-54157ce94ff4",
     "location_name": "Downtown Flagship",
     "location_address": "100 Main St, Suite 400"

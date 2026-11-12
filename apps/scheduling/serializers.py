@@ -455,6 +455,7 @@ class PackageTypeSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'location', 'location_name', 'name', 'credit_count', 
             'price', 'validity_days', 'billing_cycle', 'is_active',
+            'is_featured', 'feature_badge',
             'stripe_product_id', 'stripe_price_id', 'subscriber_count', 'created_at'
         ]
         read_only_fields = ['id', 'location_name', 'stripe_product_id', 'stripe_price_id', 'subscriber_count', 'created_at']

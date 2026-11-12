@@ -959,3 +959,81 @@ class CheckoutIntegrationTests(TestCase):
         self.assertEqual(res_reset.status_code, 200)
         self.assertEqual(res_reset.data['welcome_email_subject'], DEFAULT_WELCOME_EMAIL_SUBJECT)
         self.assertEqual(res_reset.data['welcome_tagline'], '')
+
+    @patch('stripe.Price.retrieve')
+    @patch('stripe.Price.create')
+    @patch('stripe.Product.create')
+    def test_package_is_featured_and_catalog_ordering(
+        self,
+        mock_product_create,
+        mock_price_create,
+        mock_price_retrieve,
+    ):
+        mock_product_create.return_value = MagicMock(id='prod_test_001')
+        mock_price_create.return_value = MagicMock(id='price_test_001')
+        mock_price_retrieve.return_value = MagicMock(active=True, unit_amount=15000, currency='usd', recurring={'interval': 'month'})
+
+        TenantCheckoutConfig.objects.create(tenant=self.tenant_a, is_enabled=True)
+
+        plan_a = PackageType.all_objects.create(
+            tenant=self.tenant_a,
+            location=self.location_a,
+            name='Plan A (Starter)',
+            price=Decimal('50.00'),
+            credit_count=5,
+            validity_days=30,
+            is_active=True,
+            is_featured=False,
+        )
+        plan_b = PackageType.all_objects.create(
+            tenant=self.tenant_a,
+            location=self.location_a,
+            name='Plan B (Unlimited)',
+            price=Decimal('150.00'),
+            credit_count=30,
+            validity_days=30,
+            is_active=True,
+            is_featured=True,
+            feature_badge='Most Popular',
+        )
+        plan_c = PackageType.all_objects.create(
+            tenant=self.tenant_a,
+            location=self.location_a,
+            name='Plan C (Drop-in)',
+            price=Decimal('20.00'),
+            credit_count=1,
+            validity_days=7,
+            is_active=True,
+            is_featured=False,
+        )
+
+        res_catalog = self.client.get('/api/v1/checkout/gym/alpha/packages/')
+        self.assertEqual(res_catalog.status_code, 200)
+        packages = res_catalog.data['packages']
+        self.assertTrue(len(packages) >= 3)
+
+        self.assertEqual(packages[0]['id'], str(plan_b.id))
+        self.assertTrue(packages[0]['is_featured'])
+        self.assertEqual(packages[0]['feature_badge'], 'Most Popular')
+
+        non_featured_ids = [p['id'] for p in packages[1:]]
+        self.assertIn(str(plan_c.id), non_featured_ids)
+        self.assertIn(str(plan_a.id), non_featured_ids)
+
+        self.client.force_authenticate(user=self.owner_a)
+        res_config = self.client.get('/api/v1/payments/checkout-config/')
+        self.assertEqual(res_config.status_code, 200)
+        avail = res_config.data['available_packages']
+        featured_dash = next(p for p in avail if p['id'] == str(plan_b.id))
+        self.assertTrue(featured_dash['is_featured'])
+        self.assertEqual(featured_dash['feature_badge'], 'Most Popular')
+
+        res_pkg_update = self.client.patch(
+            f'/api/v1/scheduling/package-types/{plan_a.id}/',
+            {'is_featured': True, 'feature_badge': 'Best Value'},
+            headers={'X-Tenant-Id': str(self.tenant_a.id)},
+            format='json'
+        )
+        self.assertEqual(res_pkg_update.status_code, 200)
+        self.assertTrue(res_pkg_update.data['is_featured'])
+        self.assertEqual(res_pkg_update.data['feature_badge'], 'Best Value')

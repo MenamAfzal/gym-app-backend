@@ -108,7 +108,7 @@ class CheckoutIntegrationService:
             tenant=tenant,
             is_active=True,
             price__gt=Decimal('0.00')
-        ).select_related('location').order_by('price')
+        ).select_related('location').order_by('-is_featured', 'price')
 
         if config.enabled_package_ids:
             allowed_ids = [str(pid) for pid in config.enabled_package_ids]

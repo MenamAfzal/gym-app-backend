@@ -85,6 +85,8 @@ class PublicPackageSerializer(serializers.ModelSerializer):
             'billing_cycle',
             'credit_count',
             'validity_days',
+            'is_featured',
+            'feature_badge',
             'location_id',
             'location_name',
             'location_address',

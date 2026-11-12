@@ -101,7 +101,7 @@ class TenantCheckoutConfigAdminSerializer(serializers.ModelSerializer):
         packages = PackageType.all_objects.filter(
             tenant=tenant,
             is_active=True
-        ).select_related('location').order_by('price')
+        ).select_related('location').order_by('-is_featured', 'price')
         return [
             {
                 'id': str(p.id),
@@ -110,6 +110,8 @@ class TenantCheckoutConfigAdminSerializer(serializers.ModelSerializer):
                 'location_name': p.location.name if p.location else '',
                 'billing_cycle': p.billing_cycle,
                 'credit_count': p.credit_count,
+                'is_featured': p.is_featured,
+                'feature_badge': p.feature_badge,
             }
             for p in packages
         ]

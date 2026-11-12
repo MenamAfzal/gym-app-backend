@@ -83,9 +83,9 @@ class ClassSessionAdmin(TenantAdminMixin, admin.ModelAdmin):
 
 @admin.register(PackageType)
 class PackageTypeAdmin(TenantAdminMixin, admin.ModelAdmin):
-    list_display = ('name', 'price', 'credit_count', 'validity_days', 'location', 'tenant')
-    search_fields = ('name',)
-    list_filter = ('location', 'tenant')
+    list_display = ('name', 'price', 'credit_count', 'validity_days', 'is_featured', 'location', 'tenant')
+    search_fields = ('name', 'feature_badge')
+    list_filter = ('is_featured', 'location', 'tenant')
 
 @admin.register(Package)
 class PackageAdmin(TenantAdminMixin, admin.ModelAdmin):

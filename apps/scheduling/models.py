@@ -326,6 +326,16 @@ class PackageType(UUIDMixin, TimestampMixin, TenantMixin):
         default=True,
         help_text="Whether this package is active and purchaseable"
     )
+    is_featured = models.BooleanField(
+        default=False,
+        help_text="Whether this package is highlighted or featured over others"
+    )
+    feature_badge = models.CharField(
+        max_length=50,
+        blank=True,
+        default="",
+        help_text="Optional badge text e.g. Most Popular or Best Value"
+    )
     billing_cycle = models.CharField(
         max_length=20,
         choices=BILLING_CYCLE_CHOICES,
