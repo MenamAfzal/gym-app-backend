@@ -439,13 +439,27 @@ class TenantCheckoutConfig(BaseModel):
     currency = models.CharField(max_length=3, default='usd', blank=True)
 
     def save(self, *args, **kwargs):
+        is_new = self._state.adding
+        old_currency = None
+        if not is_new and self.pk:
+            old_currency = TenantCheckoutConfig.objects.filter(pk=self.pk).values_list('currency', flat=True).first()
+
         if self.currency:
             self.currency = str(self.currency).strip().lower()
-            if self.tenant and self.tenant.currency != self.currency:
-                self.tenant.currency = self.currency
-                self.tenant.save(update_fields=['currency'])
+            if self.tenant_id:
+                from apps.core.tenants.models import Tenant
+                Tenant.objects.filter(pk=self.tenant_id).exclude(currency=self.currency).update(currency=self.currency)
+                if self.tenant:
+                    self.tenant.currency = self.currency
         elif self.tenant and self.tenant.currency:
             self.currency = self.tenant.currency.strip().lower()
+
+        if not is_new and old_currency and self.currency != old_currency and self.tenant:
+            try:
+                from apps.payments.stripe_package_service import StripePackageService
+                StripePackageService.sync_all_tenant_packages_to_stripe(self.tenant, currency=self.currency)
+            except Exception:
+                pass
 
         if self.pk:
             previous = TenantCheckoutConfig.objects.filter(pk=self.pk).values(

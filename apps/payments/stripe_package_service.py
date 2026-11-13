@@ -14,15 +14,11 @@ ZERO_DECIMAL_CURRENCIES = {
 
 class StripePackageService:
     @staticmethod
-    def sync_package_to_stripe(package_type: PackageType) -> None:
-        """
-        Creates or updates the PackageType as a Product and recurring Price on the
-        Platform Stripe Account, tagging it with the tenant_id in metadata.
-        """
+    def sync_package_to_stripe(package_type: PackageType, currency: str = None) -> str:
         tenant = package_type.tenant
         if not tenant:
             logger.warning(f"PackageType {package_type.id} is missing a tenant.")
-            return
+            return package_type.stripe_price_id
 
         product_id = package_type.stripe_product_id
         price_id = package_type.stripe_price_id
@@ -36,8 +32,31 @@ class StripePackageService:
 
         desc = f"{package_type.credit_count} credits | Valid for {package_type.validity_days} days | Billing: {package_type.billing_cycle.title()}"
 
-        try: 
-            if not product_id: 
+        target_curr = (currency or (tenant.currency if tenant and hasattr(tenant, 'currency') and tenant.currency else None) or 'usd').strip().lower()
+        if target_curr in ZERO_DECIMAL_CURRENCIES:
+            amount_cents = int(round(package_type.price))
+        else:
+            amount_cents = int(round(package_type.price * 100))
+
+        try:
+            product_valid = False
+            if product_id:
+                try:
+                    stripe.Product.modify(
+                        product_id,
+                        name=package_type.name,
+                        description=desc,
+                        active=package_type.is_active,
+                        metadata={
+                            "tenant_id": str(tenant.id),
+                            "package_type_id": str(package_type.id)
+                        }
+                    )
+                    product_valid = True
+                except stripe.error.StripeError:
+                    product_valid = False
+
+            if not product_valid:
                 product = stripe.Product.create(
                     name=package_type.name,
                     description=desc,
@@ -49,26 +68,7 @@ class StripePackageService:
                 )
                 product_id = product.id
                 package_type.stripe_product_id = product_id
-                logger.info(f"Created Stripe Product {product_id} for PackageType {package_type.id}")
-            else: 
-                stripe.Product.modify(
-                    product_id,
-                    name=package_type.name,
-                    description=desc,
-                    active=package_type.is_active,
-                    metadata={
-                        "tenant_id": str(tenant.id),
-                        "package_type_id": str(package_type.id)
-                    }
-                )
-                logger.info(f"Updated Stripe Product {product_id} for PackageType {package_type.id}")
- 
-            currency = (tenant.currency or 'usd').lower() if tenant and hasattr(tenant, 'currency') and tenant.currency else 'usd'
-            if currency in ZERO_DECIMAL_CURRENCIES:
-                amount_cents = int(round(package_type.price))
-            else:
-                amount_cents = int(round(package_type.price * 100))
-            
+
             should_create_price = False
             if not price_id:
                 should_create_price = True
@@ -76,42 +76,66 @@ class StripePackageService:
                 try:
                     existing_price = stripe.Price.retrieve(price_id)
                     existing_curr = (existing_price.currency or '').lower()
+                    existing_interval = existing_price.recurring.get('interval') if getattr(existing_price, 'recurring', None) else None
                     if (
                         existing_price.unit_amount != amount_cents
                         or not existing_price.active
-                        or existing_price.recurring.get('interval') != stripe_interval
-                        or existing_curr != currency
+                        or existing_interval != stripe_interval
+                        or existing_curr != target_curr
                     ):
-                        stripe.Price.modify(price_id, active=False)
+                        try:
+                            stripe.Price.modify(price_id, active=False)
+                        except Exception:
+                            pass
                         should_create_price = True
-                        logger.info(f"Price amount/interval/currency changed or inactive. Deactivated price {price_id} on Stripe.")
                 except stripe.error.StripeError as e:
                     logger.error(f"Error retrieving Stripe Price {price_id}: {str(e)}")
                     should_create_price = True
 
             if should_create_price:
-                new_price = stripe.Price.create(
-                    product=product_id,
-                    unit_amount=amount_cents,
-                    currency=currency,
-                    recurring={"interval": stripe_interval},
-                    metadata={
-                        "tenant_id": str(tenant.id),
-                        "package_type_id": str(package_type.id)
+                new_price = None
+                try:
+                    price_payload = {
+                        "product": product_id,
+                        "unit_amount": amount_cents,
+                        "currency": target_curr,
+                        "metadata": {
+                            "tenant_id": str(tenant.id),
+                            "package_type_id": str(package_type.id)
+                        }
                     }
-                )
-                price_id = new_price.id
-                package_type.stripe_price_id = price_id
-                logger.info(f"Created new Stripe Price {price_id} for Product {product_id}")
- 
+                    if stripe_interval:
+                        price_payload["recurring"] = {"interval": stripe_interval}
+                    new_price = stripe.Price.create(**price_payload)
+                except stripe.error.StripeError as e:
+                    logger.error(f"Failed to create price on existing product {product_id}: {str(e)}. Creating fresh product.")
+                    fresh_product = stripe.Product.create(
+                        name=package_type.name,
+                        description=desc,
+                        active=package_type.is_active,
+                        metadata={
+                            "tenant_id": str(tenant.id),
+                            "package_type_id": str(package_type.id)
+                        }
+                    )
+                    product_id = fresh_product.id
+                    price_payload["product"] = product_id
+                    new_price = stripe.Price.create(**price_payload)
+
+                if new_price:
+                    price_id = new_price.id
+                    package_type.stripe_product_id = product_id
+                    package_type.stripe_price_id = price_id
+
             package_type.save(update_fields=['stripe_product_id', 'stripe_price_id'])
+            return package_type.stripe_price_id
 
         except stripe.error.StripeError as e:
             logger.error(f"Stripe error syncing PackageType {package_type.id}: {str(e)}")
-            pass
+            return package_type.stripe_price_id
         except Exception as e:
             logger.error(f"Unexpected error syncing PackageType {package_type.id}: {str(e)}")
-            pass
+            return package_type.stripe_price_id
 
     @staticmethod
     def archive_package_on_stripe(package_type: PackageType) -> None:
@@ -136,12 +160,13 @@ class StripePackageService:
             pass
 
     @staticmethod
-    def sync_all_tenant_packages_to_stripe(tenant):
+    def sync_all_tenant_packages_to_stripe(tenant, currency: str = None):
         if not tenant:
             return
         packages = PackageType.all_objects.filter(tenant=tenant, is_active=True)
+        target_curr = currency or getattr(tenant, 'currency', None)
         for package in packages:
-            StripePackageService.sync_package_to_stripe(package)
+            StripePackageService.sync_package_to_stripe(package, currency=target_curr)
 
     @staticmethod
     def handle_checkout_session_completed(session) -> None:

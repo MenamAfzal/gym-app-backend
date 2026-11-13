@@ -1138,3 +1138,114 @@ class CheckoutIntegrationTests(TestCase):
         self.assertEqual(res_comp.data['welcome']['purchase_confirmation']['amount_paid'], '€120.00')
         self.assertEqual(res_comp.data['welcome']['purchase_confirmation']['currency'], 'EUR')
         self.assertEqual(res_comp.data['welcome']['purchase_confirmation']['currency_symbol'], '€')
+
+    @patch('stripe.checkout.Session.create')
+    @patch('stripe.Price.retrieve')
+    @patch('stripe.Price.create')
+    @patch('stripe.Price.modify')
+    @patch('stripe.Product.modify')
+    @patch('stripe.Product.create')
+    def test_currency_switch_auto_heals_stripe_price_and_succeeds_checkout(
+        self,
+        mock_product_create,
+        mock_product_modify,
+        mock_price_modify,
+        mock_price_create,
+        mock_price_retrieve,
+        mock_stripe_session_create,
+    ):
+        mock_product_create.return_value = MagicMock(id='prod_new_eur')
+        mock_product_modify.return_value = MagicMock(id='prod_legacy_usd')
+        mock_price_modify.return_value = MagicMock(id='price_legacy_usd_120', active=False)
+        mock_price_create.return_value = MagicMock(
+            id='price_new_eur_120',
+            currency='eur',
+            unit_amount=12000,
+            active=True,
+            recurring={'interval': 'month'}
+        )
+        mock_stripe_session_create.return_value = MagicMock(
+            id='cs_new_eur_120',
+            url='https://checkout.stripe.com/pay/cs_new_eur_120',
+            client_secret=None
+        )
+
+        def price_retrieve_side_effect(price_id):
+            if price_id == 'price_legacy_usd_120':
+                return MagicMock(
+                    id='price_legacy_usd_120',
+                    active=True,
+                    currency='usd',
+                    unit_amount=12000,
+                    recurring={'interval': 'month'}
+                )
+            return MagicMock(
+                id='price_new_eur_120',
+                active=True,
+                currency='eur',
+                unit_amount=12000,
+                recurring={'interval': 'month'}
+            )
+
+        mock_price_retrieve.side_effect = price_retrieve_side_effect
+
+        self.package_type_a.stripe_product_id = 'prod_legacy_usd'
+        self.package_type_a.stripe_price_id = 'price_legacy_usd_120'
+        self.package_type_a.save()
+
+        TenantCheckoutConfig.objects.create(tenant=self.tenant_a, is_enabled=True)
+
+        self.client.force_authenticate(user=self.owner_a)
+        res_patch_curr = self.client.patch(
+            '/api/v1/payments/checkout-config/',
+            {'currency': 'eur', 'is_enabled': True},
+            format='json',
+        )
+        self.assertEqual(res_patch_curr.status_code, 200)
+        self.assertEqual(res_patch_curr.data['currency'], 'eur')
+
+        self.tenant_a.refresh_from_db()
+        self.assertEqual(self.tenant_a.currency, 'eur')
+
+        self.client.force_authenticate(user=None)
+        res_session = self.client.post('/api/v1/checkout/sessions/', {
+            'tenant_id': 'alpha',
+            'package_type_id': str(self.package_type_a.id),
+            'email': 'eur.checkout.user@example.com',
+            'first_name': 'Euro',
+            'last_name': 'Tester',
+        })
+        self.assertEqual(res_session.status_code, 201)
+        session_id = res_session.data['session_id']
+        session_token = res_session.data['session_token']
+
+        session = ExternalCheckoutSession.all_objects.get(id=session_id)
+        self.assertEqual(session.currency, 'eur')
+        session.is_verified = True
+        session.health_commitment_accepted = True
+        session.status = ExternalCheckoutSession.StatusChoices.READY_FOR_PAYMENT
+        session.save()
+
+        res_pay = self.client.post(
+            f'/api/v1/checkout/sessions/{session_id}/initiate-payment/',
+            {},
+            headers={'X-Checkout-Token': session_token},
+            format='json'
+        )
+        self.assertEqual(res_pay.status_code, 200)
+        self.assertEqual(res_pay.data['checkout_url'], 'https://checkout.stripe.com/pay/cs_new_eur_120')
+
+        self.package_type_a.refresh_from_db()
+        self.assertEqual(self.package_type_a.stripe_price_id, 'price_new_eur_120')
+
+        self.client_user.refresh_from_db()
+        self.client_user.tenant.refresh_from_db()
+        self.client.force_authenticate(user=self.client_user)
+        res_mobile = self.client.post(
+            '/api/v1/payments/packages/checkout/',
+            {'package_type_id': str(self.package_type_a.id)},
+            headers={'X-Tenant-Id': str(self.tenant_a.id)},
+            format='json'
+        )
+        self.assertEqual(res_mobile.status_code, 200)
+        self.assertEqual(res_mobile.data['url'], 'https://checkout.stripe.com/pay/cs_new_eur_120')

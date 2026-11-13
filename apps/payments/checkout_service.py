@@ -466,27 +466,35 @@ class CheckoutIntegrationService:
             })
 
         package_type = session.package_type
-        if not package_type.stripe_price_id:
-            StripePackageService.sync_package_to_stripe(package_type)
+        target_currency = (session.currency or 'usd').lower()
+        expected_cents = CheckoutIntegrationService.get_stripe_amount(session.price_snapshot, target_currency)
 
         stripe.api_key = settings.STRIPE_SECRET_KEY
-        try:
-            stripe_price = stripe.Price.retrieve(package_type.stripe_price_id)
-        except Exception as e:
-            raise ValidationError({'detail': f'Unable to verify price with payment gateway: {e}'})
+        stripe_price = None
+        if package_type.stripe_price_id:
+            try:
+                stripe_price = stripe.Price.retrieve(package_type.stripe_price_id)
+            except Exception:
+                stripe_price = None
 
-        expected_cents = CheckoutIntegrationService.get_stripe_amount(session.price_snapshot, session.currency)
         if (
-            not stripe_price.active
-            or stripe_price.currency.lower() != session.currency.lower()
-            or stripe_price.unit_amount != expected_cents
+            not stripe_price
+            or not getattr(stripe_price, 'active', False)
+            or (getattr(stripe_price, 'currency', '') or '').lower() != target_currency
+            or getattr(stripe_price, 'unit_amount', None) != expected_cents
         ):
-            StripePackageService.sync_package_to_stripe(package_type)
-            stripe_price = stripe.Price.retrieve(package_type.stripe_price_id)
+            StripePackageService.sync_package_to_stripe(package_type, currency=target_currency)
+            package_type.refresh_from_db()
+            try:
+                stripe_price = stripe.Price.retrieve(package_type.stripe_price_id)
+            except Exception as e:
+                raise ValidationError({'detail': f'Unable to verify price with payment gateway: {e}'})
+
             if (
-                not stripe_price.active
-                or stripe_price.currency.lower() != session.currency.lower()
-                or stripe_price.unit_amount != expected_cents
+                not stripe_price
+                or not getattr(stripe_price, 'active', False)
+                or (getattr(stripe_price, 'currency', '') or '').lower() != target_currency
+                or getattr(stripe_price, 'unit_amount', None) != expected_cents
             ):
                 raise ValidationError({'detail': 'Payment gateway price is out of sync with package snapshot.'})
 

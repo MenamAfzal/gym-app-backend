@@ -161,7 +161,7 @@ class TenantCheckoutConfigAdminSerializer(serializers.ModelSerializer):
         instance.save()
         if 'currency' in validated_data and validated_data['currency'] != previous_currency:
             from apps.payments.stripe_package_service import StripePackageService
-            StripePackageService.sync_all_tenant_packages_to_stripe(instance.tenant)
+            StripePackageService.sync_all_tenant_packages_to_stripe(instance.tenant, currency=validated_data['currency'])
 
         return instance
 

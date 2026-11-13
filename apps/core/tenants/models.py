@@ -86,6 +86,23 @@ class Tenant(UUIDMixin, TimestampMixin):
     def __str__(self):
         return f"{self.name} ({self.subdomain})"
 
+    def save(self, *args, **kwargs):
+        if self.currency:
+            self.currency = str(self.currency).strip().lower()
+        is_new = self._state.adding
+        old_currency = None
+        if not is_new and self.pk:
+            old_currency = Tenant.objects.filter(pk=self.pk).values_list('currency', flat=True).first()
+        super().save(*args, **kwargs)
+        if not is_new and old_currency and self.currency != old_currency:
+            try:
+                from apps.payments.models import TenantCheckoutConfig
+                TenantCheckoutConfig.objects.filter(tenant=self).exclude(currency=self.currency).update(currency=self.currency)
+                from apps.payments.stripe_package_service import StripePackageService
+                StripePackageService.sync_all_tenant_packages_to_stripe(self, currency=self.currency)
+            except Exception:
+                pass
+
 
 class Plan(UUIDMixin, TimestampMixin):
     """

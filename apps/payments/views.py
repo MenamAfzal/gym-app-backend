@@ -1033,11 +1033,31 @@ class PackageCheckoutView(APIView):
         except PackageType.DoesNotExist:
             return Response({"error": "Package not found."}, status=status.HTTP_404_NOT_FOUND)
 
+        from apps.payments.stripe_package_service import StripePackageService
+        stripe.api_key = settings.STRIPE_SECRET_KEY
+        tenant_currency = (user.tenant.currency or 'usd').lower() if user.tenant else 'usd'
+        needs_price_sync = False
+        if not package_type.stripe_price_id:
+            needs_price_sync = True
+        else:
+            try:
+                curr_price = stripe.Price.retrieve(package_type.stripe_price_id)
+                if (
+                    not getattr(curr_price, 'active', False)
+                    or (getattr(curr_price, 'currency', '') or '').lower() != tenant_currency
+                ):
+                    needs_price_sync = True
+            except Exception:
+                needs_price_sync = True
+
+        if needs_price_sync:
+            StripePackageService.sync_package_to_stripe(package_type, currency=tenant_currency)
+            package_type.refresh_from_db()
+
         if not package_type.is_active or not package_type.stripe_price_id:
             return Response({"error": "This package is not available for purchase."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            # Dynamically determine deep-link scheme for multi-tenancy / white-labeling
             app_scheme = user.tenant.branding.get('app_scheme') if user.tenant.branding else None
             if not app_scheme:
                 app_scheme = getattr(settings, 'DEEPLINK_SCHEME', 'fitverx')
