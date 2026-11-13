@@ -513,12 +513,6 @@ class CheckoutIntegrationService:
         stripe_session = stripe.checkout.Session.create(
             mode='subscription',
             customer_email=session.email,
-            payment_method_types=['card'],
-            wallet_options={
-                'link': {
-                    'display': 'never',
-                },
-            },
             line_items=[{
                 'price': package_type.stripe_price_id,
                 'quantity': 1,

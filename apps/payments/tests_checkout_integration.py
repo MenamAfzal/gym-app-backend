@@ -1234,9 +1234,6 @@ class CheckoutIntegrationTests(TestCase):
         )
         self.assertEqual(res_pay.status_code, 200)
         self.assertEqual(res_pay.data['checkout_url'], 'https://checkout.stripe.com/pay/cs_new_eur_120')
-        session_call_kwargs = mock_stripe_session_create.call_args[1]
-        self.assertEqual(session_call_kwargs.get('payment_method_types'), ['card'])
-        self.assertEqual(session_call_kwargs.get('wallet_options'), {'link': {'display': 'never'}})
 
         self.package_type_a.refresh_from_db()
         self.assertEqual(self.package_type_a.stripe_price_id, 'price_new_eur_120')
