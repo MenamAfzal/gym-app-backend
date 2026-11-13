@@ -483,8 +483,12 @@ class CheckoutIntegrationService:
             or (getattr(stripe_price, 'currency', '') or '').lower() != target_currency
             or getattr(stripe_price, 'unit_amount', None) != expected_cents
         ):
-            StripePackageService.sync_package_to_stripe(package_type, currency=target_currency)
-            package_type.refresh_from_db()
+            try:
+                StripePackageService.sync_package_to_stripe(package_type, currency=target_currency, archive_existing=True)
+            except Exception as e:
+                raise ValidationError({'detail': f'Unable to synchronize price with payment gateway: {e}'})
+
+            package_type = PackageType.all_objects.get(id=package_type.id)
             try:
                 stripe_price = stripe.Price.retrieve(package_type.stripe_price_id)
             except Exception as e:
@@ -496,7 +500,8 @@ class CheckoutIntegrationService:
                 or (getattr(stripe_price, 'currency', '') or '').lower() != target_currency
                 or getattr(stripe_price, 'unit_amount', None) != expected_cents
             ):
-                raise ValidationError({'detail': 'Payment gateway price is out of sync with package snapshot.'})
+                gw_info = f"Gateway: {getattr(stripe_price, 'unit_amount', None)} {getattr(stripe_price, 'currency', '')}, Expected: {expected_cents} {target_currency}"
+                raise ValidationError({'detail': f'Payment gateway price is out of sync with package snapshot. ({gw_info})'})
 
         frontend_checkout_url = getattr(settings, 'FRONTEND_CHECKOUT_URL', '') or getattr(settings, 'FRONTEND_URL', '')
         default_success_url = f'{frontend_checkout_url}/sessions/{session.id}/status?gateway_status=success'

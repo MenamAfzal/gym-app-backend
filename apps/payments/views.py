@@ -1051,8 +1051,8 @@ class PackageCheckoutView(APIView):
                 needs_price_sync = True
 
         if needs_price_sync:
-            StripePackageService.sync_package_to_stripe(package_type, currency=tenant_currency)
-            package_type.refresh_from_db()
+            StripePackageService.sync_package_to_stripe(package_type, currency=tenant_currency, archive_existing=True)
+            package_type = PackageType.all_objects.get(id=package_type.id)
 
         if not package_type.is_active or not package_type.stripe_price_id:
             return Response({"error": "This package is not available for purchase."}, status=status.HTTP_400_BAD_REQUEST)

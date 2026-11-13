@@ -2068,6 +2068,14 @@ class PackageTypeViewSet(viewsets.ModelViewSet):
             raise PermissionDenied("You cannot create package types for an unassigned location.")
         serializer.save(tenant=self.request.tenant)
 
+    @transaction.atomic
+    def perform_update(self, serializer):
+        manager_loc_ids = PermissionService.get_manager_location_ids(self.request.user)
+        location = serializer.validated_data.get('location')
+        if manager_loc_ids is not None and location and location.id not in manager_loc_ids:
+            raise PermissionDenied("You cannot update package types to an unassigned location.")
+        serializer.save()
+
     @action(detail=False, methods=['get'], url_path='stats', permission_classes=[IsOwnerOrManager])
     def stats(self, request):
         from django.db.models import Sum

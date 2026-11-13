@@ -1249,3 +1249,53 @@ class CheckoutIntegrationTests(TestCase):
         )
         self.assertEqual(res_mobile.status_code, 200)
         self.assertEqual(res_mobile.data['url'], 'https://checkout.stripe.com/pay/cs_new_eur_120')
+
+    @patch('stripe.Price.modify')
+    @patch('stripe.Product.modify')
+    @patch('stripe.Price.create')
+    @patch('stripe.Product.create')
+    def test_package_plan_edit_archives_old_stripe_product_and_price_and_creates_new(
+        self,
+        mock_product_create,
+        mock_price_create,
+        mock_product_modify,
+        mock_price_modify
+    ):
+        mock_product_create.return_value = MagicMock(id='prod_fresh_999')
+        mock_price_create.return_value = MagicMock(id='price_fresh_999')
+
+        plan = PackageType.all_objects.create(
+            tenant=self.tenant_a,
+            location=self.location_a,
+            name='Original Plan',
+            price=Decimal('100.00'),
+            credit_count=10,
+            validity_days=30,
+            billing_cycle='monthly',
+            is_active=True,
+            stripe_product_id='prod_old_123',
+            stripe_price_id='price_old_123'
+        )
+
+        self.client.force_authenticate(user=self.owner_a)
+        res_update = self.client.patch(
+            f'/api/v1/scheduling/package-types/{plan.id}/',
+            {'price': '165.00', 'name': 'Renamed Plan'},
+            headers={'X-Tenant-Id': str(self.tenant_a.id)},
+            format='json'
+        )
+        self.assertEqual(res_update.status_code, 200)
+
+        mock_price_modify.assert_any_call('price_old_123', active=False)
+        mock_product_modify.assert_any_call('prod_old_123', active=False)
+
+        mock_product_create.assert_called_once()
+        self.assertEqual(mock_product_create.call_args[1]['name'], 'Renamed Plan')
+
+        mock_price_create.assert_called_once()
+        self.assertEqual(mock_price_create.call_args[1]['product'], 'prod_fresh_999')
+        self.assertEqual(mock_price_create.call_args[1]['unit_amount'], 16500)
+
+        plan.refresh_from_db()
+        self.assertEqual(plan.stripe_product_id, 'prod_fresh_999')
+        self.assertEqual(plan.stripe_price_id, 'price_fresh_999')

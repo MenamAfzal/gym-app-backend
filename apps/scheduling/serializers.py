@@ -473,7 +473,7 @@ class PackageTypeSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         from apps.payments.stripe_package_service import StripePackageService
         instance = super().update(instance, validated_data)
-        StripePackageService.sync_package_to_stripe(instance)
+        StripePackageService.sync_package_to_stripe(instance, archive_existing=True)
         return instance
 
 
