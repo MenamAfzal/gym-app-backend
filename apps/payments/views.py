@@ -1069,6 +1069,12 @@ class PackageCheckoutView(APIView):
             cancel_url = request.data.get('cancel_url', default_cancel)
 
             session = stripe.checkout.Session.create(
+                payment_method_types=['card'],
+                wallet_options={
+                    'link': {
+                        'display': 'never',
+                    },
+                },
                 line_items=[{
                     'price': package_type.stripe_price_id,
                     'quantity': 1,
