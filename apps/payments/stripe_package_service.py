@@ -271,6 +271,14 @@ class StripePackageService:
             except Exception:
                 pass
 
+            try:
+                from apps.crm.services import CRMIntegrationService
+                if subscription_id:
+                    CRMIntegrationService.dispatch_subscription_created_event(package, payment)
+                CRMIntegrationService.dispatch_payment_succeeded_event(payment)
+            except Exception as crm_exc:
+                logger.warning("CRM checkout session event dispatch failed for package %s: %s", package.id, crm_exc)
+
     @staticmethod
     def handle_invoice_payment_succeeded(invoice) -> None:
         """
@@ -363,6 +371,13 @@ class StripePackageService:
             except Exception:
                 pass
 
+            try:
+                from apps.crm.services import CRMIntegrationService
+                CRMIntegrationService.dispatch_subscription_renewed_event(package, payment)
+                CRMIntegrationService.dispatch_payment_succeeded_event(payment)
+            except Exception as crm_exc:
+                logger.warning("CRM subscription renewal dispatch failed for package %s: %s", package.id, crm_exc)
+
     @staticmethod
     def handle_subscription_updated(subscription) -> None:
         """
@@ -382,7 +397,7 @@ class StripePackageService:
 
         with bypass_tenant_isolation():
             try:
-                package = Package.objects.select_related('package_type').get(stripe_subscription_id=subscription_id)
+                package = Package.objects.select_related('package_type', 'client', 'tenant').get(stripe_subscription_id=subscription_id)
                 new_status = 'active' if status == 'active' else 'past_due' if status in ['past_due', 'unpaid'] else 'canceled'
                 update_fields = ['status', 'cancel_at_period_end']
                 package.status = new_status
@@ -402,6 +417,12 @@ class StripePackageService:
 
                 package.save(update_fields=update_fields)
                 logger.info(f"Updated Package {package.id} status to {package.status}")
+
+                try:
+                    from apps.crm.services import CRMIntegrationService
+                    CRMIntegrationService.dispatch_subscription_updated_event(package, new_status=new_status)
+                except Exception as crm_exc:
+                    logger.warning("CRM subscription update dispatch failed for package %s: %s", package.id, crm_exc)
             except Package.DoesNotExist:
                 pass
 
@@ -418,9 +439,100 @@ class StripePackageService:
         from apps.scheduling.models import Package
         with bypass_tenant_isolation():
             try:
-                package = Package.objects.get(stripe_subscription_id=subscription_id)
+                package = Package.objects.select_related('package_type', 'client', 'tenant').get(stripe_subscription_id=subscription_id)
                 package.status = 'canceled'
                 package.save(update_fields=['status'])
                 logger.info(f"Canceled Package {package.id}")
+                try:
+                    from apps.crm.services import CRMIntegrationService
+                    CRMIntegrationService.dispatch_subscription_cancelled_event(package)
+                except Exception as crm_exc:
+                    logger.warning("CRM subscription cancellation dispatch failed for package %s: %s", package.id, crm_exc)
             except Package.DoesNotExist:
                 pass
+
+    @staticmethod
+    def handle_invoice_payment_failed(invoice) -> None:
+        """
+        Handles failed invoice payments for packages/subscriptions.
+        Updates package status to past_due and dispatches payment.failed to CRM.
+        """
+        if not isinstance(invoice, dict):
+            invoice = invoice.to_dict() if hasattr(invoice, 'to_dict') else dict(invoice)
+
+        subscription_id = invoice.get('subscription')
+        amount_due = invoice.get('amount_due') or invoice.get('total') or 0
+        currency = (invoice.get('currency') or 'USD').upper()
+        reason = invoice.get('billing_reason') or 'Invoice payment failed'
+
+        from apps.scheduling.models import Package
+        with bypass_tenant_isolation():
+            try:
+                package = None
+                if subscription_id:
+                    package = Package.objects.select_related('package_type', 'client', 'tenant').filter(
+                        stripe_subscription_id=subscription_id
+                    ).first()
+
+                if package and package.tenant and package.client:
+                    package.status = 'past_due'
+                    package.save(update_fields=['status'])
+                    logger.info(f"Updated Package {package.id} status to past_due on invoice failure")
+
+                    try:
+                        from apps.crm.services import CRMIntegrationService
+                        CRMIntegrationService.dispatch_payment_failed_event(
+                            tenant=package.tenant,
+                            user=package.client,
+                            amount=float(amount_due) / 100.0 if amount_due else 0.0,
+                            currency=currency,
+                            reason=reason,
+                            package_type=package.package_type,
+                        )
+                    except Exception as crm_exc:
+                        logger.warning("CRM payment.failed dispatch error: %s", crm_exc)
+            except Exception as exc:
+                logger.exception("Error in handle_invoice_payment_failed: %s", exc)
+
+    @staticmethod
+    def handle_charge_refunded(charge) -> None:
+        """
+        Handles charge refunds. Dispatches refund.issued to CRM.
+        """
+        if not isinstance(charge, dict):
+            charge = charge.to_dict() if hasattr(charge, 'to_dict') else dict(charge)
+
+        charge_id = charge.get('id')
+        amount = float(charge.get('amount') or 0) / 100.0
+        amount_refunded = float(charge.get('amount_refunded') or charge.get('amount') or 0) / 100.0
+        currency = (charge.get('currency') or 'USD').upper()
+        reason = charge.get('reason') or 'Customer refund'
+
+        from apps.scheduling.models import Payment
+        with bypass_tenant_isolation():
+            try:
+                payment = Payment.objects.select_related('client', 'tenant', 'package', 'package__package_type').filter(
+                    provider_ref=charge_id
+                ).first()
+
+                if not payment:
+                    payment = Payment.objects.select_related('client', 'tenant', 'package', 'package__package_type').filter(
+                        idempotency_key=charge_id
+                    ).first()
+
+                if payment and payment.tenant and payment.client:
+                    try:
+                        from apps.crm.services import CRMIntegrationService
+                        CRMIntegrationService.dispatch_refund_issued_event(
+                            tenant=payment.tenant,
+                            user=payment.client,
+                            amount=amount,
+                            refund_amount=amount_refunded,
+                            currency=currency,
+                            reason=reason,
+                            package=payment.package,
+                        )
+                    except Exception as crm_exc:
+                        logger.warning("CRM refund.issued dispatch error: %s", crm_exc)
+            except Exception as exc:
+                logger.exception("Error in handle_charge_refunded: %s", exc)

@@ -736,6 +736,15 @@ class CheckoutIntegrationService:
         except Exception:
             pass
 
+        try:
+            from apps.crm.services import CRMIntegrationService
+            CRMIntegrationService.dispatch_purchase_event(session, package, payment)
+            if stripe_subscription_id:
+                CRMIntegrationService.dispatch_subscription_created_event(package, payment)
+            CRMIntegrationService.dispatch_payment_succeeded_event(payment)
+        except Exception as crm_exc:
+            logger.warning("CRM checkout event dispatch failed for session %s: %s", session.id, crm_exc)
+
         return {'status': 'fulfilled', 'package_id': str(package.id)}
 
     ZERO_DECIMAL_CURRENCIES = {

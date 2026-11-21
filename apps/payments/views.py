@@ -261,6 +261,18 @@ def stripe_webhook(request):
         FeatureBillingService.handle_subscription_deleted(data_object)
     elif event_type == 'invoice.payment_succeeded':
         _handle_invoice_payment_succeeded(data_object)
+    elif event_type == 'invoice.payment_failed':
+        try:
+            from apps.payments.stripe_package_service import StripePackageService
+            StripePackageService.handle_invoice_payment_failed(data_object)
+        except Exception as exc:
+            logger.exception("Error handling invoice.payment_failed in stripe_webhook: %s", exc)
+    elif event_type == 'charge.refunded':
+        try:
+            from apps.payments.stripe_package_service import StripePackageService
+            StripePackageService.handle_charge_refunded(data_object)
+        except Exception as exc:
+            logger.exception("Error handling charge.refunded in stripe_webhook: %s", exc)
     else:
         logger.info(f"Unhandled Stripe event type: {event_type}")
 
@@ -1010,6 +1022,20 @@ def stripe_checkout_webhook(request):
                     )
         except Exception as exc:
             logger.exception("Error awarding affiliate renewal points on invoice.payment_succeeded: %s", exc)
+    elif event_type == 'invoice.payment_failed':
+        try:
+            from apps.payments.stripe_package_service import StripePackageService
+            StripePackageService.handle_invoice_payment_failed(data_object)
+            logger.info("invoice.payment_failed handled in checkout webhook.")
+        except Exception as exc:
+            logger.exception("Error handling invoice.payment_failed in checkout webhook: %s", exc)
+    elif event_type == 'charge.refunded':
+        try:
+            from apps.payments.stripe_package_service import StripePackageService
+            StripePackageService.handle_charge_refunded(data_object)
+            logger.info("charge.refunded handled in checkout webhook.")
+        except Exception as exc:
+            logger.exception("Error handling charge.refunded in checkout webhook: %s", exc)
     else:
         logger.info("Checkout webhook: unhandled event type '%s'", event_type)
 
