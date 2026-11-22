@@ -1,15 +1,24 @@
 import base64
 import hashlib
+import logging
 import uuid
-from cryptography.fernet import Fernet
+try:
+    from cryptography.fernet import Fernet
+except ImportError:
+    Fernet = None
 from django.conf import settings
 from django.db import models
 from django.utils import timezone
 from core_models.base_models import TenantAwareModel
 
+logger = logging.getLogger(__name__)
 
-def _get_crm_fernet() -> Fernet:
+
+def _get_crm_fernet():
     """Derives a deterministic 32-byte Fernet key from Django's SECRET_KEY."""
+    if Fernet is None:
+        logger.warning("cryptography package is not installed; CRM secrets will not be encrypted at rest.")
+        return None
     raw_key = getattr(settings, "SECRET_KEY", "fallback-secret-key-32-chars-min")
     digest = hashlib.sha256(raw_key.encode("utf-8")).digest()
     return Fernet(base64.urlsafe_b64encode(digest))
@@ -21,6 +30,8 @@ def encrypt_crm_secret(raw: str) -> str:
         return raw or ""
     try:
         f = _get_crm_fernet()
+        if f is None:
+            return raw
         token = f.encrypt(raw.encode("utf-8")).decode("utf-8")
         return f"enc::{token}"
     except Exception:
@@ -33,6 +44,8 @@ def decrypt_crm_secret(ciphertext: str) -> str:
         return ciphertext or ""
     try:
         f = _get_crm_fernet()
+        if f is None:
+            return ciphertext
         token = ciphertext[5:]
         return f.decrypt(token.encode("utf-8")).decode("utf-8")
     except Exception:
