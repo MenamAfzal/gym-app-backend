@@ -10,7 +10,7 @@ from apps.core.tenants.context import set_current_tenant
 from apps.scheduling.models import (
     Location, Room, ClassTemplate, RecurrenceRule, ClassSession,
     Booking, PackageType, Package, Waitlist, CancellationPolicy,
-    Appointment, SpotType, RoomLayout, Spot
+    Appointment, SpotType, RoomLayout, Spot, StaffAvailability, SubstituteRequest
 )
 from apps.scheduling.tasks import process_waitlist_promotion_job, run_no_show_marking_job
 
@@ -1819,6 +1819,335 @@ class SpotTypeEditAndDeleteTests(GymSchedulingSystemTestCase):
         self.assertEqual(res_success.status_code, 201)
         pkg_insufficient.refresh_from_db()
         self.assertEqual(pkg_insufficient.credits_remaining, 4)
+
+
+class StaffAvailabilityConflictTests(TestCase):
+    def setUp(self):
+        from rest_framework.test import APIClient
+        self.client = APIClient()
+
+        # Create a test tenant
+        self.tenant = Tenant.objects.create(name="Ali Gym", subdomain="ali-gym-avail")
+        self.tenant_token = set_current_tenant(self.tenant)
+
+        # Create user roles
+        self.owner = User.objects.create_user(
+            email="owner_avail@aligym.com", password="password123", role=UserRole.GYM_OWNER, tenant=self.tenant
+        )
+        self.trainer = User.objects.create_user(
+            email="trainer_avail@aligym.com", password="password123", role=UserRole.TRAINER, tenant=self.tenant
+        )
+        self.client1 = User.objects.create_user(
+            email="client1_avail@aligym.com", password="password123", role=UserRole.CLIENT, tenant=self.tenant
+        )
+
+        self.location = Location.objects.create(
+            tenant=self.tenant, name="Main Studio", address="123 Fitness St", timezone="UTC"
+        )
+        self.room = Room.objects.create(
+            tenant=self.tenant, location=self.location, name="Room A", capacity=1
+        )
+
+        self.client.force_authenticate(user=self.owner)
+        self.target_date = (timezone.now() + timedelta(days=2)).date()
+        self.target_weekday = self.target_date.strftime('%A').lower()
+        self.appt_start = timezone.make_aware(datetime.combine(self.target_date, time(10, 0)))
+        self.appt_end = timezone.make_aware(datetime.combine(self.target_date, time(11, 0)))
+
+        self.appointment = Appointment.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            provider=self.trainer,
+            location=self.location,
+            room=self.room,
+            start_at=self.appt_start,
+            end_at=self.appt_end,
+            status='scheduled'
+        )
+
+    def test_cannot_create_blackout_over_active_appointment(self):
+        payload = {
+            "staff": str(self.trainer.id),
+            "weekday_or_date": str(self.target_date),
+            "start_time": "09:00:00",
+            "end_time": "12:00:00",
+            "is_blackout": True
+        }
+        res = self.client.post('/api/v1/scheduling/staff-availability/', payload, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("Cannot add blackout", res.data.get('detail', ''))
+        self.assertIn(self.client1.email, res.data.get('detail', ''))
+
+    def test_can_create_blackout_when_no_appointment_conflicts(self):
+        payload = {
+            "staff": str(self.trainer.id),
+            "weekday_or_date": str(self.target_date),
+            "start_time": "14:00:00",
+            "end_time": "16:00:00",
+            "is_blackout": True
+        }
+        res = self.client.post('/api/v1/scheduling/staff-availability/', payload, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res.status_code, 201)
+
+    def test_cannot_delete_availability_covering_active_appointment(self):
+        avail = StaffAvailability.objects.create(
+            tenant=self.tenant,
+            staff=self.trainer,
+            weekday_or_date=str(self.target_date),
+            start_time=time(9, 0),
+            end_time=time(17, 0),
+            is_blackout=False
+        )
+        res = self.client.delete(f'/api/v1/scheduling/staff-availability/{avail.id}/', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("Cannot delete availability", res.data.get('detail', ''))
+
+    def test_can_delete_availability_if_another_slot_covers_appointment(self):
+        avail1 = StaffAvailability.objects.create(
+            tenant=self.tenant,
+            staff=self.trainer,
+            weekday_or_date=str(self.target_date),
+            start_time=time(9, 0),
+            end_time=time(17, 0),
+            is_blackout=False
+        )
+        StaffAvailability.objects.create(
+            tenant=self.tenant,
+            staff=self.trainer,
+            weekday_or_date=str(self.target_date),
+            start_time=time(8, 0),
+            end_time=time(18, 0),
+            is_blackout=False
+        )
+        res = self.client.delete(f'/api/v1/scheduling/staff-availability/{avail1.id}/', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res.status_code, 204)
+
+    def test_cannot_shorten_availability_away_from_active_appointment(self):
+        avail = StaffAvailability.objects.create(
+            tenant=self.tenant,
+            staff=self.trainer,
+            weekday_or_date=str(self.target_date),
+            start_time=time(9, 0),
+            end_time=time(17, 0),
+            is_blackout=False
+        )
+        res = self.client.patch(
+            f'/api/v1/scheduling/staff-availability/{avail.id}/',
+            {"start_time": "12:00:00"},
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id)
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("Cannot update availability", res.data.get('detail', ''))
+
+    def test_cancelled_appointment_does_not_block_blackout(self):
+        self.appointment.status = 'cancelled'
+        self.appointment.save()
+
+        payload = {
+            "staff": str(self.trainer.id),
+            "weekday_or_date": str(self.target_date),
+            "start_time": "09:00:00",
+            "end_time": "12:00:00",
+            "is_blackout": True
+        }
+        res = self.client.post('/api/v1/scheduling/staff-availability/', payload, format='json', HTTP_X_TENANT_ID=str(self.tenant.id))
+        self.assertEqual(res.status_code, 201)
+
+
+class ScheduleChangeNotificationTests(TestCase):
+    def setUp(self):
+        from rest_framework.test import APIClient
+        self.client = APIClient()
+
+        self.tenant = Tenant.objects.create(name="Notification Gym", subdomain="notif-gym")
+        self.tenant_token = set_current_tenant(self.tenant)
+
+        self.owner = User.objects.create_user(
+            email="owner_notif@gym.com", password="password123", role=UserRole.GYM_OWNER, tenant=self.tenant
+        )
+        self.trainer1 = User.objects.create_user(
+            email="trainer1_notif@gym.com", password="password123", role=UserRole.TRAINER, tenant=self.tenant
+        )
+        self.trainer2 = User.objects.create_user(
+            email="trainer2_notif@gym.com", password="password123", role=UserRole.TRAINER, tenant=self.tenant
+        )
+        self.client1 = User.objects.create_user(
+            email="client1_notif@gym.com", password="password123", role=UserRole.CLIENT, tenant=self.tenant
+        )
+
+        self.location = Location.objects.create(
+            tenant=self.tenant, name="Main Studio", address="123 Fitness St", timezone="UTC"
+        )
+        self.room = Room.objects.create(
+            tenant=self.tenant, location=self.location, name="Room A", capacity=10
+        )
+        self.template = ClassTemplate.objects.create(
+            tenant=self.tenant, location=self.location, name="Morning Yoga", duration_min=60, default_capacity=10
+        )
+
+        self.session_start = timezone.now() + timedelta(days=2)
+        self.session_end = self.session_start + timedelta(minutes=60)
+        self.session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer1,
+            start_at=self.session_start,
+            end_at=self.session_end,
+            capacity=10,
+            status='scheduled'
+        )
+
+        self.booking = Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            session=self.session,
+            status='booked'
+        )
+
+        self.appt_start = timezone.now() + timedelta(days=3)
+        self.appt_end = self.appt_start + timedelta(hours=1)
+        self.appointment = Appointment.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            provider=self.trainer1,
+            location=self.location,
+            room=self.room,
+            start_at=self.appt_start,
+            end_at=self.appt_end,
+            status='scheduled'
+        )
+
+        self.client.force_authenticate(user=self.owner)
+
+    def test_client_notified_when_session_time_rescheduled(self):
+        from apps.notifications.models import NotificationInbox
+        new_start = self.session_start + timedelta(hours=2)
+        new_end = self.session_end + timedelta(hours=2)
+
+        res = self.client.patch(
+            f'/api/v1/scheduling/sessions/{self.session.id}/',
+            {
+                "start_at": new_start.isoformat(),
+                "end_at": new_end.isoformat(),
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id)
+        )
+        self.assertEqual(res.status_code, 200)
+
+        notif = NotificationInbox.objects.filter(
+            recipient=self.client1,
+            notification_type='CLASS',
+            title__icontains="Class Rescheduled"
+        ).first()
+        self.assertIsNotNone(notif)
+        self.assertIn("Morning Yoga", notif.body)
+
+    def test_client_notified_when_session_trainer_changed(self):
+        from apps.notifications.models import NotificationInbox
+        res = self.client.patch(
+            f'/api/v1/scheduling/sessions/{self.session.id}/',
+            {
+                "staff": str(self.trainer2.id),
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id)
+        )
+        self.assertEqual(res.status_code, 200)
+
+        notif = NotificationInbox.objects.filter(
+            recipient=self.client1,
+            notification_type='CLASS',
+            title__icontains="Instructor Update"
+        ).first()
+        self.assertIsNotNone(notif)
+        self.assertIn(self.trainer2.email, notif.body)
+
+    def test_client_notified_when_substitute_accepted(self):
+        from apps.notifications.models import NotificationInbox
+        sub_req = SubstituteRequest.objects.create(
+            tenant=self.tenant,
+            session=self.session,
+            requested_by_staff=self.trainer1,
+            status='open'
+        )
+        res = self.client.post(
+            f'/api/v1/scheduling/substitute-requests/{sub_req.id}/accept/',
+            {"trainer": str(self.trainer2.id)},
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id)
+        )
+        self.assertEqual(res.status_code, 200)
+
+        notif = NotificationInbox.objects.filter(
+            recipient=self.client1,
+            notification_type='CLASS',
+            title__icontains="Instructor Update"
+        ).first()
+        self.assertIsNotNone(notif)
+        self.assertIn(self.trainer2.email, notif.body)
+
+    def test_client_notified_when_appointment_time_rescheduled(self):
+        from apps.notifications.models import NotificationInbox
+        new_start = self.appt_start + timedelta(hours=3)
+        new_end = self.appt_end + timedelta(hours=3)
+
+        res = self.client.patch(
+            f'/api/v1/scheduling/appointments/{self.appointment.id}/',
+            {
+                "start_at": new_start.isoformat(),
+                "end_at": new_end.isoformat(),
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id)
+        )
+        self.assertEqual(res.status_code, 200)
+
+        notif = NotificationInbox.objects.filter(
+            recipient=self.client1,
+            notification_type='APPOINTMENT',
+            title__icontains="Appointment Rescheduled"
+        ).first()
+        self.assertIsNotNone(notif)
+
+    def test_client_notified_when_appointment_trainer_changed(self):
+        from apps.notifications.models import NotificationInbox
+        res = self.client.patch(
+            f'/api/v1/scheduling/appointments/{self.appointment.id}/',
+            {
+                "provider": str(self.trainer2.id),
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id)
+        )
+        self.assertEqual(res.status_code, 200)
+
+        notif = NotificationInbox.objects.filter(
+            recipient=self.client1,
+            notification_type='APPOINTMENT',
+            title__icontains="Trainer Changed"
+        ).first()
+        self.assertIsNotNone(notif)
+        self.assertIn(self.trainer2.email, notif.body)
+
+    def test_client_notified_when_appointment_cancelled(self):
+        from apps.notifications.models import NotificationInbox
+        res = self.client.delete(
+            f'/api/v1/scheduling/appointments/{self.appointment.id}/',
+            HTTP_X_TENANT_ID=str(self.tenant.id)
+        )
+        self.assertEqual(res.status_code, 200)
+
+        notif = NotificationInbox.objects.filter(
+            recipient=self.client1,
+            notification_type='APPOINTMENT',
+            title__icontains="Appointment Cancelled"
+        ).first()
+        self.assertIsNotNone(notif)
+
+
 
 
 

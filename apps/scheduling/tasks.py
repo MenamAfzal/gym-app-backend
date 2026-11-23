@@ -218,6 +218,170 @@ def process_credit_refund_job(session_id):
         reset_current_tenant(token)
 
 
+def notify_session_rescheduled(session, *, old_start_at=None, old_staff=None, time_changed=False, trainer_changed=False):
+    """
+    Notifies all active booked attendees when a class session's date, time, or instructor is changed.
+    """
+    from apps.notifications.services import NotificationService
+    from apps.notifications.events import SessionRescheduledEvent
+    from .models import Booking
+
+    bookings = Booking.all_objects.filter(
+        session=session,
+        status='booked'
+    ).select_related('client', 'client__profile', 'tenant')
+
+    if not bookings.exists():
+        return
+
+    class_name = session.template.name if (session.template and session.template.name) else "Class"
+    new_time_str = session.start_at.strftime('%A, %b %d at %I:%M %p')
+    old_time_str = old_start_at.strftime('%A, %b %d at %I:%M %p') if old_start_at else ""
+
+    trainer_name = "your instructor"
+    if session.staff:
+        if hasattr(session.staff, 'profile') and session.staff.profile and session.staff.profile.first_name:
+            trainer_name = session.staff.profile.first_name
+        else:
+            trainer_name = session.staff.email
+
+    if time_changed and trainer_changed:
+        title = f"Class Rescheduled: {class_name}"
+        body = f"Your class '{class_name}' has been moved to {new_time_str} with instructor {trainer_name}."
+    elif time_changed:
+        title = f"Class Rescheduled: {class_name}"
+        body = f"Your class '{class_name}' has been moved to {new_time_str}."
+    elif trainer_changed:
+        title = f"Instructor Update: {class_name}"
+        body = f"The instructor for your class '{class_name}' on {new_time_str} has changed to {trainer_name}."
+    else:
+        title = f"Class Update: {class_name}"
+        body = f"Your class '{class_name}' schedule has been updated to {new_time_str}."
+
+    for booking in bookings:
+        try:
+            client_name = getattr(booking.client, 'profile', None) and booking.client.profile.first_name or booking.client.email
+            idempotency_key = f"session_rescheduled:{booking.client_id}:{session.id}:{session.start_at.isoformat()}:{session.staff_id}"
+
+            NotificationService.handle_event(SessionRescheduledEvent(
+                tenant_id=booking.tenant_id,
+                recipient_id=booking.client_id,
+                entity_id=session.id,
+                context_data={
+                    'title': title,
+                    'body': body,
+                    'client_name': client_name,
+                    'class_name': class_name,
+                    'class_time': new_time_str,
+                    'old_time': old_time_str,
+                    'trainer_name': trainer_name,
+                    'gym_name': session.tenant.name if session.tenant else '',
+                    'time_changed': time_changed,
+                    'trainer_changed': trainer_changed,
+                    'idempotency_key': idempotency_key,
+                }
+            ))
+            logger.info(f"Rescheduled notification sent to client {booking.client.email} for session {session.id}")
+        except Exception as e:
+            logger.warning(f"Failed to send rescheduled notification for booking {booking.id}: {e}")
+
+
+def notify_appointment_rescheduled(appointment, *, old_start_at=None, old_provider=None, time_changed=False, trainer_changed=False):
+    """
+    Notifies the client when a 1-on-1 appointment's date, time, or provider is changed.
+    """
+    from apps.notifications.services import NotificationService
+    from apps.notifications.events import AppointmentRescheduledEvent
+
+    new_time_str = appointment.start_at.strftime('%A, %b %d at %I:%M %p')
+    old_time_str = old_start_at.strftime('%A, %b %d at %I:%M %p') if old_start_at else ""
+
+    trainer_name = "your trainer"
+    if appointment.provider:
+        if hasattr(appointment.provider, 'profile') and appointment.provider.profile and appointment.provider.profile.first_name:
+            trainer_name = appointment.provider.profile.first_name
+        else:
+            trainer_name = appointment.provider.email
+
+    if time_changed and trainer_changed:
+        title = "Appointment Rescheduled"
+        body = f"Your appointment has been moved to {new_time_str} with {trainer_name}."
+    elif time_changed:
+        title = "Appointment Rescheduled"
+        body = f"Your appointment with {trainer_name} has been moved to {new_time_str}."
+    elif trainer_changed:
+        title = "Trainer Changed"
+        body = f"Your appointment on {new_time_str} will now be with {trainer_name}."
+    else:
+        title = "Appointment Update"
+        body = f"Your appointment with {trainer_name} has been updated to {new_time_str}."
+
+    client_name = getattr(appointment.client, 'profile', None) and appointment.client.profile.first_name or appointment.client.email
+    idempotency_key = f"appointment_rescheduled:{appointment.client_id}:{appointment.id}:{appointment.start_at.isoformat()}:{appointment.provider_id}"
+
+    try:
+        NotificationService.handle_event(AppointmentRescheduledEvent(
+            tenant_id=appointment.tenant_id,
+            recipient_id=appointment.client_id,
+            entity_id=appointment.id,
+            context_data={
+                'title': title,
+                'body': body,
+                'client_name': client_name,
+                'trainer_name': trainer_name,
+                'appointment_time': new_time_str,
+                'old_time': old_time_str,
+                'time_changed': time_changed,
+                'trainer_changed': trainer_changed,
+                'gym_name': appointment.tenant.name if appointment.tenant else '',
+                'idempotency_key': idempotency_key,
+            }
+        ))
+        logger.info(f"Rescheduled notification sent to client {appointment.client.email} for appointment {appointment.id}")
+    except Exception as e:
+        logger.warning(f"Failed to send appointment rescheduled notification for appointment {appointment.id}: {e}")
+
+
+def notify_appointment_cancelled(appointment, *, is_early_cancel=True):
+    """
+    Notifies the client when a 1-on-1 appointment is cancelled.
+    """
+    from apps.notifications.services import NotificationService
+    from apps.notifications.events import AppointmentCancelledEvent
+
+    time_str = appointment.start_at.strftime('%A, %b %d at %I:%M %p')
+    trainer_name = "your trainer"
+    if appointment.provider:
+        if hasattr(appointment.provider, 'profile') and appointment.provider.profile and appointment.provider.profile.first_name:
+            trainer_name = appointment.provider.profile.first_name
+        else:
+            trainer_name = appointment.provider.email
+
+    client_name = getattr(appointment.client, 'profile', None) and appointment.client.profile.first_name or appointment.client.email
+    refund_text = " Your credit has been refunded." if is_early_cancel else ""
+    body = f"Your appointment with {trainer_name} on {time_str} has been cancelled.{refund_text}"
+    idempotency_key = f"appointment_cancelled:{appointment.client_id}:{appointment.id}"
+
+    try:
+        NotificationService.handle_event(AppointmentCancelledEvent(
+            tenant_id=appointment.tenant_id,
+            recipient_id=appointment.client_id,
+            entity_id=appointment.id,
+            context_data={
+                'title': "Appointment Cancelled",
+                'body': body,
+                'client_name': client_name,
+                'trainer_name': trainer_name,
+                'appointment_time': time_str,
+                'gym_name': appointment.tenant.name if appointment.tenant else '',
+                'idempotency_key': idempotency_key,
+            }
+        ))
+        logger.info(f"Cancellation notification sent to client {appointment.client.email} for appointment {appointment.id}")
+    except Exception as e:
+        logger.warning(f"Failed to send appointment cancellation notification for appointment {appointment.id}: {e}")
+
+
 @shared_task
 def process_substitute_broadcast_job(substitute_request_id):
     """

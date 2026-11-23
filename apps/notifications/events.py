@@ -72,6 +72,12 @@ class SessionCancelledEvent(NotificationEvent):
 
 
 @dataclass
+class SessionRescheduledEvent(NotificationEvent):
+    """Emitted when a class session's date, time, or instructor is changed."""
+    _event_type = 'session_rescheduled'
+
+
+@dataclass
 class ClassReminder24hEvent(NotificationEvent):
     """Emitted by the beat task for class reminders 24 hours ahead."""
     _event_type = 'class_reminder_24h'
@@ -87,6 +93,18 @@ class ClassReminder1hEvent(NotificationEvent):
 class AppointmentReminderEvent(NotificationEvent):
     """Emitted by the beat task for appointment reminders."""
     _event_type = 'appointment_reminder'
+
+
+@dataclass
+class AppointmentRescheduledEvent(NotificationEvent):
+    """Emitted when an appointment's date, time, or provider is changed."""
+    _event_type = 'appointment_rescheduled'
+
+
+@dataclass
+class AppointmentCancelledEvent(NotificationEvent):
+    """Emitted when an appointment is cancelled by staff."""
+    _event_type = 'appointment_cancelled'
 
 
 @dataclass

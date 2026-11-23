@@ -35,7 +35,10 @@ from .serializers import (
     EventEnrollmentSerializer, EventEnrollRequestSerializer, EventRosterSerializer,
     TenantBookingSettingsSerializer
 )
-from .services import create_layout, update_layout, change_booking_spot, SpotUnavailableError
+from .services import (
+    create_layout, update_layout, change_booking_spot, SpotUnavailableError,
+    check_staff_availability_conflict,
+)
 from .event_services import (
     enroll_client, cancel_enrollment, check_in_attendee, cancel_event,
     EventPaymentRequiredError, EventCapacityError, EventRegistrationError
@@ -461,10 +464,51 @@ class StaffAvailabilityViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         user = self.request.user
         tenant = getattr(self.request, 'tenant', None) or getattr(user, 'tenant', None)
+        target_staff = serializer.validated_data.get('staff') or user
+        check_staff_availability_conflict(
+            staff=target_staff,
+            weekday_or_date=serializer.validated_data.get('weekday_or_date', ''),
+            start_time=serializer.validated_data.get('start_time'),
+            end_time=serializer.validated_data.get('end_time'),
+            is_blackout=serializer.validated_data.get('is_blackout', False),
+            action='create',
+        )
         if getattr(user, 'role', None) == UserRole.TRAINER and not serializer.validated_data.get('staff'):
             serializer.save(tenant=tenant, staff=user)
         else:
             serializer.save(tenant=tenant)
+
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        target_staff = serializer.validated_data.get('staff') or instance.staff
+        weekday_or_date = serializer.validated_data.get('weekday_or_date', instance.weekday_or_date)
+        start_time = serializer.validated_data.get('start_time', instance.start_time)
+        end_time = serializer.validated_data.get('end_time', instance.end_time)
+        is_blackout = serializer.validated_data.get('is_blackout', instance.is_blackout)
+
+        check_staff_availability_conflict(
+            staff=target_staff,
+            weekday_or_date=weekday_or_date,
+            start_time=start_time,
+            end_time=end_time,
+            is_blackout=is_blackout,
+            action='update',
+            current_instance=instance,
+        )
+        serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        check_staff_availability_conflict(
+            staff=instance.staff,
+            weekday_or_date=instance.weekday_or_date,
+            start_time=instance.start_time,
+            end_time=instance.end_time,
+            is_blackout=instance.is_blackout,
+            action='delete',
+            current_instance=instance,
+        )
+        return super().destroy(request, *args, **kwargs)
 
 
 class ClassTemplateViewSet(viewsets.ModelViewSet):
@@ -736,6 +780,10 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
     @transaction.atomic
     def perform_update(self, serializer):
         old_status = serializer.instance.status
+        old_start_at = serializer.instance.start_at
+        old_end_at = serializer.instance.end_at
+        old_staff = serializer.instance.staff
+
         session = serializer.save()
 
         if session.status == 'cancelled' and old_status != 'cancelled':
@@ -745,6 +793,18 @@ class ClassSessionViewSet(viewsets.ModelViewSet):
                 process_credit_refund_job.delay(str(session.id))
             except Exception:
                 pass
+        elif session.status != 'cancelled':
+            time_changed = (old_start_at != session.start_at or old_end_at != session.end_at)
+            trainer_changed = (old_staff != session.staff)
+            if time_changed or trainer_changed:
+                from .tasks import notify_session_rescheduled
+                notify_session_rescheduled(
+                    session,
+                    old_start_at=old_start_at,
+                    old_staff=old_staff,
+                    time_changed=time_changed,
+                    trainer_changed=trainer_changed,
+                )
 
     @action(detail=True, methods=['post'], permission_classes=[IsOwnerOrManager])
     @transaction.atomic
@@ -1910,11 +1970,39 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 pkg.credits_remaining += appointment.credits_used
                 pkg.save()
 
+        from .tasks import notify_appointment_cancelled
+        notify_appointment_cancelled(appointment, is_early_cancel=is_early_cancel)
+
         return Response({
             "status": "cancelled",
             "refunded": is_early_cancel,
             "detail": "Appointment cancelled."
         }, status=status.HTTP_200_OK)
+
+    @transaction.atomic
+    def perform_update(self, serializer):
+        old_status = serializer.instance.status
+        old_start_at = serializer.instance.start_at
+        old_end_at = serializer.instance.end_at
+        old_provider = serializer.instance.provider
+
+        appointment = serializer.save()
+
+        if appointment.status == 'cancelled' and old_status != 'cancelled':
+            from .tasks import notify_appointment_cancelled
+            notify_appointment_cancelled(appointment, is_early_cancel=True)
+        elif appointment.status != 'cancelled':
+            time_changed = (old_start_at != appointment.start_at or old_end_at != appointment.end_at)
+            trainer_changed = (old_provider != appointment.provider)
+            if time_changed or trainer_changed:
+                from .tasks import notify_appointment_rescheduled
+                notify_appointment_rescheduled(
+                    appointment,
+                    old_start_at=old_start_at,
+                    old_provider=old_provider,
+                    time_changed=time_changed,
+                    trainer_changed=trainer_changed,
+                )
 
     @action(detail=True, methods=['post'], url_path='cancel')
     def cancel(self, request, pk=None):
@@ -2034,8 +2122,17 @@ class SubstituteRequestViewSet(viewsets.ModelViewSet):
         sub_req.save()
 
         # Update session
+        old_staff = session.staff
         session.staff = target_trainer
         session.save()
+
+        from .tasks import notify_session_rescheduled
+        notify_session_rescheduled(
+            session,
+            old_staff=old_staff,
+            trainer_changed=True,
+            time_changed=False,
+        )
 
         return Response({"status": "filled", "accepted_by": target_trainer.email})
 

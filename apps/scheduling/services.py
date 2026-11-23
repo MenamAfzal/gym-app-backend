@@ -261,3 +261,212 @@ def change_booking_spot(*, booking, new_spot_id):
     booking.spot = new_spot
     booking.save(update_fields=['spot'])
     return booking
+
+
+def _matches_date_or_weekday(val_str: str, target_dt) -> bool:
+    if not val_str or not target_dt:
+        return False
+    cleaned = str(val_str).strip().lower()
+    if cleaned in ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']:
+        return target_dt.strftime('%A').lower() == cleaned
+    try:
+        from datetime import datetime as dt_cls
+        parsed_date = dt_cls.strptime(cleaned, '%Y-%m-%d').date()
+        return target_dt.date() == parsed_date
+    except (ValueError, TypeError):
+        return False
+
+
+def _times_overlap(start1, end1, start2, end2) -> bool:
+    return start1 < end2 and end1 > start2
+
+
+def _slot_covers_time(slot_start, slot_end, target_start, target_end) -> bool:
+    return slot_start <= target_start and slot_end >= target_end
+
+
+def check_staff_availability_conflict(
+    *,
+    staff,
+    weekday_or_date: str,
+    start_time,
+    end_time,
+    is_blackout: bool = False,
+    action: str = 'create',
+    current_instance=None,
+):
+    """
+    Validates whether changing or deleting a staff availability window conflicts
+    with any upcoming active 1-on-1 appointments or class sessions for the staff.
+
+    Option 1: Prevents staff from removing availability or setting blackouts
+    over times where clients have already booked appointments.
+
+    Raises rest_framework.exceptions.ValidationError if a conflict is detected.
+    """
+    if not staff:
+        return
+
+    from datetime import timedelta
+    from rest_framework.exceptions import ValidationError as DRFValidationError
+    from .models import Appointment, ClassSession, StaffAvailability
+
+    now = timezone.now()
+
+    # 1. If deleting an existing blackout, that only expands availability — always allowed.
+    if action == 'delete' and current_instance and current_instance.is_blackout:
+        return
+
+    # 2. If creating normal availability (non-blackout), that only adds availability — always allowed.
+    if action == 'create' and not is_blackout:
+        return
+
+    # Fetch active upcoming appointments and class sessions for this staff member
+    appointments = list(
+        Appointment.all_objects.filter(
+            provider=staff,
+            status='scheduled',
+            start_at__gte=now,
+        ).select_related('client', 'client__profile')
+    )
+
+    class_sessions = list(
+        ClassSession.all_objects.filter(
+            staff=staff,
+            status='scheduled',
+            start_at__gte=now,
+        ).select_related('template')
+    )
+
+    if not appointments and not class_sessions:
+        return
+
+    def _get_client_name(client):
+        if hasattr(client, 'profile') and client.profile and client.profile.first_name:
+            full = client.profile.first_name
+            if client.profile.last_name:
+                full += f" {client.profile.last_name}"
+            return full
+        return getattr(client, 'email', 'Client')
+
+    def _format_time(dt):
+        return dt.strftime('%A, %b %d at %I:%M %p')
+
+    # Case A: Creating a new blackout OR updating an existing slot to a blackout
+    if is_blackout:
+        for appt in appointments:
+            appt_end = appt.end_at.time() if appt.end_at else (appt.start_at + timedelta(hours=1)).time()
+            appt_start = appt.start_at.time()
+            if _matches_date_or_weekday(weekday_or_date, appt.start_at) and _times_overlap(appt_start, appt_end, start_time, end_time):
+                client_name = _get_client_name(appt.client)
+                time_str = _format_time(appt.start_at)
+                raise DRFValidationError({
+                    "detail": f"Cannot add blackout: You have an active appointment with {client_name} on {time_str}. Please cancel or reschedule the appointment first."
+                })
+
+        for session in class_sessions:
+            sess_end = session.end_at.time() if session.end_at else (session.start_at + timedelta(hours=1)).time()
+            sess_start = session.start_at.time()
+            if _matches_date_or_weekday(weekday_or_date, session.start_at) and _times_overlap(sess_start, sess_end, start_time, end_time):
+                class_name = session.template.name if session.template else "Class"
+                time_str = _format_time(session.start_at)
+                raise DRFValidationError({
+                    "detail": f"Cannot add blackout: You are scheduled to lead '{class_name}' on {time_str}. Please request a substitute or cancel the class session first."
+                })
+        return
+
+    # Case B: Deleting an existing availability slot (which was non-blackout)
+    if action == 'delete' and current_instance:
+        other_slots = list(
+            StaffAvailability.objects.filter(
+                staff=staff,
+                is_blackout=False,
+            ).exclude(id=current_instance.id)
+        )
+
+        for appt in appointments:
+            appt_end = appt.end_at.time() if appt.end_at else (appt.start_at + timedelta(hours=1)).time()
+            appt_start = appt.start_at.time()
+            # Did this slot cover the appointment?
+            if _matches_date_or_weekday(current_instance.weekday_or_date, appt.start_at) and _times_overlap(appt_start, appt_end, current_instance.start_time, current_instance.end_time):
+                # Is it covered by any other remaining availability slot?
+                covered = any(
+                    _matches_date_or_weekday(s.weekday_or_date, appt.start_at) and _slot_covers_time(s.start_time, s.end_time, appt_start, appt_end)
+                    for s in other_slots
+                )
+                if not covered:
+                    client_name = _get_client_name(appt.client)
+                    time_str = _format_time(appt.start_at)
+                    raise DRFValidationError({
+                        "detail": f"Cannot delete availability: You have an active appointment with {client_name} on {time_str}. Please cancel or reschedule the appointment first."
+                    })
+
+        for session in class_sessions:
+            sess_end = session.end_at.time() if session.end_at else (session.start_at + timedelta(hours=1)).time()
+            sess_start = session.start_at.time()
+            if _matches_date_or_weekday(current_instance.weekday_or_date, session.start_at) and _times_overlap(sess_start, sess_end, current_instance.start_time, current_instance.end_time):
+                covered = any(
+                    _matches_date_or_weekday(s.weekday_or_date, session.start_at) and _slot_covers_time(s.start_time, s.end_time, sess_start, sess_end)
+                    for s in other_slots
+                )
+                if not covered:
+                    class_name = session.template.name if session.template else "Class"
+                    time_str = _format_time(session.start_at)
+                    raise DRFValidationError({
+                        "detail": f"Cannot delete availability: You are scheduled to lead '{class_name}' on {time_str}. Please request a substitute or cancel the class session first."
+                    })
+        return
+
+    # Case C: Updating an existing availability slot (modifying times, weekday, etc.)
+    if action == 'update' and current_instance:
+        other_slots = list(
+            StaffAvailability.objects.filter(
+                staff=staff,
+                is_blackout=False,
+            ).exclude(id=current_instance.id)
+        )
+
+        for appt in appointments:
+            appt_end = appt.end_at.time() if appt.end_at else (appt.start_at + timedelta(hours=1)).time()
+            appt_start = appt.start_at.time()
+            # Was it covered or overlapped by the old slot?
+            if _matches_date_or_weekday(current_instance.weekday_or_date, appt.start_at) and _times_overlap(appt_start, appt_end, current_instance.start_time, current_instance.end_time):
+                # Is it covered by the new updated slot?
+                covered_by_new = (
+                    not is_blackout and
+                    _matches_date_or_weekday(weekday_or_date, appt.start_at) and
+                    _slot_covers_time(start_time, end_time, appt_start, appt_end)
+                )
+                # Or covered by any other existing slot?
+                covered_by_other = any(
+                    _matches_date_or_weekday(s.weekday_or_date, appt.start_at) and _slot_covers_time(s.start_time, s.end_time, appt_start, appt_end)
+                    for s in other_slots
+                )
+                if not covered_by_new and not covered_by_other:
+                    client_name = _get_client_name(appt.client)
+                    time_str = _format_time(appt.start_at)
+                    raise DRFValidationError({
+                        "detail": f"Cannot update availability: You have an active appointment with {client_name} on {time_str}. Please cancel or reschedule the appointment first."
+                    })
+
+        for session in class_sessions:
+            sess_end = session.end_at.time() if session.end_at else (session.start_at + timedelta(hours=1)).time()
+            sess_start = session.start_at.time()
+            if _matches_date_or_weekday(current_instance.weekday_or_date, session.start_at) and _times_overlap(sess_start, sess_end, current_instance.start_time, current_instance.end_time):
+                covered_by_new = (
+                    not is_blackout and
+                    _matches_date_or_weekday(weekday_or_date, session.start_at) and
+                    _slot_covers_time(start_time, end_time, sess_start, sess_end)
+                )
+                covered_by_other = any(
+                    _matches_date_or_weekday(s.weekday_or_date, session.start_at) and _slot_covers_time(s.start_time, s.end_time, sess_start, sess_end)
+                    for s in other_slots
+                )
+                if not covered_by_new and not covered_by_other:
+                    class_name = session.template.name if session.template else "Class"
+                    time_str = _format_time(session.start_at)
+                    raise DRFValidationError({
+                        "detail": f"Cannot update availability: You are scheduled to lead '{class_name}' on {time_str}. Please request a substitute or cancel the class session first."
+                    })
+        return
+
