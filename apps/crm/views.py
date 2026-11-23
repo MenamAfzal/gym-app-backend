@@ -42,9 +42,15 @@ class CRMBulkPackageSyncView(APIView):
         if not tenant:
             return Response({"detail": "Tenant context required"}, status=status.HTTP_400_BAD_REQUEST)
 
-        success, result = CRMIntegrationService.sync_all_packages_to_crm(tenant)
-        status_code = status.HTTP_200_OK if success else status.HTTP_502_BAD_GATEWAY
-        return Response(result, status=status_code)
+        try:
+            success, result = CRMIntegrationService.sync_all_packages_to_crm(tenant)
+            status_code = status.HTTP_200_OK if success else status.HTTP_502_BAD_GATEWAY
+            return Response(result, status=status_code)
+        except Exception as exc:
+            return Response(
+                {"error": str(exc), "detail": "An error occurred while communicating with CRM service."},
+                status=status.HTTP_502_BAD_GATEWAY
+            )
 
 
 class CRMOutboxListView(ListAPIView):

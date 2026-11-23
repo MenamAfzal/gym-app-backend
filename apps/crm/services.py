@@ -167,11 +167,15 @@ class CRMIntegrationService:
             return False, {"detail": "CRM not configured for this tenant"}
 
         payload = cls.serialize_package_type(package_type)
-        status_code, resp = client.sync_package(payload)
-        success = status_code in (200, 201)
-        if not success:
-            logger.warning("CRM package sync failed for package %s: %s (status %s)", package_type.id, resp, status_code)
-        return success, resp
+        try:
+            status_code, resp = client.sync_package(payload)
+            success = status_code in (200, 201)
+            if not success:
+                logger.warning("CRM package sync failed for package %s: %s (status %s)", package_type.id, resp, status_code)
+            return success, resp
+        except Exception as exc:
+            logger.error("CRM package sync failed for package %s: %s", package_type.id, exc)
+            return False, {"error": str(exc), "detail": "Failed to connect to external CRM service."}
 
     @classmethod
     def sync_all_packages_to_crm(cls, tenant: Tenant) -> tuple[bool, dict[str, Any]]:
@@ -188,11 +192,15 @@ class CRMIntegrationService:
             return True, {"status": "success", "total": 0, "created": 0, "updated": 0, "packages": []}
 
         payloads = [cls.serialize_package_type(p) for p in packages]
-        status_code, resp = client.sync_bulk_packages(payloads)
-        success = status_code == 200
-        if not success:
-            logger.warning("CRM bulk package sync failed for tenant %s: %s (status %s)", tenant.id, resp, status_code)
-        return success, resp
+        try:
+            status_code, resp = client.sync_bulk_packages(payloads)
+            success = status_code == 200
+            if not success:
+                logger.warning("CRM bulk package sync failed for tenant %s: %s (status %s)", tenant.id, resp, status_code)
+            return success, resp
+        except Exception as exc:
+            logger.error("CRM bulk package sync failed for tenant %s: %s", tenant.id, exc)
+            return False, {"error": str(exc), "detail": "Failed to connect to external CRM service."}
 
     @classmethod
     def dispatch_event(
