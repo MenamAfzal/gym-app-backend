@@ -79,6 +79,7 @@ urlpatterns = [
     path('api/v1/rewards/', include('apps.rewards.urls')),
     path('api/v1/retention/', include('apps.retention.urls')),
     path('api/v1/crm/', include('apps.crm.urls')),
+    path('api/v1/platform/', include('apps.ghl.urls')),
 
     # Root fallback aliases for Postman collections where BASE_URL has no api/v1 suffix
     path('food/', include('apps.food_logger.urls')),

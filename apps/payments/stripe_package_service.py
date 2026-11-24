@@ -279,6 +279,12 @@ class StripePackageService:
             except Exception as crm_exc:
                 logger.warning("CRM checkout session event dispatch failed for package %s: %s", package.id, crm_exc)
 
+            try:
+                from apps.ghl.services import GHLIntegrationService
+                GHLIntegrationService.dispatch_purchase_event(package=package, payment=payment)
+            except Exception as ghl_exc:
+                logger.warning("GHL checkout session event dispatch failed for package %s: %s", package.id, ghl_exc)
+
     @staticmethod
     def handle_invoice_payment_succeeded(invoice) -> None:
         """

@@ -745,6 +745,12 @@ class CheckoutIntegrationService:
         except Exception as crm_exc:
             logger.warning("CRM checkout event dispatch failed for session %s: %s", session.id, crm_exc)
 
+        try:
+            from apps.ghl.services import GHLIntegrationService
+            GHLIntegrationService.dispatch_purchase_event(session=session, package=package, payment=payment)
+        except Exception as ghl_exc:
+            logger.warning("GHL checkout event dispatch failed for session %s: %s", session.id, ghl_exc)
+
         return {'status': 'fulfilled', 'package_id': str(package.id)}
 
     ZERO_DECIMAL_CURRENCIES = {

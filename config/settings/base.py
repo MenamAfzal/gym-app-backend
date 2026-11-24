@@ -42,6 +42,7 @@ LOCAL_APPS = [
     'apps.rewards',
     'apps.retention',
     'apps.crm',
+    'apps.ghl',
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
@@ -50,6 +51,13 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 STRIPE_SECRET_KEY = os.environ.get('STRIPE_SECRET_KEY', 'sk_test_mock')
 STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET', 'whsec_mock')
 STRIPE_PUBLIC_KEY = os.environ.get('STRIPE_PUBLIC_KEY', 'pk_test_mock')
+
+# GoHighLevel (GHL) Configuration
+GHL_CLIENT_ID = os.environ.get('GHL_CLIENT_ID', '')
+GHL_CLIENT_SECRET = os.environ.get('GHL_CLIENT_SECRET', '')
+GHL_REDIRECT_URI = os.environ.get('GHL_REDIRECT_URI', '')
+GHL_API_BASE_URL = os.environ.get('GHL_API_BASE_URL', 'https://services.leadconnectorhq.com')
+GHL_AUTH_BASE_URL = os.environ.get('GHL_AUTH_BASE_URL', 'https://marketplace.gohighlevel.com/oauth/chooselocation')
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
