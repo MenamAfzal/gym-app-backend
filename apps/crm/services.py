@@ -151,17 +151,36 @@ class CRMIntegrationService:
     @classmethod
     def sync_branding_to_crm(cls, tenant: Tenant) -> tuple[bool, dict[str, Any]]:
         """
-        Synchronizes tenant branding colors and logo to CRM via POST /api/v1/external/branding/.
+        Synchronizes tenant branding colors and logo (along with active packages and their featured info)
+        to the CRM via the existing POST /api/v1/external/packages/sync/ endpoint so that branding,
+        logo_url, and featured_info are persisted in the CRM without requiring new CRM endpoints.
         """
         client = cls.get_client_for_tenant(tenant)
         if not client:
             return False, {"detail": "CRM not configured for this tenant"}
 
-        payload = cls.serialize_tenant_branding(tenant)
+        from apps.scheduling.models import PackageType
+        packages = list(
+            PackageType.all_objects.filter(tenant=tenant, is_active=True)
+            .order_by('-is_featured', 'price')
+        )
+        payloads = [cls.serialize_package_type(p) for p in packages]
+        branding_payload = cls.serialize_tenant_branding(tenant)
+
         try:
-            status_code, resp = client.sync_branding(payload)
+            status_code, resp = client.sync_bulk_packages(payloads, branding=branding_payload)
             success = status_code in (200, 201, 202)
             if not success:
+                raw_html = str(resp.get("raw", "")) if isinstance(resp, dict) else ""
+                if status_code == 404 and "_next/static" in raw_html:
+                    err_detail = (
+                        f"Configured crm_base_url ({client.base_url}) is pointing to the Next.js Frontend "
+                        "instead of the CRM Django Backend API server (received Next.js 404 page). "
+                        "Please update crm_base_url in PUT /api/v1/crm/config/ to the CRM Backend API URL "
+                        "(e.g. http://localhost:8001)."
+                    )
+                    logger.warning("CRM branding sync failed for tenant %s: %s", tenant.id, err_detail)
+                    return False, {"detail": err_detail, "status_code": 404}
                 logger.warning("CRM branding sync failed for tenant %s: %s (status %s)", tenant.id, resp, status_code)
             return success, resp
         except Exception as exc:

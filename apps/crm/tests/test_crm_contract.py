@@ -558,16 +558,16 @@ class CRMContractTests(TestCase):
         self.assertEqual(expired_pkg.status, "expired")
         self.assertTrue(mock_disp.called)
 
-    @patch("apps.crm.client.CRMClient.sync_branding")
+    @patch("apps.crm.client.CRMClient.sync_bulk_packages")
     @patch("apps.crm.tasks.deliver_crm_event_task.delay")
-    def test_tenant_branding_colors_and_logo_sync_and_embedding(self, mock_delay, mock_sync_branding):
+    def test_tenant_branding_colors_and_logo_sync_and_embedding(self, mock_delay, mock_sync_bulk):
         """
         Verify tenant branding colors and logo are:
         1. Extracted accurately by serialize_tenant_branding (from Tenant.branding, Tenant.logo, and TenantCheckoutConfig).
         2. Embedded in package sync payloads and outgoing CRM event envelopes.
-        3. Synced directly to POST /api/v1/external/branding/ on Tenant save and via sync_branding_to_crm.
+        3. Synced via POST /api/v1/external/packages/sync/ on Tenant save and via sync_branding_to_crm.
         """
-        mock_sync_branding.return_value = (200, {"status": "success"})
+        mock_sync_bulk.return_value = (200, {"status": "success"})
 
         self.tenant.branding = {
             "primary_color": "#2563EB",
@@ -579,8 +579,8 @@ class CRMContractTests(TestCase):
         }
         self.tenant.save()
 
-        # Saving Tenant with active CRM config should auto-trigger sync_branding
-        self.assertTrue(mock_sync_branding.called)
+        # Saving Tenant with active CRM config should auto-trigger sync_branding_to_crm -> sync_bulk_packages
+        self.assertTrue(mock_sync_bulk.called)
 
         branding_payload = CRMIntegrationService.serialize_tenant_branding(self.tenant)
         self.assertEqual(branding_payload["primary_color"], "#2563EB")
