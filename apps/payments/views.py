@@ -975,8 +975,9 @@ def stripe_checkout_webhook(request):
 
         # Trigger referral reward processing/update if gym was referred by another gym
         try:
+            from apps.payments.stripe_package_service import StripePackageService
             inv = data_object if isinstance(data_object, dict) else (data_object.to_dict() if hasattr(data_object, 'to_dict') else {})
-            stripe_sub_id = inv.get('subscription')
+            stripe_sub_id = StripePackageService.extract_subscription_id_from_invoice(inv)
             if stripe_sub_id:
                 from apps.payments.models import TenantBillingSubscription
                 from apps.core.tenants.services import TenantAdministrationService
@@ -1001,9 +1002,10 @@ def stripe_checkout_webhook(request):
 
         # Trigger affiliate renewal points if gym was referred by an affiliate partner
         try:
+            from apps.payments.stripe_package_service import StripePackageService
             inv = data_object if isinstance(data_object, dict) else (data_object.to_dict() if hasattr(data_object, 'to_dict') else {})
             billing_reason = inv.get('billing_reason')
-            stripe_sub_id = inv.get('subscription')
+            stripe_sub_id = StripePackageService.extract_subscription_id_from_invoice(inv)
             invoice_id = inv.get('id')
             if stripe_sub_id and billing_reason in ('subscription_cycle', 'subscription_update', 'manual'):
                 from apps.payments.models import TenantBillingSubscription
@@ -1208,7 +1210,7 @@ class TenantFinanceSummaryAPIView(APIView):
         subs = PlatformLedger.objects.filter(subs_filter)
         total_expenses = subs.aggregate(val=Sum('amount_gross'))['val'] or decimal.Decimal('0.00')
 
-        # 4. Package-wise breakdown
+        # 4. Package-wise breakdown (includes both initial purchases and renewal payments)
         from django.db.models import Count
         package_types = PackageType.objects.annotate(
             sales_count=Count('purchased_packages'),
@@ -1218,10 +1220,20 @@ class TenantFinanceSummaryAPIView(APIView):
         total_package_sales_count = 0
         
         for pt in package_types:
-            sales_count = pt.sales_count
+            completed_payments = Payment.objects.filter(
+                status='completed',
+                type='package_purchase',
+            ).filter(Q(package_type=pt) | Q(package__package_type=pt))
+            payment_tx_count = completed_payments.count()
+            payments_sum = completed_payments.aggregate(val=Sum('amount'))['val']
+
+            sales_count = max(pt.sales_count, payment_tx_count)
             total_package_sales_count += sales_count
             active_subscribers = pt.active_subscribers
-            revenue = decimal.Decimal(str(pt.price)) * sales_count
+            if payments_sum is not None and payments_sum > decimal.Decimal('0.00'):
+                revenue = decimal.Decimal(str(payments_sum)).quantize(decimal.Decimal('0.01'))
+            else:
+                revenue = (decimal.Decimal(str(pt.price)) * pt.sales_count).quantize(decimal.Decimal('0.01'))
             
             package_wise_revenue.append({
                 "package_id": str(pt.id),

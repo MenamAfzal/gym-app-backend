@@ -647,7 +647,7 @@ class CheckoutIntegrationService:
                 try:
                     stripe.api_key = settings.STRIPE_SECRET_KEY
                     sub_obj = stripe.Subscription.retrieve(stripe_subscription_id)
-                    current_period_end = sub_obj.get('current_period_end')
+                    current_period_end = StripePackageService.extract_current_period_end_from_subscription(sub_obj)
                     if current_period_end:
                         from datetime import datetime
                         expires_at = datetime.fromtimestamp(current_period_end, tz=timezone.utc)
@@ -674,12 +674,27 @@ class CheckoutIntegrationService:
                 tenant=session.tenant,
                 client=user,
                 package=package,
+                package_type=package_type,
                 amount=session.price_snapshot,
                 type='package_purchase',
                 status='completed',
                 provider_ref=provider_ref,
                 idempotency_key=provider_ref
             )
+
+            try:
+                from apps.payments.models import PlatformLedger
+                from apps.payments.services import LedgerService
+                if session.tenant and session.price_snapshot and Decimal(str(session.price_snapshot)) > Decimal('0.00'):
+                    if not PlatformLedger.all_objects.filter(transaction_id=provider_ref).exists():
+                        LedgerService.record_transaction(
+                            tenant=session.tenant,
+                            amount_gross=Decimal(str(session.price_snapshot)),
+                            transaction_id=provider_ref,
+                            description=f"Website Checkout Package Purchase: {package_type.name} ({user.email})",
+                        )
+            except Exception as ledger_exc:
+                logger.warning("Failed recording PlatformLedger for website checkout %s: %s", session.id, ledger_exc)
 
             session.status = ExternalCheckoutSession.StatusChoices.COMPLETED
             session.customer_user = user

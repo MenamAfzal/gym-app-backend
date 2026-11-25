@@ -14,6 +14,73 @@ ZERO_DECIMAL_CURRENCIES = {
 
 class StripePackageService:
     @staticmethod
+    def extract_subscription_id_from_invoice(invoice: dict) -> str:
+        """
+        Extracts the Stripe subscription ID from an Invoice payload across all Stripe API versions:
+        - Legacy / 2024: invoice['subscription']
+        - 2025+ (basil): invoice['parent']['subscription_details']['subscription']
+        - Fallback: invoice['lines']['data'][0]['subscription'] or
+                    invoice['lines']['data'][0]['parent']['subscription_item_details']['subscription']
+        """
+        if not isinstance(invoice, dict):
+            invoice = invoice.to_dict() if hasattr(invoice, 'to_dict') else dict(invoice)
+
+        sub_id = invoice.get('subscription')
+        if sub_id:
+            return sub_id.get('id') if isinstance(sub_id, dict) else str(sub_id)
+
+        parent = invoice.get('parent')
+        if isinstance(parent, dict):
+            sub_details = parent.get('subscription_details')
+            if isinstance(sub_details, dict):
+                sub_id = sub_details.get('subscription')
+                if sub_id:
+                    return sub_id.get('id') if isinstance(sub_id, dict) else str(sub_id)
+
+        lines = invoice.get('lines', {})
+        lines_data = lines.get('data', []) if isinstance(lines, dict) else []
+        for line in lines_data:
+            if not isinstance(line, dict):
+                continue
+            line_sub = line.get('subscription')
+            if line_sub:
+                return line_sub.get('id') if isinstance(line_sub, dict) else str(line_sub)
+            line_parent = line.get('parent')
+            if isinstance(line_parent, dict):
+                item_details = line_parent.get('subscription_item_details')
+                if isinstance(item_details, dict):
+                    line_sub = item_details.get('subscription')
+                    if line_sub:
+                        return line_sub.get('id') if isinstance(line_sub, dict) else str(line_sub)
+
+        return None
+
+    @staticmethod
+    def extract_current_period_end_from_subscription(subscription: dict) -> int:
+        """
+        Extracts current_period_end unix timestamp from a Stripe Subscription object
+        across legacy and 2025+ Stripe API versions (where it lives on items.data[*].current_period_end).
+        """
+        if not isinstance(subscription, dict):
+            subscription = subscription.to_dict() if hasattr(subscription, 'to_dict') else dict(subscription)
+
+        ts = subscription.get('current_period_end')
+        if ts:
+            return int(ts)
+
+        items = subscription.get('items')
+        items_data = items.get('data', []) if isinstance(items, dict) else []
+        item_ends = [
+            int(item.get('current_period_end'))
+            for item in items_data
+            if isinstance(item, dict) and item.get('current_period_end')
+        ]
+        if item_ends:
+            return max(item_ends)
+
+        return None
+
+    @staticmethod
     def sync_package_to_stripe(package_type: PackageType, currency: str = None, archive_existing: bool = False) -> str:
         stripe.api_key = settings.STRIPE_SECRET_KEY
         tenant = package_type.tenant
@@ -251,10 +318,20 @@ class StripePackageService:
 
             # Create Payment record
             amount_total = session.get('amount_total', 0)
+            currency_code = (session.get('currency') or getattr(package_type.tenant, 'currency', 'usd') or 'usd').lower()
+            from decimal import Decimal
+            if amount_total:
+                if currency_code in ZERO_DECIMAL_CURRENCIES:
+                    payment_amount = Decimal(str(round(float(amount_total), 2)))
+                else:
+                    payment_amount = Decimal(str(round(float(amount_total) / 100.0, 2)))
+            else:
+                payment_amount = Decimal(str(package_type.price or '0.00'))
+
             payment = Payment.objects.create(
                 tenant_id=tenant_id,
                 client=client,
-                amount=amount_total / 100.0,
+                amount=payment_amount,
                 type='package_purchase',
                 package=package,
                 package_type=package_type,
@@ -263,6 +340,20 @@ class StripePackageService:
                 idempotency_key=session.get('id')
             )
             logger.info(f"Created Package {package.id} and Payment for checkout session {session.get('id')}")
+
+            try:
+                from apps.payments.models import PlatformLedger
+                from apps.payments.services import LedgerService
+                tx_id = session.get('id') or f"pkg_init_{package.id}"
+                if package.tenant and payment_amount > Decimal('0.00') and not PlatformLedger.all_objects.filter(transaction_id=tx_id).exists():
+                    LedgerService.record_transaction(
+                        tenant=package.tenant,
+                        amount_gross=payment_amount,
+                        transaction_id=tx_id,
+                        description=f"Package Purchase: {package_type.name} ({client.email})",
+                    )
+            except Exception as ledger_exc:
+                logger.warning("Failed recording PlatformLedger for checkout session %s: %s", session.get('id'), ledger_exc)
 
             try:
                 from apps.retention.tasks import recalculate_single_client_metrics, attribute_conversion_task
@@ -294,7 +385,7 @@ class StripePackageService:
         if not isinstance(invoice, dict):
             invoice = invoice.to_dict() if hasattr(invoice, 'to_dict') else dict(invoice)
 
-        subscription_id = invoice.get('subscription')
+        subscription_id = StripePackageService.extract_subscription_id_from_invoice(invoice)
         if not subscription_id:
             return
 
@@ -354,7 +445,14 @@ class StripePackageService:
             logger.info(f"Renewed Package {package.id} for client {package.client_id}: +{pkg_type.credit_count} credits, expires_at={new_expires_at}")
  
             amount_paid = invoice.get('amount_paid', 0)
-            payment_amount = Decimal(str(round(amount_paid / 100.0, 2))) if amount_paid else Decimal(str(pkg_type.price or 0.0))
+            currency_code = (invoice.get('currency') or getattr(package.tenant, 'currency', 'usd') or 'usd').lower()
+            if amount_paid:
+                if currency_code in ZERO_DECIMAL_CURRENCIES:
+                    payment_amount = Decimal(str(round(float(amount_paid), 2)))
+                else:
+                    payment_amount = Decimal(str(round(float(amount_paid) / 100.0, 2)))
+            else:
+                payment_amount = Decimal(str(pkg_type.price or 0.0))
             idempotency_key = invoice_id or f"pkg_renew_{package.id}_{int(now.timestamp())}"
 
             payment = Payment.objects.create(
@@ -369,6 +467,19 @@ class StripePackageService:
                 idempotency_key=idempotency_key
             )
             logger.info(f"Created renewal Payment {payment.id} for package {package.id}")
+
+            try:
+                from apps.payments.models import PlatformLedger
+                from apps.payments.services import LedgerService
+                if package.tenant and payment_amount > Decimal('0.00') and not PlatformLedger.all_objects.filter(transaction_id=idempotency_key).exists():
+                    LedgerService.record_transaction(
+                        tenant=package.tenant,
+                        amount_gross=payment_amount,
+                        transaction_id=idempotency_key,
+                        description=f"Package Renewal: {pkg_type.name} ({package.client.email})",
+                    )
+            except Exception as ledger_exc:
+                logger.warning("Failed recording PlatformLedger for renewal invoice %s: %s", idempotency_key, ledger_exc)
 
             try:
                 from apps.retention.tasks import recalculate_single_client_metrics, attribute_conversion_task
@@ -395,7 +506,7 @@ class StripePackageService:
         subscription_id = subscription.get('id')
         status = subscription.get('status')
         cancel_at_period_end = subscription.get('cancel_at_period_end', False)
-        current_period_end = subscription.get('current_period_end')
+        current_period_end = StripePackageService.extract_current_period_end_from_subscription(subscription)
 
         from apps.scheduling.models import Package, Payment
         from django.utils import timezone
@@ -466,7 +577,7 @@ class StripePackageService:
         if not isinstance(invoice, dict):
             invoice = invoice.to_dict() if hasattr(invoice, 'to_dict') else dict(invoice)
 
-        subscription_id = invoice.get('subscription')
+        subscription_id = StripePackageService.extract_subscription_id_from_invoice(invoice)
         amount_due = invoice.get('amount_due') or invoice.get('total') or 0
         currency = (invoice.get('currency') or 'USD').upper()
         reason = invoice.get('billing_reason') or 'Invoice payment failed'

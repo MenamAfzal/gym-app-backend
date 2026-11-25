@@ -397,6 +397,16 @@ class FeatureBillingService:
         stripe_sub_id = _get(subscription_obj, "id")
         raw_status = _get(subscription_obj, "status")
         current_period_end_ts = _get(subscription_obj, "current_period_end")
+        if not current_period_end_ts:
+            items = _get(subscription_obj, "items")
+            items_data = _get(items, "data", []) if items else []
+            item_ends = [
+                _get(item, "current_period_end")
+                for item in (items_data or [])
+                if _get(item, "current_period_end")
+            ]
+            if item_ends:
+                current_period_end_ts = max(item_ends)
 
         try:
             billing_sub = TenantBillingSubscription.all_objects.get(
