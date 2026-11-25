@@ -128,3 +128,44 @@ class PackageSubscriptionRenewalTestCase(TestCase):
         self.assertEqual(self.package.credits_remaining, 12)
         self.assertEqual(int(self.package.expires_at.timestamp()), future_period_end)
 
+    def test_custom_recurring_billing_period_serializer_and_stripe_sync(self):
+        """
+        Verifies creating a PackageType with billing_cycle='custom', custom_billing_interval='week'/'days'/'months'/'year',
+        and custom_billing_interval_count (e.g. Every 4 weeks, Every 45 days), and verifies Stripe Price.create receives
+        recurring={'interval': 'week', 'interval_count': 4}.
+        """
+        from unittest.mock import patch, MagicMock
+        from apps.scheduling.serializers import PackageTypeSerializer
+
+        mock_product = MagicMock()
+        mock_product.id = "prod_custom_4w"
+        mock_price = MagicMock()
+        mock_price.id = "price_custom_4w"
+
+        with patch("apps.payments.stripe_package_service.stripe.Product.create", return_value=mock_product) as prod_create, \
+             patch("apps.payments.stripe_package_service.stripe.Price.create", return_value=mock_price) as price_create:
+
+            serializer = PackageTypeSerializer(data={
+                "location": str(self.location.id),
+                "name": "4-Week Transformation Pack",
+                "credit_count": 16,
+                "price": "180.00",
+                "validity_days": 28,
+                "billing_cycle": "custom",
+                "custom_billing_interval": "weeks",  # tests plural alias normalization -> 'week'
+                "custom_billing_interval_count": 4,
+            })
+            self.assertTrue(serializer.is_valid(), serializer.errors)
+            pkg_type = serializer.save(tenant=self.tenant)
+
+            self.assertEqual(pkg_type.billing_cycle, "custom")
+            self.assertEqual(pkg_type.custom_billing_interval, "week")
+            self.assertEqual(pkg_type.custom_billing_interval_count, 4)
+            self.assertEqual(pkg_type.billing_period_display, "Every 4 weeks")
+            self.assertEqual(pkg_type.get_stripe_recurring_config(), ("week", 4))
+
+            price_create.assert_called_once()
+            _, kwargs = price_create.call_args
+            self.assertEqual(kwargs["recurring"], {"interval": "week", "interval_count": 4})
+
+

@@ -91,15 +91,21 @@ class StripePackageService:
         old_product_id = package_type.stripe_product_id
         old_price_id = package_type.stripe_price_id
 
-        interval_map = {
-            'weekly': 'week',
-            'monthly': 'month',
-            'yearly': 'year'
-        }
-        cycle_str = str(package_type.billing_cycle or 'monthly').strip().lower()
-        stripe_interval = interval_map.get(cycle_str, 'month')
+        if hasattr(package_type, 'get_stripe_recurring_config'):
+            stripe_interval, stripe_interval_count = package_type.get_stripe_recurring_config()
+            billing_label = getattr(package_type, 'billing_period_display', None) or f"{stripe_interval_count} {stripe_interval}(s)"
+        else:
+            interval_map = {
+                'weekly': 'week',
+                'monthly': 'month',
+                'yearly': 'year'
+            }
+            cycle_str = str(package_type.billing_cycle or 'monthly').strip().lower()
+            stripe_interval = interval_map.get(cycle_str, 'month')
+            stripe_interval_count = 1
+            billing_label = cycle_str.title()
 
-        desc = f"{package_type.credit_count} credits | Valid for {package_type.validity_days} days | Billing: {cycle_str.title()}"
+        desc = f"{package_type.credit_count} credits | Valid for {package_type.validity_days} days | Billing: {billing_label}"
 
         target_curr = (currency or (tenant.currency if tenant and hasattr(tenant, 'currency') and tenant.currency else None) or 'usd').strip().lower()
         price_val = package_type.price if package_type.price is not None else 0
@@ -164,11 +170,14 @@ class StripePackageService:
                 try:
                     existing_price = stripe.Price.retrieve(price_id)
                     existing_curr = (existing_price.currency or '').lower()
-                    existing_interval = existing_price.recurring.get('interval') if getattr(existing_price, 'recurring', None) else None
+                    existing_rec = getattr(existing_price, 'recurring', None)
+                    existing_interval = existing_rec.get('interval') if existing_rec else None
+                    existing_interval_count = int(existing_rec.get('interval_count') or 1) if existing_rec else 1
                     if (
                         existing_price.unit_amount != amount_cents
                         or not existing_price.active
                         or existing_interval != stripe_interval
+                        or existing_interval_count != stripe_interval_count
                         or existing_curr != target_curr
                     ):
                         try:
@@ -191,7 +200,10 @@ class StripePackageService:
                     }
                 }
                 if stripe_interval:
-                    price_payload["recurring"] = {"interval": stripe_interval}
+                    price_payload["recurring"] = {
+                        "interval": stripe_interval,
+                        "interval_count": stripe_interval_count,
+                    }
 
                 try:
                     new_price = stripe.Price.create(**price_payload)

@@ -73,6 +73,7 @@ class PublicPackageSerializer(serializers.ModelSerializer):
     location_name = serializers.CharField(source='location.name', read_only=True)
     location_address = serializers.CharField(source='location.address', read_only=True)
     currency = serializers.CharField(source='tenant.currency', read_only=True)
+    billing_period_display = serializers.CharField(read_only=True)
 
     class Meta:
         model = PackageType
@@ -83,6 +84,9 @@ class PublicPackageSerializer(serializers.ModelSerializer):
             'price',
             'currency',
             'billing_cycle',
+            'custom_billing_interval',
+            'custom_billing_interval_count',
+            'billing_period_display',
             'credit_count',
             'validity_days',
             'is_featured',

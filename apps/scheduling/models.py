@@ -301,11 +301,23 @@ class ClassSession(UUIDMixin, TimestampMixin, TenantMixin):
 class PackageType(UUIDMixin, TimestampMixin, TenantMixin):
     """
     Purchasable credit package (e.g. '10-class pack').
+    Supports standard recurring billing ('weekly', 'monthly', 'yearly')
+    as well as Stripe-style custom recurring periods ('custom' with
+    custom_billing_interval in ['day', 'week', 'month', 'year'] and
+    custom_billing_interval_count >= 1).
     """
     BILLING_CYCLE_CHOICES = [
         ('weekly', 'Weekly'),
         ('monthly', 'Monthly'),
         ('yearly', 'Yearly'),
+        ('custom', 'Custom'),
+    ]
+
+    CUSTOM_INTERVAL_CHOICES = [
+        ('day', 'Days'),
+        ('week', 'Weeks'),
+        ('month', 'Months'),
+        ('year', 'Years'),
     ]
 
     location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='package_types')
@@ -340,8 +352,63 @@ class PackageType(UUIDMixin, TimestampMixin, TenantMixin):
         max_length=20,
         choices=BILLING_CYCLE_CHOICES,
         default='monthly',
-        help_text="Billing frequency for the package subscription"
+        help_text="Billing frequency for the package subscription ('weekly', 'monthly', 'yearly', 'custom')"
     )
+    custom_billing_interval = models.CharField(
+        max_length=10,
+        choices=CUSTOM_INTERVAL_CHOICES,
+        blank=True,
+        null=True,
+        default=None,
+        help_text="When billing_cycle='custom', the recurring unit ('day', 'week', 'month', 'year')"
+    )
+    custom_billing_interval_count = models.PositiveIntegerField(
+        blank=True,
+        null=True,
+        default=1,
+        help_text="When billing_cycle='custom', the number of intervals between billings (e.g. 2 weeks, 4 weeks, 3 months, 45 days)"
+    )
+
+    def get_stripe_recurring_config(self) -> tuple[str, int]:
+        """
+        Returns (stripe_interval, stripe_interval_count) for Stripe Price creation:
+        - 'weekly'  -> ('week', 1)
+        - 'monthly' -> ('month', 1)
+        - 'yearly'  -> ('year', 1)
+        - 'custom'  -> (custom_billing_interval, custom_billing_interval_count)
+        """
+        cycle = (self.billing_cycle or 'monthly').strip().lower()
+        unit_map = {
+            'day': 'day', 'days': 'day', 'daily': 'day',
+            'week': 'week', 'weeks': 'week', 'weekly': 'week',
+            'month': 'month', 'months': 'month', 'monthly': 'month',
+            'year': 'year', 'years': 'year', 'yearly': 'year',
+        }
+        if cycle == 'custom':
+            raw_unit = (self.custom_billing_interval or 'month').strip().lower()
+            interval = unit_map.get(raw_unit, 'month')
+            count = max(1, int(self.custom_billing_interval_count or 1))
+            return interval, count
+
+        standard_map = {
+            'weekly': ('week', 1),
+            'monthly': ('month', 1),
+            'yearly': ('year', 1),
+        }
+        return standard_map.get(cycle, ('month', 1))
+
+    @property
+    def billing_period_display(self) -> str:
+        """
+        Human-readable label for the recurring billing period (e.g. 'Every 4 weeks', 'Every 3 months', 'Monthly').
+        """
+        cycle = (self.billing_cycle or 'monthly').strip().lower()
+        if cycle == 'custom':
+            interval, count = self.get_stripe_recurring_config()
+            if count == 1:
+                return f"Every {interval}"
+            return f"Every {count} {interval}s"
+        return cycle.title()
 
     def __str__(self):
         return f"{self.name} - {self.credit_count} credits"

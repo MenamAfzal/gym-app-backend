@@ -450,16 +450,83 @@ class PackageTypeSerializer(serializers.ModelSerializer):
     location_name = serializers.CharField(source='location.name', read_only=True)
     currency = serializers.CharField(source='tenant.currency', read_only=True)
     subscriber_count = serializers.SerializerMethodField()
+    billing_period_display = serializers.CharField(read_only=True)
 
     class Meta:
         model = PackageType
         fields = [
             'id', 'location', 'location_name', 'name', 'credit_count', 
-            'price', 'currency', 'validity_days', 'billing_cycle', 'is_active',
+            'price', 'currency', 'validity_days', 'billing_cycle',
+            'custom_billing_interval', 'custom_billing_interval_count',
+            'billing_period_display', 'is_active',
             'is_featured', 'feature_badge',
             'stripe_product_id', 'stripe_price_id', 'subscriber_count', 'created_at'
         ]
-        read_only_fields = ['id', 'location_name', 'stripe_product_id', 'stripe_price_id', 'subscriber_count', 'created_at']
+        read_only_fields = [
+            'id', 'location_name', 'billing_period_display',
+            'stripe_product_id', 'stripe_price_id', 'subscriber_count', 'created_at'
+        ]
+
+    def to_internal_value(self, data):
+        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+        # Accept friendly aliases for custom_billing_interval ('days', 'weeks', 'months', 'years', or 'interval' / 'billing_interval')
+        for alias in ('interval', 'billing_interval', 'custom_interval'):
+            if alias in data_copy and not data_copy.get('custom_billing_interval'):
+                data_copy['custom_billing_interval'] = data_copy.get(alias)
+                break
+        for alias in ('interval_count', 'billing_interval_count', 'custom_interval_count'):
+            if alias in data_copy and not data_copy.get('custom_billing_interval_count'):
+                data_copy['custom_billing_interval_count'] = data_copy.get(alias)
+                break
+
+        raw_interval = data_copy.get('custom_billing_interval')
+        if isinstance(raw_interval, str):
+            norm_map = {
+                'day': 'day', 'days': 'day', 'daily': 'day',
+                'week': 'week', 'weeks': 'week', 'weekly': 'week',
+                'month': 'month', 'months': 'month', 'monthly': 'month',
+                'year': 'year', 'years': 'year', 'yearly': 'year',
+            }
+            mapped = norm_map.get(raw_interval.strip().lower())
+            if mapped:
+                data_copy['custom_billing_interval'] = mapped
+
+        return super().to_internal_value(data_copy)
+
+    def validate(self, attrs):
+        billing_cycle = attrs.get('billing_cycle', getattr(self.instance, 'billing_cycle', 'monthly'))
+        custom_interval = attrs.get('custom_billing_interval', getattr(self.instance, 'custom_billing_interval', None))
+        custom_count = attrs.get('custom_billing_interval_count', getattr(self.instance, 'custom_billing_interval_count', 1))
+
+        if billing_cycle == 'custom':
+            if not custom_interval:
+                raise serializers.ValidationError({
+                    "custom_billing_interval": "This field is required when billing_cycle is 'custom' (choose 'day', 'week', 'month', or 'year')."
+                })
+            if not custom_count or int(custom_count) < 1:
+                raise serializers.ValidationError({
+                    "custom_billing_interval_count": "Must be a positive integer (>= 1) when billing_cycle is 'custom'."
+                })
+            count_int = int(custom_count)
+            # Enforce Stripe's maximum 3-year billing interval limit
+            max_limits = {'day': 1095, 'week': 156, 'month': 36, 'year': 3}
+            max_allowed = max_limits.get(custom_interval, 36)
+            if count_int > max_allowed:
+                raise serializers.ValidationError({
+                    "custom_billing_interval_count": f"Stripe allows a maximum custom billing interval of 3 years ({max_allowed} {custom_interval}s)."
+                })
+            attrs['custom_billing_interval_count'] = count_int
+            # Auto-calculate validity_days if not explicitly provided
+            if 'validity_days' not in attrs and not self.instance:
+                approx_days = {'day': 1, 'week': 7, 'month': 30, 'year': 365}
+                attrs['validity_days'] = count_int * approx_days.get(custom_interval, 30)
+        else:
+            # Clear custom interval fields when a standard cycle is selected
+            if 'billing_cycle' in attrs and billing_cycle != 'custom':
+                attrs['custom_billing_interval'] = None
+                attrs['custom_billing_interval_count'] = 1
+
+        return attrs
 
     def get_subscriber_count(self, obj):
         return obj.purchased_packages.filter(status='active').count()
