@@ -212,8 +212,15 @@ class CRMIntegrationService:
             f"{package_type.credit_count} Session Credits",
             f"{package_type.validity_days} Days Validity",
         ]
-        if getattr(package_type, 'feature_badge', None):
-            features.append(str(package_type.feature_badge))
+        is_featured = bool(getattr(package_type, 'is_featured', False))
+        feature_badge = str(getattr(package_type, 'feature_badge', '') or '').strip()
+        if feature_badge:
+            features.append(feature_badge)
+
+        featured_info = {
+            "is_featured": is_featured,
+            "feature_badge": feature_badge,
+        }
 
         branding_info = cls.serialize_tenant_branding(tenant) if tenant else {}
 
@@ -227,13 +234,18 @@ class CRMIntegrationService:
             "status": "active" if getattr(package_type, 'is_active', True) else "archived",
             "external_url": external_url,
             "features": features,
+            "is_featured": is_featured,
+            "feature_badge": feature_badge,
+            "featured_info": featured_info,
             "logo_url": branding_info.get("logo_url"),
             "branding": branding_info,
             "metadata": {
                 "credit_count": package_type.credit_count,
                 "validity_days": package_type.validity_days,
                 "billing_cycle": cycle,
-                "is_featured": getattr(package_type, 'is_featured', False),
+                "is_featured": is_featured,
+                "feature_badge": feature_badge,
+                "featured_info": featured_info,
                 "logo_url": branding_info.get("logo_url"),
                 "branding": branding_info,
             },
@@ -323,7 +335,10 @@ class CRMIntegrationService:
             return False, {"detail": "CRM not configured for this tenant"}
 
         from apps.scheduling.models import PackageType
-        packages = list(PackageType.all_objects.filter(tenant=tenant, is_active=True))
+        packages = list(
+            PackageType.all_objects.filter(tenant=tenant, is_active=True)
+            .order_by('-is_featured', 'price')
+        )
         if not packages:
             return True, {"status": "success", "total": 0, "created": 0, "updated": 0, "packages": []}
 

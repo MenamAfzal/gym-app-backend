@@ -589,10 +589,24 @@ class CRMContractTests(TestCase):
         self.assertEqual(branding_payload["logo_url"], "https://cdn.fitverx.com/logos/alpha-gym.png")
         self.assertEqual(branding_payload["colors"]["primary_color"], "#2563EB")
 
-        # Verify package serialization includes branding & logo_url
+        # Verify package serialization includes branding, logo_url, and featured info
+        self.package_type.is_featured = True
+        self.package_type.feature_badge = "Most Popular"
         pkg_payload = CRMIntegrationService.serialize_package_type(self.package_type)
         self.assertEqual(pkg_payload["logo_url"], "https://cdn.fitverx.com/logos/alpha-gym.png")
         self.assertEqual(pkg_payload["branding"]["primary_color"], "#2563EB")
+        self.assertTrue(pkg_payload["is_featured"])
+        self.assertEqual(pkg_payload["feature_badge"], "Most Popular")
+        self.assertEqual(
+            pkg_payload["featured_info"],
+            {"is_featured": True, "feature_badge": "Most Popular"},
+        )
+        self.assertTrue(pkg_payload["metadata"]["is_featured"])
+        self.assertEqual(pkg_payload["metadata"]["feature_badge"], "Most Popular")
+        self.assertEqual(
+            pkg_payload["metadata"]["featured_info"],
+            {"is_featured": True, "feature_badge": "Most Popular"},
+        )
         self.assertEqual(pkg_payload["metadata"]["logo_url"], "https://cdn.fitverx.com/logos/alpha-gym.png")
         self.assertEqual(pkg_payload["metadata"]["branding"]["primary_color"], "#2563EB")
 
