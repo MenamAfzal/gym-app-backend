@@ -730,9 +730,14 @@ class CheckoutIntegrationService:
         send_meta_capi_event_task.delay(str(session.id), 'Purchase')
 
         try:
-            from apps.retention.tasks import attribute_conversion_task, recalculate_single_client_metrics
+            from apps.retention.tasks import (
+                attribute_conversion_task,
+                recalculate_single_client_metrics,
+                trigger_day_zero_onboarding_email_task,
+            )
             recalculate_single_client_metrics.delay(str(session.tenant_id), str(user.id))
             attribute_conversion_task.delay(str(session.tenant_id), str(user.id), 'package_purchase', str(payment.id))
+            trigger_day_zero_onboarding_email_task.delay(str(session.tenant_id), str(user.id))
         except Exception:
             pass
 

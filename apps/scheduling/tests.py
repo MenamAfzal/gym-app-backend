@@ -1077,7 +1077,8 @@ class GymSchedulingSystemTestCase(TestCase):
             checked_in_at=None
         )
 
-        run_no_show_marking_job()
+        with self.captureOnCommitCallbacks(execute=True):
+            run_no_show_marking_job()
 
         session.refresh_from_db()
         booking.refresh_from_db()
@@ -2146,6 +2147,139 @@ class ScheduleChangeNotificationTests(TestCase):
             title__icontains="Appointment Cancelled"
         ).first()
         self.assertIsNotNone(notif)
+
+    def test_first_session_completed_auto_email_triggers_only_once(self):
+        from apps.notifications.models import NotificationInbox, DeliveryPolicy
+        from django.core import mail
+
+        # Give trainer1 a profile name so we can verify trainer_name in the email
+        profile, _ = UserProfile.objects.get_or_create(user=self.trainer1)
+        profile.first_name = "Coach"
+        profile.last_name = "Carter"
+        profile.save()
+
+        mail.outbox.clear()
+
+        # 1. Check in client1 for their very first session at this gym
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.post(
+                f'/api/v1/scheduling/bookings/{self.booking.id}/check-in/',
+                HTTP_X_TENANT_ID=str(self.tenant.id)
+            )
+        self.assertEqual(res.status_code, 200)
+
+        notif = NotificationInbox.objects.filter(
+            recipient=self.client1,
+            idempotency_key=f"first_session_completed:{self.tenant.id}:{self.client1.id}"
+        ).first()
+        self.assertIsNotNone(notif)
+        self.assertEqual(notif.delivery_policy, DeliveryPolicy.PUSH_AND_EMAIL)
+        self.assertIn("Coach Carter", notif.title)
+        self.assertIn(self.tenant.name, notif.title)
+        self.assertIn("Coach Carter", notif.body)
+        self.assertIn(self.tenant.name, notif.body)
+
+        # Verify actual email was dispatched to outbox
+        matching_emails = [m for m in mail.outbox if self.client1.email in m.to and "Coach Carter" in m.subject]
+        self.assertEqual(len(matching_emails), 1)
+        self.assertIn("first session", matching_emails[0].body.lower())
+
+        # 2. Create and check in a SECOND session for the same client -> should NOT trigger first session email again
+        second_session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer1,
+            start_at=self.session_start + timedelta(days=1),
+            end_at=self.session_end + timedelta(days=1),
+            capacity=10,
+            status='scheduled'
+        )
+        second_booking = Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            session=second_session,
+            status='booked'
+        )
+        mail.outbox.clear()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            res2 = self.client.post(
+                f'/api/v1/scheduling/bookings/{second_booking.id}/check-in/',
+                HTTP_X_TENANT_ID=str(self.tenant.id)
+            )
+        self.assertEqual(res2.status_code, 200)
+
+        first_session_emails = [m for m in mail.outbox if "first session" in m.subject.lower()]
+        self.assertEqual(len(first_session_emails), 0)
+
+    def test_missed_session_auto_email_triggers_on_manual_and_periodic_no_show(self):
+        from apps.notifications.models import NotificationInbox, DeliveryPolicy
+        from django.core import mail
+
+        profile, _ = UserProfile.objects.get_or_create(user=self.trainer1)
+        profile.first_name = "Sarah"
+        profile.last_name = "Connor"
+        profile.save()
+
+        mail.outbox.clear()
+
+        # 1. Manual mark_no_show endpoint
+        with self.captureOnCommitCallbacks(execute=True):
+            res = self.client.post(
+                f'/api/v1/scheduling/bookings/{self.booking.id}/no-show/',
+                HTTP_X_TENANT_ID=str(self.tenant.id)
+            )
+        self.assertEqual(res.status_code, 200)
+
+        notif = NotificationInbox.objects.filter(
+            recipient=self.client1,
+            idempotency_key=f"session_missed:{self.tenant.id}:{self.client1.id}:{self.booking.id}"
+        ).first()
+        self.assertIsNotNone(notif)
+        self.assertEqual(notif.delivery_policy, DeliveryPolicy.PUSH_AND_EMAIL)
+        self.assertIn(self.tenant.name, notif.title)
+        self.assertIn("Sarah Connor", notif.body)
+        self.assertIn(self.tenant.name, notif.body)
+
+        missed_emails = [m for m in mail.outbox if self.client1.email in m.to and "missed you" in m.subject.lower()]
+        self.assertEqual(len(missed_emails), 1)
+
+        # 2. Periodic run_no_show_marking_job after a past session ends
+        past_start = timezone.now() - timedelta(hours=3)
+        past_end = timezone.now() - timedelta(hours=2)
+        past_session = ClassSession.objects.create(
+            tenant=self.tenant,
+            template=self.template,
+            room=self.room,
+            staff=self.trainer1,
+            start_at=past_start,
+            end_at=past_end,
+            capacity=10,
+            status='scheduled'
+        )
+        past_booking = Booking.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            session=past_session,
+            status='booked'
+        )
+        mail.outbox.clear()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            run_no_show_marking_job()
+
+        past_booking.refresh_from_db()
+        self.assertEqual(past_booking.status, 'no_show')
+
+        notif2 = NotificationInbox.objects.filter(
+            recipient=self.client1,
+            idempotency_key=f"session_missed:{self.tenant.id}:{self.client1.id}:{past_booking.id}"
+        ).first()
+        self.assertIsNotNone(notif2)
+        missed_emails_job = [m for m in mail.outbox if self.client1.email in m.to and "missed you" in m.subject.lower()]
+        self.assertEqual(len(missed_emails_job), 1)
+
 
 
 

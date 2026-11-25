@@ -303,6 +303,10 @@ class NotificationService:
             notification_type = template.notification_type
             delivery_policy = ChannelPolicyEngine.derive_policy(priority, template)
             is_mandatory    = ChannelPolicyEngine.is_mandatory(notification_type, template)
+            if event.event_type in ('first_session_completed', 'session_missed'):
+                from apps.notifications.models import DeliveryPolicy
+                delivery_policy = DeliveryPolicy.PUSH_AND_EMAIL
+                is_mandatory = True
         else:
             # No automation configured — use sensible system defaults
             title, body, priority, notification_type, delivery_policy, is_mandatory = \
@@ -490,6 +494,22 @@ class NotificationService:
                 NotificationType.SYSTEM,
                 DeliveryPolicy.PUSH_AND_EMAIL,
                 True,   # Mandatory — ignores user preference opt-out
+            ),
+            'first_session_completed': (
+                'How was your first session?',
+                'How was your experience with your trainer in your first session at our gym?',
+                NotificationPriority.HIGH,
+                NotificationType.CLASS,
+                DeliveryPolicy.PUSH_AND_EMAIL,
+                True,   # Always send email + push for first session feedback
+            ),
+            'session_missed': (
+                'We missed you at your session!',
+                'We noticed you missed your scheduled session today. We hope to see you back in the gym soon!',
+                NotificationPriority.HIGH,
+                NotificationType.CLASS,
+                DeliveryPolicy.PUSH_AND_EMAIL,
+                True,   # Always send email + push for missed session follow-up
             ),
         }
 

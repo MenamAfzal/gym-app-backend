@@ -118,6 +118,19 @@ class TenantProvisioningService:
                 logger.exception("Failed to assign free billing plan for tenant '%s': %s", tenant.name, e)
                 results['billing_plan'] = f'error: {e}'
 
+            # 7. Seed Default Day 0-70 Onboarding Email Series & Settings
+            try:
+                from apps.retention.automation_service import RetentionAutomationService
+                created_triggers = RetentionAutomationService.seed_default_onboarding_triggers(tenant)
+                if stdout:
+                    stdout.write(f"Seeded {len(created_triggers)} default onboarding email triggers for '{tenant.name}'.")
+                else:
+                    logger.info("Seeded %d default onboarding email triggers for '%s'.", len(created_triggers), tenant.name)
+                results['onboarding_triggers'] = 'success'
+            except Exception as e:
+                logger.exception("Failed to seed onboarding triggers for tenant '%s': %s", tenant.name, e)
+                results['onboarding_triggers'] = f'error: {e}'
+
         completed_msg = f"Successfully completed provisioning for tenant: {tenant.name} ({tenant.subdomain})"
         if stdout:
             stdout.write(completed_msg)

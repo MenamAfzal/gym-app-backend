@@ -500,3 +500,114 @@ class Phase3RetentionAutomationTestCase(TestCase):
 
         total = evaluate_all_retention_triggers()
         self.assertGreaterEqual(total, 0)
+
+    def test_onboarding_milestone_email_series_day_0_to_70(self):
+        """
+        Verify all 8 Studio 35-style onboarding milestone email triggers (Day 0, 2, 7, 14, 21, 28, 42, 70)
+        are seeded, substitute dynamic guide links & membership variables, dispatch via email only once
+        per milestone, and respect TenantOnboardingSettings.
+        """
+        from django.core import mail
+        from apps.retention.models import TenantOnboardingSettings
+        from apps.retention.views import TenantOnboardingSettingsView, RetentionCampaignTriggerViewSet
+        from rest_framework.test import force_authenticate
+
+        # 1. Seed default onboarding triggers (or verify already seeded by provisioner)
+        RetentionAutomationService.seed_default_onboarding_triggers(self.tenant)
+        onboarding_triggers = RetentionCampaignTrigger.objects.filter(
+            tenant=self.tenant,
+            trigger_type=RetentionTriggerType.ONBOARDING_MILESTONE,
+        ).order_by('trigger_value')
+        self.assertEqual(
+            list(onboarding_triggers.values_list('trigger_value', flat=True)),
+            [0, 2, 7, 14, 21, 28, 42, 70],
+        )
+
+        # 2. Configure TenantOnboardingSettings guide links via API
+        settings_view = TenantOnboardingSettingsView.as_view()
+        req_patch = self.factory.patch(
+            '/api/v1/retention/onboarding-settings/',
+            {
+                "welcome_guide_url": "https://studio35.com/welcome-guide",
+                "healthy_habits_guide_url": "https://studio35.com/healthy-habits",
+                "testimonials_url": "https://studio35.com/testimonials",
+                "testimonial_video_url": "https://studio35.com/video-stories",
+                "nutrition_guide_url": "https://studio35.com/nutrition-guide",
+                "referral_url": "https://studio35.com/refer-a-friend",
+                "recipe_guide_url": "https://studio35.com/recipe-guide",
+                "manage_account_url": "https://studio35.com/account",
+            },
+            format='json',
+        )
+        req_patch.tenant = self.tenant
+        force_authenticate(req_patch, user=self.owner)
+        resp_patch = settings_view(req_patch)
+        self.assertEqual(resp_patch.status_code, 200)
+        self.assertEqual(resp_patch.data['welcome_guide_url'], "https://studio35.com/welcome-guide")
+
+        # 3. Test Day 0 immediate trigger for a newly joined client with a package
+        now = timezone.now()
+        new_client = User.objects.create_user(
+            email="newmember@studio35.com",
+            password="pass",
+            role=UserRole.CLIENT,
+            tenant=self.tenant,
+            first_name="Emma",
+            last_name="Watson",
+        )
+        pkg = Package.objects.create(
+            tenant=self.tenant,
+            client=new_client,
+            package_type=self.pkg_type,
+            credits_remaining=10,
+            expires_at=now + timedelta(days=30),
+        )
+        mail.outbox.clear()
+
+        logs_day0 = RetentionAutomationService.trigger_day_zero_onboarding_email_for_client(
+            tenant=self.tenant,
+            client=new_client,
+        )
+        self.assertEqual(len(logs_day0), 1)
+        day0_emails = [m for m in mail.outbox if "newmember@studio35.com" in m.to]
+        self.assertEqual(len(day0_emails), 1)
+        self.assertIn("Welcome to", day0_emails[0].subject)
+        self.assertIn("https://studio35.com/welcome-guide", day0_emails[0].body)
+        self.assertIn("https://studio35.com/account", day0_emails[0].body)
+        self.assertIn("MEM-", day0_emails[0].body)
+        self.assertIn(self.pkg_type.name, day0_emails[0].body)
+
+        # Calling Day 0 again must be idempotent (0 duplicate emails)
+        mail.outbox.clear()
+        logs_day0_dup = RetentionAutomationService.trigger_day_zero_onboarding_email_for_client(
+            tenant=self.tenant,
+            client=new_client,
+        )
+        self.assertEqual(len(logs_day0_dup), 0)
+
+        # 4. Test Day 2, 7, 14, 21, 28, 42, 70 milestone evaluations as time progresses
+        expected_links_by_day = {
+            2: "https://studio35.com/healthy-habits",
+            7: "https://studio35.com/testimonials",
+            14: "https://studio35.com/video-stories",
+            21: "https://studio35.com/nutrition-guide",
+            28: "https://studio35.com/refer-a-friend",
+            42: "https://studio35.com/recipe-guide",
+            70: "10 weeks into your journey",
+        }
+        for day, expected_snippet in expected_links_by_day.items():
+            target_join_dt = now - timedelta(days=day)
+            Package.all_objects.filter(id=pkg.id).update(purchased_at=target_join_dt, created_at=target_join_dt)
+            User.objects.filter(id=new_client.id).update(date_joined=target_join_dt)
+            new_client.refresh_from_db()
+
+            mail.outbox.clear()
+            logs = RetentionAutomationService.evaluate_onboarding_milestone_triggers(
+                tenant=self.tenant,
+                client=new_client,
+            )
+            self.assertEqual(len(logs), 1, f"Expected 1 log on Day {day}")
+            sent_emails = [m for m in mail.outbox if "newmember@studio35.com" in m.to]
+            self.assertEqual(len(sent_emails), 1, f"Expected 1 email on Day {day}")
+            self.assertIn(expected_snippet, sent_emails[0].body)
+

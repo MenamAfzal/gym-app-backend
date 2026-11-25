@@ -20,8 +20,8 @@ from apps.users.models import ClientLifecycleStatus, User, UserRole
 from .models import (
     AttendanceTrend, ChurnRiskLevel, ClientRetentionMetrics,
     RetentionActionType, RetentionCampaignActionLog, RetentionCampaignTrigger,
-    RetentionConversionAttribution, SavedSegment, TenantRetentionDailySnapshot,
-    WeeklyBusinessInsight
+    RetentionConversionAttribution, SavedSegment, TenantOnboardingSettings,
+    TenantRetentionDailySnapshot, WeeklyBusinessInsight
 )
 from .serializers import (
     ClientRetentionMetricsSerializer,
@@ -29,6 +29,7 @@ from .serializers import (
     RetentionCampaignTriggerSerializer,
     RetentionConversionAttributionSerializer,
     SavedSegmentSerializer,
+    TenantOnboardingSettingsSerializer,
     TenantRetentionDailySnapshotSerializer,
     WeeklyBusinessInsightSerializer,
 )
@@ -963,11 +964,66 @@ class RetentionCampaignTriggerViewSet(viewsets.ModelViewSet):
         elif trigger.trigger_type == 'custom_segment':
             logs = RetentionAutomationService.evaluate_custom_segment_triggers(tenant=tenant)
             executed_count = len(logs)
+        elif trigger.trigger_type == 'onboarding_milestone':
+            logs = RetentionAutomationService.evaluate_onboarding_milestone_triggers(
+                tenant=tenant,
+                milestone_day=trigger.trigger_value,
+            )
+            executed_count = len(logs)
 
         return Response({
             "detail": f"Trigger '{trigger.name}' executed.",
             "dispatched_interventions_count": executed_count,
         }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='seed-onboarding-defaults')
+    def seed_onboarding_defaults(self, request):
+        """
+        Seeds the 7 default Day 0–70 onboarding email triggers for the current tenant.
+        """
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        if not tenant:
+            return Response({"detail": "Tenant context required."}, status=status.HTTP_400_BAD_REQUEST)
+        created = RetentionAutomationService.seed_default_onboarding_triggers(tenant)
+        all_onboarding = RetentionCampaignTrigger.objects.filter(
+            tenant=tenant,
+            trigger_type='onboarding_milestone',
+        ).order_by('trigger_value')
+        return Response({
+            "status": "success",
+            "created_count": len(created),
+            "triggers": RetentionCampaignTriggerSerializer(all_onboarding, many=True).data,
+        }, status=status.HTTP_200_OK)
+
+
+class TenantOnboardingSettingsView(APIView):
+    """
+    Retrieve or update the tenant's Day 0–70 Onboarding Email Series settings and guide links
+    (Welcome Guide, Healthy Habits Guide, Testimonials, Video Link, Nutrition Guide, Referral Link, Recipe Guide).
+    """
+    permission_classes = [IsAuthenticated, IsOwnerOrManager]
+    permission_app = 'retention'
+    permission_resource = 'triggers'
+
+    def get(self, request):
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        if not tenant:
+            return Response({"detail": "Tenant context required."}, status=status.HTTP_400_BAD_REQUEST)
+        settings_obj = TenantOnboardingSettings.get_or_create_for_tenant(tenant)
+        return Response(TenantOnboardingSettingsSerializer(settings_obj).data, status=status.HTTP_200_OK)
+
+    def patch(self, request):
+        tenant = getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        if not tenant:
+            return Response({"detail": "Tenant context required."}, status=status.HTTP_400_BAD_REQUEST)
+        settings_obj = TenantOnboardingSettings.get_or_create_for_tenant(tenant)
+        serializer = TenantOnboardingSettingsSerializer(settings_obj, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def put(self, request):
+        return self.patch(request)
 
 
 class ExecutiveKPIDashboardView(APIView):

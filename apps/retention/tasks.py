@@ -82,6 +82,31 @@ def evaluate_all_retention_triggers():
     return RetentionAutomationService.evaluate_all_triggers_across_tenants()
 
 
+@shared_task(name='retention.trigger_day_zero_onboarding_email_task')
+def trigger_day_zero_onboarding_email_task(tenant_id, client_id):
+    """
+    Dispatches the Day 0 onboarding email immediately when a client purchases their first membership.
+    """
+    from apps.users.models import User
+    from apps.core.tenants.models import Tenant
+    from apps.core.tenants.context import bypass_tenant_isolation
+    from .automation_service import RetentionAutomationService
+
+    try:
+        with bypass_tenant_isolation():
+            tenant = Tenant.objects.filter(id=tenant_id).first()
+            client = User.objects.filter(id=client_id).first()
+            if tenant and client:
+                logs = RetentionAutomationService.trigger_day_zero_onboarding_email_for_client(
+                    tenant=tenant,
+                    client=client,
+                )
+                return len(logs)
+    except Exception as e:
+        logger.exception(f"Error triggering Day 0 onboarding email for client {client_id}: {e}")
+    return 0
+
+
 @shared_task(name='retention.attribute_conversion_task')
 def attribute_conversion_task(tenant_id, client_id, event_type, object_id=None):
     """

@@ -144,3 +144,20 @@ class RewardEarnedEvent(NotificationEvent):
 class UserWarningEvent(NotificationEvent):
     """Emitted when an admin issues a community guidelines warning to a user."""
     _event_type = 'user_warning'
+
+
+@dataclass
+class FirstSessionCompletedEvent(NotificationEvent):
+    """
+    Emitted right after a client completes/attends their first session at the gym,
+    asking about their experience with their trainer at gym_name.
+    """
+    _event_type = 'first_session_completed'
+
+
+@dataclass
+class SessionMissedEvent(NotificationEvent):
+    """
+    Emitted when a client misses a booked session (marked as no_show).
+    """
+    _event_type = 'session_missed'

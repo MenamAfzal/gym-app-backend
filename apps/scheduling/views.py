@@ -1566,6 +1566,13 @@ class BookingViewSet(viewsets.ModelViewSet):
         except Exception:
             pass
 
+        # Automatically trigger First Session experience email if this is the client's first session
+        try:
+            from apps.scheduling.tasks import trigger_first_session_feedback_email
+            trigger_first_session_feedback_email(booking)
+        except Exception:
+            pass
+
         return Response({"detail": "Checked in successfully."})
 
     @action(detail=True, methods=['post'], url_path='check_in', permission_classes=[IsAuthenticated])
@@ -1606,6 +1613,13 @@ class BookingViewSet(viewsets.ModelViewSet):
         try:
             from apps.retention.tasks import recalculate_single_client_metrics
             recalculate_single_client_metrics.delay(str(booking.tenant_id), str(booking.client_id))
+        except Exception:
+            pass
+
+        # Automatically trigger Missed Session follow-up email
+        try:
+            from apps.scheduling.tasks import trigger_missed_session_email
+            trigger_missed_session_email(booking)
         except Exception:
             pass
 

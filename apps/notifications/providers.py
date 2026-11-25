@@ -111,6 +111,7 @@ class EmailProvider:
             (success, response_data)
         """
         try:
+            import html as html_lib
             from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'no-reply@example.com')
 
             msg = EmailMultiAlternatives(
@@ -119,6 +120,22 @@ class EmailProvider:
                 from_email=from_email,
                 to=[to_email],
             )
+            paragraphs_html = "".join(
+                f"<p style='font-size:15px;color:#374151;line-height:1.6;margin:0 0 14px 0;'>{html_lib.escape(line)}</p>"
+                for line in (body or "").split("\n\n")
+                if line.strip()
+            )
+            html_content = (
+                "<!DOCTYPE html><html><body style='margin:0;padding:0;background-color:#f4f6f9;"
+                "font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;'>"
+                "<div style='width:100%;background-color:#f4f6f9;padding:30px 15px;box-sizing:border-box;'>"
+                "<div style='max-width:560px;margin:0 auto;background:#ffffff;border-radius:12px;"
+                "padding:32px;box-shadow:0 2px 8px rgba(0,0,0,0.06);'>"
+                f"<h2 style='margin:0 0 20px 0;font-size:20px;font-weight:700;color:#111827;'>{html_lib.escape(subject)}</h2>"
+                f"{paragraphs_html}"
+                "</div></div></body></html>"
+            )
+            msg.attach_alternative(html_content, "text/html")
             msg.send(fail_silently=False)
 
             return True, {'status': 'sent', 'error_code': '', 'error_message': ''}
@@ -173,7 +190,10 @@ class NotificationDispatcher:
 
         pref = NotificationPreference.get_or_create_for_user(user)
         template = inbox_item.campaign.template if inbox_item.campaign_id else None
-        is_mandatory = ChannelPolicyEngine.is_mandatory(inbox_item.notification_type, template)
+        is_mandatory = (
+            ChannelPolicyEngine.is_mandatory(inbox_item.notification_type, template)
+            or inbox_item.delivery_policy == DeliveryPolicy.PUSH_AND_EMAIL
+        )
 
         should_send_push = is_mandatory or (pref.push_enabled and pref.is_type_enabled(inbox_item.notification_type))
         should_send_email = is_mandatory or (pref.email_enabled and pref.is_type_enabled(inbox_item.notification_type))

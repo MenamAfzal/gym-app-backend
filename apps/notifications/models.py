@@ -113,6 +113,8 @@ class AutomationEventTrigger(models.TextChoices):
     CLASS_REMINDER_1H    = 'class_reminder_1h',    _('Class Reminder (1h)')
     SESSION_CANCELLED    = 'session_cancelled',    _('Session Cancelled')
     SUBSTITUTE_REQUEST_BROADCAST = 'substitute_request_broadcast', _('Substitute Request Broadcast')
+    FIRST_SESSION_COMPLETED = 'first_session_completed', _('First Session Completed (Trainer Feedback)')
+    SESSION_MISSED       = 'session_missed',       _('Session Missed (No-Show Follow-Up)')
 
 
 # FCM Device (extended with tenant isolation)

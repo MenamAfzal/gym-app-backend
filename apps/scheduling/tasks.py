@@ -88,11 +88,158 @@ def process_waitlist_promotion_job(session_id):
         reset_current_tenant(token)
 
 
+def _resolve_user_display_name(user, default_label: str = "your trainer") -> str:
+    if not user:
+        return default_label
+    try:
+        full_name = user.get_full_name() if hasattr(user, "get_full_name") else ""
+        if full_name and full_name != getattr(user, "email", ""):
+            return full_name
+        profile = getattr(user, "profile", None)
+        if profile:
+            prof_name = f"{profile.first_name or ''} {profile.last_name or ''}".strip()
+            if prof_name:
+                return prof_name
+            if profile.nickname:
+                return profile.nickname
+    except Exception:
+        pass
+    return getattr(user, "email", None) or default_label
+
+
+def trigger_first_session_feedback_email(booking) -> bool:
+    """
+    Checks if `booking` is the client's FIRST attended/checked-in session in this gym (`tenant`).
+    If so, triggers `FirstSessionCompletedEvent` (sending an automatic email asking the client
+    about their experience with `trainer_name` in their first session at `gym_name`).
+    """
+    try:
+        tenant = getattr(booking, "tenant", None)
+        client = getattr(booking, "client", None)
+        session = getattr(booking, "session", None)
+        if not tenant or not client or not session:
+            return False
+
+        # Check if the client has any OTHER previously attended or checked-in bookings in this gym
+        prior_attended_exists = (
+            Booking.all_objects.filter(
+                tenant=tenant,
+                client=client,
+                status__in=["checked_in", "attended"],
+            )
+            .exclude(id=booking.id)
+            .exists()
+        )
+        if prior_attended_exists:
+            return False
+
+        client_name = _resolve_user_display_name(client, default_label="there")
+        trainer_user = getattr(session, "staff", None)
+        trainer_name = _resolve_user_display_name(trainer_user, default_label="your trainer")
+        gym_name = getattr(tenant, "name", None) or "our gym"
+        template = getattr(session, "template", None)
+        class_name = getattr(template, "name", None) or "your session"
+
+        title = f"How was your first session with {trainer_name} at {gym_name}?"
+        body = (
+            f"Hi {client_name},\n\n"
+            f"Congratulations on completing your first session ({class_name}) in {gym_name}!\n\n"
+            f"Since this was your first session with {trainer_name} in {gym_name}, we would love to hear from you — "
+            f"how was your experience with {trainer_name} today?\n\n"
+            f"Feel free to reply to this email and share your feedback. We're excited to have you training with us!\n\n"
+            f"Best regards,\n"
+            f"The {gym_name} Team"
+        )
+
+        from apps.notifications.events import FirstSessionCompletedEvent
+        from apps.notifications.services import NotificationService
+
+        NotificationService.handle_event(
+            FirstSessionCompletedEvent(
+                tenant_id=tenant.id,
+                recipient_id=client.id,
+                entity_id=booking.id,
+                context_data={
+                    "idempotency_key": f"first_session_completed:{tenant.id}:{client.id}",
+                    "title": title,
+                    "body": body,
+                    "client_name": client_name,
+                    "trainer_name": trainer_name,
+                    "gym_name": gym_name,
+                    "class_name": class_name,
+                    "session_id": str(session.id),
+                    "booking_id": str(booking.id),
+                },
+            )
+        )
+        return True
+    except Exception as exc:
+        logger.warning("Failed to trigger first session feedback email for booking %s: %s", getattr(booking, "id", None), exc)
+        return False
+
+
+def trigger_missed_session_email(booking) -> bool:
+    """
+    Triggers `SessionMissedEvent` (sending an automatic email to a client who missed their session / no_show).
+    """
+    try:
+        tenant = getattr(booking, "tenant", None)
+        client = getattr(booking, "client", None)
+        session = getattr(booking, "session", None)
+        if not tenant or not client or not session:
+            return False
+
+        client_name = _resolve_user_display_name(client, default_label="there")
+        trainer_user = getattr(session, "staff", None)
+        trainer_name = _resolve_user_display_name(trainer_user, default_label="your trainer")
+        gym_name = getattr(tenant, "name", None) or "our gym"
+        template = getattr(session, "template", None)
+        class_name = getattr(template, "name", None) or "your session"
+
+        title = f"We missed you at your session with {trainer_name} at {gym_name}"
+        body = (
+            f"Hi {client_name},\n\n"
+            f"We missed you at your {class_name} session with {trainer_name} at {gym_name}!\n\n"
+            f"We hope everything is okay. Whenever you're ready to get back on track, open the app or reply to this email "
+            f"to book your next session with {trainer_name}.\n\n"
+            f"We look forward to seeing you in {gym_name} soon!\n\n"
+            f"Best regards,\n"
+            f"The {gym_name} Team"
+        )
+
+        from apps.notifications.events import SessionMissedEvent
+        from apps.notifications.services import NotificationService
+
+        NotificationService.handle_event(
+            SessionMissedEvent(
+                tenant_id=tenant.id,
+                recipient_id=client.id,
+                entity_id=booking.id,
+                context_data={
+                    "idempotency_key": f"session_missed:{tenant.id}:{client.id}:{booking.id}",
+                    "title": title,
+                    "body": body,
+                    "client_name": client_name,
+                    "trainer_name": trainer_name,
+                    "gym_name": gym_name,
+                    "class_name": class_name,
+                    "session_id": str(session.id),
+                    "booking_id": str(booking.id),
+                },
+            )
+        )
+        return True
+    except Exception as exc:
+        logger.warning("Failed to trigger missed session email for booking %s: %s", getattr(booking, "id", None), exc)
+        return False
+
+
 @shared_task(name='scheduling.run_no_show_marking_job')
 def run_no_show_marking_job():
     """
     Scheduled task. Checks sessions and appointments that have completed,
-    updates their status to 'completed', and marks missed bookings as no_show.
+    updates their status to 'completed', marks missed bookings as no_show,
+    and triggers first-session feedback and missed-session follow-up emails.
     """
     logger.info("Running NoShowMarkingJob...")
     now = timezone.now()
@@ -102,31 +249,48 @@ def run_no_show_marking_job():
     # 1. Process Class Sessions
     sessions = ClassSession.all_objects.filter(
         models.Q(end_at__lte=now) | models.Q(end_at__isnull=True, start_at__lte=now)
-    )
+    ).select_related('tenant', 'staff', 'template')
 
     for session in sessions:
         token = set_current_tenant(session.tenant)
         try:
+            missed_bookings_to_notify = []
+            attended_bookings_to_notify = []
             with transaction.atomic():
                 if session.status == 'scheduled':
                     session.status = 'completed'
                     session.save(update_fields=['status'])
- 
+
+                attended_bookings = list(
+                    Booking.objects.filter(
+                        session=session,
+                        status__in=['checked_in', 'attended'],
+                    ).select_related('client', 'client__profile', 'tenant', 'session', 'session__staff', 'session__template')
+                )
+                attended_bookings_to_notify.extend(attended_bookings)
+
                 bookings = Booking.objects.select_for_update().filter(
                     session=session,
                     status='booked',
                     checked_in_at__isnull=True
-                )
+                ).select_related('client', 'client__profile', 'tenant', 'session', 'session__staff', 'session__template')
                 for booking in bookings:
                     booking.status = 'no_show'
                     booking.no_show_at = now
                     booking.save(update_fields=['status', 'no_show_at'])
                     logger.info(f"Booking {booking.id} marked as no_show.")
+                    missed_bookings_to_notify.append(booking)
                     try:
                         from apps.retention.tasks import recalculate_single_client_metrics
                         recalculate_single_client_metrics.delay(str(session.tenant_id), str(booking.client_id))
                     except Exception:
                         pass
+
+            for attended_bk in attended_bookings_to_notify:
+                trigger_first_session_feedback_email(attended_bk)
+
+            for missed_bk in missed_bookings_to_notify:
+                trigger_missed_session_email(missed_bk)
         finally:
             reset_current_tenant(token)
 

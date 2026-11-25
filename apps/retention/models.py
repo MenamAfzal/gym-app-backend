@@ -234,6 +234,81 @@ class RetentionTriggerType(models.TextChoices):
     FAILED_PAYMENT = 'failed_payment', _('Failed Payment')
     PACKAGE_EXPIRY = 'package_expiry', _('Package Expiry')
     CUSTOM_SEGMENT = 'custom_segment', _('Custom Segment')
+    ONBOARDING_MILESTONE = 'onboarding_milestone', _('Onboarding Milestone (Days Since Joining)')
+
+
+class TenantOnboardingSettings(TenantAwareModel):
+    """
+    Tenant-level links and settings used in the Day 0–70 automated member
+    onboarding & retention email sequence (Welcome Guide, Healthy Habits Guide,
+    Testimonials, Nutrition Guide, Recipe Guide, Referral Link, Manage Account Link).
+    """
+    welcome_guide_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text="Day 0: [Insert Welcome Guide Link]"
+    )
+    healthy_habits_guide_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text="Day 2: [Insert Healthy Habits Guide Link]"
+    )
+    testimonials_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text="Day 7: (Insert link to testimonials page)"
+    )
+    testimonial_video_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text="Day 14: [Testimonial video link]"
+    )
+    nutrition_guide_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text="Day 21: [Insert Nutrition Guide Link]"
+    )
+    referral_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text="Day 28: (Insert club referral link)"
+    )
+    recipe_guide_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text="Day 42: [Insert Recipe Guide Link]"
+    )
+    manage_account_url = models.URLField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text="Day 0: [ManageOnlineLink] for managing membership online"
+    )
+    onboarding_emails_enabled = models.BooleanField(
+        default=True,
+        help_text="Master toggle for the Day 0-70 onboarding email series"
+    )
+
+    class Meta:
+        verbose_name = _('Tenant Onboarding Settings')
+        verbose_name_plural = _('Tenant Onboarding Settings')
+
+    def __str__(self):
+        return f"Onboarding Settings for {self.tenant.name if self.tenant_id else 'Tenant'}"
+
+    @classmethod
+    def get_or_create_for_tenant(cls, tenant):
+        obj = cls.all_objects.filter(tenant=tenant).first()
+        if not obj:
+            obj = cls.objects.create(tenant=tenant)
+        return obj
 
 
 class RetentionChannel(models.TextChoices):

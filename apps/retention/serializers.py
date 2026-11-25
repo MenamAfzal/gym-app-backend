@@ -1,8 +1,8 @@
 from rest_framework import serializers
 from .models import (
     ClientRetentionMetrics, RetentionCampaignActionLog, RetentionCampaignTrigger,
-    RetentionConversionAttribution, SavedSegment, TenantRetentionDailySnapshot,
-    WeeklyBusinessInsight
+    RetentionConversionAttribution, SavedSegment, TenantOnboardingSettings,
+    TenantRetentionDailySnapshot, WeeklyBusinessInsight
 )
 from apps.users.serializers import UserSerializer
 
@@ -197,4 +197,25 @@ class WeeklyBusinessInsightSerializer(serializers.ModelSerializer):
             'updated_at',
         ]
         read_only_fields = fields
+
+
+class TenantOnboardingSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TenantOnboardingSettings
+        fields = [
+            'id',
+            'welcome_guide_url',
+            'healthy_habits_guide_url',
+            'testimonials_url',
+            'testimonial_video_url',
+            'nutrition_guide_url',
+            'referral_url',
+            'recipe_guide_url',
+            'manage_account_url',
+            'onboarding_emails_enabled',
+            'created_at',
+            'updated_at',
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
 

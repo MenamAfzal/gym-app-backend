@@ -12,6 +12,7 @@ from .views import (
     StaffPerformanceAnalyticsView,
     AtRiskSummaryView,
     ExecutiveKPIDashboardView,
+    TenantOnboardingSettingsView,
 )
 
 router = DefaultRouter()
@@ -32,6 +33,7 @@ urlpatterns = [
 
     # Phase 2 At-Risk Summary
     path('at-risk/summary/', AtRiskSummaryView.as_view(), name='retention-at-risk-summary'),
+    path('onboarding-settings/', TenantOnboardingSettingsView.as_view(), name='retention-onboarding-settings'),
 
     path('', include(router.urls)),
 ]
