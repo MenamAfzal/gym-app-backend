@@ -196,6 +196,9 @@ class UserProfile(UUIDMixin, TimestampMixin):
     )
     height = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, help_text="Height in cm")
     weight = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True, help_text="Weight in kg")
+    height_unit = models.CharField(max_length=50, blank=True, default='', help_text="Preferred height unit string (e.g. cm, ft)")
+    weight_unit = models.CharField(max_length=50, blank=True, default='', help_text="Preferred weight unit string (e.g. kg, lbs)")
+    date_unit = models.CharField(max_length=50, blank=True, default='', help_text="Preferred date format/unit string (e.g. DD/MM/YYYY)")
     
     # Workout level
     RX_LEVELS = [
@@ -295,6 +298,9 @@ class PendingRegistration(models.Model):
     gender = models.CharField(max_length=20, choices=GenderChoices.choices, blank=True)
     height = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     weight = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    height_unit = models.CharField(max_length=50, blank=True, default='')
+    weight_unit = models.CharField(max_length=50, blank=True, default='')
+    date_unit = models.CharField(max_length=50, blank=True, default='')
     
     level = models.CharField(
         max_length=10,
@@ -385,6 +391,9 @@ class StaffRegistrationRequest(UUIDMixin, TimestampMixin, TenantMixin):
     gender = models.CharField(max_length=20, choices=GenderChoices.choices, blank=True)
     height = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
     weight = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    height_unit = models.CharField(max_length=50, blank=True, default='')
+    weight_unit = models.CharField(max_length=50, blank=True, default='')
+    date_unit = models.CharField(max_length=50, blank=True, default='')
     address = models.CharField(max_length=255, blank=True)
     city = models.CharField(max_length=100, blank=True)
     country = models.CharField(max_length=100, blank=True)

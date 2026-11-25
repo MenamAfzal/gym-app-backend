@@ -12,6 +12,25 @@ from rest_framework_simplejwt.settings import api_settings
 from apps.core.tenants.models import Tenant
 from apps.users.services import UserService
 
+def _normalize_unit_aliases(data_dict: dict) -> dict:
+    """
+    Maps frontend unit key aliases (weightunit, weigthunit, heightunit, dateunit, camelCase)
+    to canonical snake_case fields (weight_unit, height_unit, date_unit).
+    """
+    alias_groups = {
+        'weight_unit': ('weightunit', 'weigthunit', 'weightUnit', 'weigthUnit', 'weight_unit', 'weigth_unit'),
+        'height_unit': ('heightunit', 'heightUnit', 'height_unit'),
+        'date_unit': ('dateunit', 'dateUnit', 'date_unit'),
+    }
+    for canonical, aliases in alias_groups.items():
+        if data_dict.get(canonical) is None or data_dict.get(canonical) == '':
+            for alias in aliases:
+                if alias in data_dict and data_dict[alias] is not None:
+                    data_dict[canonical] = data_dict[alias]
+                    break
+    return data_dict
+
+
 class UserProfileSerializer(serializers.ModelSerializer):
     """Serializer for user profile data with all extended fields."""
     
@@ -21,13 +40,26 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'nickname', 'bio', 'profile_image',
             # Personal Information
             'first_name', 'last_name', 'phone_number', 'date_of_birth', 'gender',
-            'height', 'weight', 'level',
+            'height', 'weight', 'height_unit', 'weight_unit', 'date_unit', 'level',
             # Address Information
             'address', 'city', 'country', 'postal_code',
             # Emergency Contact
             'emergency_contact_name', 'emergency_contact_phone',
         ]
         read_only_fields = ['id', 'created_at']
+
+    def to_internal_value(self, data):
+        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+        _normalize_unit_aliases(data_copy)
+        return super().to_internal_value(data_copy)
+
+    def to_representation(self, instance):
+        rep = super().to_representation(instance)
+        rep['weightunit'] = rep.get('weight_unit', '') or ''
+        rep['weigthunit'] = rep.get('weight_unit', '') or ''
+        rep['heightunit'] = rep.get('height_unit', '') or ''
+        rep['dateunit'] = rep.get('date_unit', '') or ''
+        return rep
 
 class UserSerializer(serializers.ModelSerializer):
     profile = UserProfileSerializer()
@@ -81,6 +113,9 @@ class CreateUserSerializer(serializers.Serializer):
     gender = serializers.ChoiceField(choices=GenderChoices.choices, required=False, allow_blank=True)
     height = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
     weight = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
+    height_unit = serializers.CharField(required=False, allow_blank=True, max_length=50, default='')
+    weight_unit = serializers.CharField(required=False, allow_blank=True, max_length=50, default='')
+    date_unit = serializers.CharField(required=False, allow_blank=True, max_length=50, default='')
     level = serializers.ChoiceField(choices=[('RX1', 'RX1'), ('RX2', 'RX2'), ('RX3', 'RX3')], required=False, default='RX1')
     
     # Address Information (all optional)
@@ -95,6 +130,11 @@ class CreateUserSerializer(serializers.Serializer):
 
     # Referral Tracking
     referral_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def to_internal_value(self, data):
+        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+        _normalize_unit_aliases(data_copy)
+        return super().to_internal_value(data_copy)
 
     def validate(self, attrs):
         """
@@ -292,6 +332,9 @@ class RegistrationInitSerializer(serializers.Serializer):
     gender = serializers.ChoiceField(choices=GenderChoices.choices, required=False, allow_blank=True)
     height = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
     weight = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
+    height_unit = serializers.CharField(required=False, allow_blank=True, max_length=50, default='')
+    weight_unit = serializers.CharField(required=False, allow_blank=True, max_length=50, default='')
+    date_unit = serializers.CharField(required=False, allow_blank=True, max_length=50, default='')
     
     # Address Information (all optional)
     address = serializers.CharField(required=False, allow_blank=True, max_length=255)
@@ -310,6 +353,11 @@ class RegistrationInitSerializer(serializers.Serializer):
 
     # Referral Tracking
     referral_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def to_internal_value(self, data):
+        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+        _normalize_unit_aliases(data_copy)
+        return super().to_internal_value(data_copy)
 
     def validate_email(self, value):
         if User.objects.filter(email__iexact=value).exists():
@@ -384,12 +432,61 @@ class ChangePasswordSerializer(serializers.Serializer):
     
 
 class UserSerializer(serializers.ModelSerializer):
-    profile = UserProfileSerializer()
+    profile = UserProfileSerializer(required=False)
+    assigned_locations = serializers.SerializerMethodField()
 
     class Meta:
         model = User
-        fields = ['id', 'email', 'role', 'profile', 'date_joined', 'is_active']
-        read_only_fields = ['id', 'email', 'role', 'date_joined', 'is_active']
+        fields = ['id', 'email', 'role', 'profile', 'assigned_locations', 'date_joined', 'is_active']
+        read_only_fields = ['id', 'email', 'role', 'assigned_locations', 'date_joined', 'is_active']
+
+    def get_assigned_locations(self, obj):
+        if not hasattr(obj, 'staff_locations'):
+            return []
+        try:
+            return [
+                {
+                    "id": str(sl.location.id),
+                    "name": sl.location.name,
+                    "address": getattr(sl.location, 'address', '')
+                }
+                for sl in obj.staff_locations.select_related('location').all()
+            ]
+        except Exception:
+            return []
+
+    def to_internal_value(self, data):
+        """
+        Allows flat top-level profile fields (e.g. weightunit, heightunit, dateunit, first_name, etc.)
+        in addition to nested {"profile": {...}} payloads.
+        """
+        raw_dict = data.dict() if hasattr(data, 'dict') else (data.copy() if hasattr(data, 'copy') else dict(data))
+        _normalize_unit_aliases(raw_dict)
+
+        profile_sub = dict(raw_dict.get('profile')) if isinstance(raw_dict.get('profile'), dict) else {}
+        _normalize_unit_aliases(profile_sub)
+
+        profile_field_names = set(UserProfileSerializer.Meta.fields)
+        for field_name in profile_field_names:
+            if field_name in raw_dict and field_name not in profile_sub:
+                profile_sub[field_name] = raw_dict[field_name]
+
+        if profile_sub:
+            raw_dict['profile'] = profile_sub
+
+        return super().to_internal_value(raw_dict)
+
+    def to_representation(self, instance):
+        rep = super().to_representation(instance)
+        prof = rep.get('profile') or {}
+        rep['weight_unit'] = prof.get('weight_unit', '') or ''
+        rep['height_unit'] = prof.get('height_unit', '') or ''
+        rep['date_unit'] = prof.get('date_unit', '') or ''
+        rep['weightunit'] = prof.get('weight_unit', '') or ''
+        rep['weigthunit'] = prof.get('weight_unit', '') or ''
+        rep['heightunit'] = prof.get('height_unit', '') or ''
+        rep['dateunit'] = prof.get('date_unit', '') or ''
+        return rep
 
     def update(self, instance, validated_data):
         # Extract nested profile data
@@ -1098,6 +1195,9 @@ class StaffRegistrationRequestCreateSerializer(serializers.Serializer):
     gender = serializers.ChoiceField(choices=GenderChoices.choices, required=False, allow_blank=True)
     height = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
     weight = serializers.DecimalField(max_digits=5, decimal_places=2, required=False, allow_null=True)
+    height_unit = serializers.CharField(required=False, allow_blank=True, max_length=50, default='')
+    weight_unit = serializers.CharField(required=False, allow_blank=True, max_length=50, default='')
+    date_unit = serializers.CharField(required=False, allow_blank=True, max_length=50, default='')
     address = serializers.CharField(required=False, allow_blank=True, max_length=255)
     city = serializers.CharField(required=False, allow_blank=True, max_length=100)
     country = serializers.CharField(required=False, allow_blank=True, max_length=100)
@@ -1155,6 +1255,7 @@ class StaffRegistrationRequestDetailSerializer(serializers.ModelSerializer):
             'id', 'tenant_id', 'tenant_name', 'email', 'role', 'status',
             'first_name', 'last_name', 'nickname', 'bio', 'profile_image',
             'phone_number', 'date_of_birth', 'gender', 'height', 'weight',
+            'height_unit', 'weight_unit', 'date_unit',
             'address', 'city', 'country', 'postal_code',
             'emergency_contact_name', 'emergency_contact_phone',
             'specialization', 'experience_years', 'certifications', 'notes',

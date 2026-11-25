@@ -132,6 +132,9 @@ class UserViewSet(viewsets.ModelViewSet):
                 gender=data.get('gender'),
                 height=data.get('height'),
                 weight=data.get('weight'),
+                height_unit=data.get('height_unit', ''),
+                weight_unit=data.get('weight_unit', ''),
+                date_unit=data.get('date_unit', ''),
                 address=data.get('address'),
                 city=data.get('city'),
                 country=data.get('country'),
@@ -181,6 +184,9 @@ class UserViewSet(viewsets.ModelViewSet):
                 gender=data.get('gender'),
                 height=data.get('height'),
                 weight=data.get('weight'),
+                height_unit=data.get('height_unit', ''),
+                weight_unit=data.get('weight_unit', ''),
+                date_unit=data.get('date_unit', ''),
                 # Address Information
                 address=data.get('address'),
                 city=data.get('city'),
@@ -198,16 +204,15 @@ class UserViewSet(viewsets.ModelViewSet):
         except ValidationError as e:
             return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-    @action(detail=False, methods=['get', 'patch'])
+    @action(detail=False, methods=['get', 'post', 'put', 'patch'])
     def me(self, request):
         """
         GET: Retrieve current profile.
-        PATCH: Optimized partial update for current profile.
+        POST / PUT / PATCH: Update current user profile (supports flat or nested profile fields).
         """
         user = request.user
         
-        if request.method == 'PATCH':
-            # Use partial=True to allow only updating specific fields (e.g., just bio)
+        if request.method in ('POST', 'PUT', 'PATCH'):
             serializer = self.get_serializer(user, data=request.data, partial=True)
             serializer.is_valid(raise_exception=True)
             serializer.save()
@@ -1045,6 +1050,9 @@ class UserRegistrationView(APIView):
                 gender=data.get('gender'),
                 height=data.get('height'),
                 weight=data.get('weight'),
+                height_unit=data.get('height_unit', ''),
+                weight_unit=data.get('weight_unit', ''),
+                date_unit=data.get('date_unit', ''),
                 # Address Information
                 address=data.get('address'),
                 city=data.get('city'),
@@ -1238,6 +1246,9 @@ class StaffRegistrationRequestCreateView(APIView):
             gender=data.get('gender', ''),
             height=data.get('height'),
             weight=data.get('weight'),
+            height_unit=data.get('height_unit', ''),
+            weight_unit=data.get('weight_unit', ''),
+            date_unit=data.get('date_unit', ''),
             address=data.get('address', ''),
             city=data.get('city', ''),
             country=data.get('country', ''),
@@ -1374,6 +1385,9 @@ class StaffRegistrationRequestViewSet(viewsets.ModelViewSet):
             profile.gender = request_obj.gender
             profile.height = request_obj.height
             profile.weight = request_obj.weight
+            profile.height_unit = request_obj.height_unit
+            profile.weight_unit = request_obj.weight_unit
+            profile.date_unit = request_obj.date_unit
             profile.address = request_obj.address
             profile.city = request_obj.city
             profile.country = request_obj.country
