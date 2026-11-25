@@ -177,6 +177,17 @@ class UserService:
             import logging
             logging.getLogger(__name__).warning(f"Failed to process referral for new user {user.id}: {e}")
 
+        # Trigger Day 0 Onboarding Email for newly registered clients
+        if role == UserRole.CLIENT and tenant:
+            try:
+                from apps.retention.tasks import trigger_day_zero_onboarding_email_task
+                transaction.on_commit(
+                    lambda tid=str(tenant.id), uid=str(user.id): trigger_day_zero_onboarding_email_task.delay(tid, uid)
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to enqueue Day 0 onboarding email for user {user.id}: {e}")
+
         return user
 
     @staticmethod
@@ -517,6 +528,17 @@ class AuthService:
             ReferralService.check_and_complete_pending_referrals_for_user(user, referral_code=referral_code)
         except Exception as e:
             logger.warning(f"Failed to process referral for verified user {user.id}: {e}")
+
+        # Trigger Day 0 Onboarding Email for newly verified clients
+        if user.role == UserRole.CLIENT and user.tenant:
+            try:
+                from apps.retention.tasks import trigger_day_zero_onboarding_email_task
+                transaction.on_commit(
+                    lambda tid=str(user.tenant.id), uid=str(user.id): trigger_day_zero_onboarding_email_task.delay(tid, uid)
+                )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Failed to enqueue Day 0 onboarding email for verified user {user.id}: {e}")
 
         return user
     

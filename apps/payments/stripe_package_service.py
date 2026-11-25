@@ -356,9 +356,14 @@ class StripePackageService:
                 logger.warning("Failed recording PlatformLedger for checkout session %s: %s", session.get('id'), ledger_exc)
 
             try:
-                from apps.retention.tasks import recalculate_single_client_metrics, attribute_conversion_task
+                from apps.retention.tasks import (
+                    recalculate_single_client_metrics,
+                    attribute_conversion_task,
+                    trigger_day_zero_onboarding_email_task,
+                )
                 recalculate_single_client_metrics.delay(str(tenant_id), str(client_id))
                 attribute_conversion_task.delay(str(tenant_id), str(client_id), 'package_purchase', str(payment.id))
+                trigger_day_zero_onboarding_email_task.delay(str(tenant_id), str(client_id))
             except Exception:
                 pass
 
