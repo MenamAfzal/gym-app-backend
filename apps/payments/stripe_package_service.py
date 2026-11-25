@@ -105,7 +105,8 @@ class StripePackageService:
             stripe_interval_count = 1
             billing_label = cycle_str.title()
 
-        desc = f"{package_type.credit_count} credits | Valid for {package_type.validity_days} days | Billing: {billing_label}"
+        custom_desc = (getattr(package_type, 'description', '') or '').strip()
+        desc = custom_desc if custom_desc else f"{package_type.credit_count} credits | Valid for {package_type.validity_days} days | Billing: {billing_label}"
 
         target_curr = (currency or (tenant.currency if tenant and hasattr(tenant, 'currency') and tenant.currency else None) or 'usd').strip().lower()
         price_val = package_type.price if package_type.price is not None else 0

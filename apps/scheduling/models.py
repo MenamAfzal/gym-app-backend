@@ -322,6 +322,11 @@ class PackageType(UUIDMixin, TimestampMixin, TenantMixin):
 
     location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='package_types')
     name = models.CharField(max_length=100)
+    description = models.TextField(
+        blank=True,
+        default="",
+        help_text="Custom description of the package (benefits, terms, or details)"
+    )
     credit_count = models.PositiveIntegerField()
     price = models.DecimalField(max_digits=10, decimal_places=2)
     validity_days = models.PositiveIntegerField(help_text="Validity period in days after purchase")

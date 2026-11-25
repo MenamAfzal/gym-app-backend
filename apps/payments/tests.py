@@ -148,6 +148,7 @@ class PackageSubscriptionRenewalTestCase(TestCase):
             serializer = PackageTypeSerializer(data={
                 "location": str(self.location.id),
                 "name": "4-Week Transformation Pack",
+                "description": "Includes 16 guided circuit sessions and full nutrition support.",
                 "credit_count": 16,
                 "price": "180.00",
                 "validity_days": 28,
@@ -158,6 +159,8 @@ class PackageSubscriptionRenewalTestCase(TestCase):
             self.assertTrue(serializer.is_valid(), serializer.errors)
             pkg_type = serializer.save(tenant=self.tenant)
 
+            self.assertEqual(pkg_type.description, "Includes 16 guided circuit sessions and full nutrition support.")
+            self.assertEqual(serializer.data["description"], "Includes 16 guided circuit sessions and full nutrition support.")
             self.assertEqual(pkg_type.billing_cycle, "custom")
             self.assertEqual(pkg_type.custom_billing_interval, "week")
             self.assertEqual(pkg_type.custom_billing_interval_count, 4)

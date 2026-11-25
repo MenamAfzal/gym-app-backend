@@ -97,6 +97,8 @@ class PublicPackageSerializer(serializers.ModelSerializer):
         ]
 
     def get_description(self, obj):
+        if getattr(obj, 'description', None) and str(obj.description).strip():
+            return str(obj.description).strip()
         return f"{obj.credit_count} credits valid for {obj.validity_days} days"
 
 

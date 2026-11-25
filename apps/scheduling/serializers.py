@@ -455,7 +455,7 @@ class PackageTypeSerializer(serializers.ModelSerializer):
     class Meta:
         model = PackageType
         fields = [
-            'id', 'location', 'location_name', 'name', 'credit_count', 
+            'id', 'location', 'location_name', 'name', 'description', 'credit_count', 
             'price', 'currency', 'validity_days', 'billing_cycle',
             'custom_billing_interval', 'custom_billing_interval_count',
             'billing_period_display', 'is_active',
