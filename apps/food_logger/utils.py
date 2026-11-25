@@ -145,7 +145,7 @@ def get_full_recipe_image_url(image_val, request=None, subfolder=RECIPE_IMAGE_SU
     if request:
         return request.build_absolute_uri(image_str)
 
-    base_url = getattr(settings, 'BASE_URL', 'http://16.171.26.53')
+    base_url = getattr(settings, 'BASE_URL', 'https://api.fitverx.com')
     return f"{base_url.rstrip('/')}{image_str}"
 
 

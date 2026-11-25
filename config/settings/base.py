@@ -139,7 +139,7 @@ STATICFILES_DIRS = [BASE_DIR / 'static']
 # Media files (Stored locally on server filesystem)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'mediafiles'
-BASE_URL = os.environ.get('BASE_URL', 'http://16.171.26.53')
+BASE_URL = os.environ.get('BASE_URL', 'https://api.fitverx.com')
 
 # Ensure local media directories exist
 os.makedirs(MEDIA_ROOT, exist_ok=True)

@@ -2,8 +2,11 @@ from .base import *
 import os
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
-DEBUG = True
-ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",")
+DEBUG = os.environ.get("DJANGO_DEBUG", "True").lower() in ("true", "1", "yes")
+
+_env_hosts = [h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",") if h.strip()]
+_default_hosts = ["api.fitverx.com", ".fitverx.com", "16.171.26.53", "localhost", "127.0.0.1"]
+ALLOWED_HOSTS = list(dict.fromkeys(_env_hosts + _default_hosts))
 
 # Database
 # Parse database connection url strings like psql://user:pass@127.0.0.1:8458/db
@@ -60,12 +63,26 @@ CACHES = {
     }
 }
 
-CSRF_TRUSTED_ORIGINS = [f"http://{host}" for host in ALLOWED_HOSTS if host] + [os.environ.get("FRONTEND_URL", "")]
-CSRF_TRUSTED_ORIGINS = [origin for origin in CSRF_TRUSTED_ORIGINS if origin]
+CSRF_TRUSTED_ORIGINS = (
+    [f"https://{host.lstrip('.')}" for host in ALLOWED_HOSTS if host]
+    + [f"http://{host.lstrip('.')}" for host in ALLOWED_HOSTS if host]
+    + [
+        "https://api.fitverx.com",
+        "https://fitverx.com",
+        "https://*.fitverx.com",
+        os.environ.get("FRONTEND_URL", ""),
+        os.environ.get("FRONTEND_CHECKOUT_URL", ""),
+    ]
+)
+CSRF_TRUSTED_ORIGINS = list(dict.fromkeys(origin.rstrip("/") for origin in CSRF_TRUSTED_ORIGINS if origin))
 
-# 2. Disable SSL requirements (Since we don't have a domain/cert yet)
-SECURE_SSL_REDIRECT = False
+# Trust X-Forwarded-Proto from Nginx / Reverse Proxy
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = True
 
-# 3. Allow Cookies over HTTP (Fixes the "Login Loop")
+# 2. Disable SSL requirements by default until SSL cert is active
+SECURE_SSL_REDIRECT = os.environ.get("SECURE_SSL_REDIRECT", "False").lower() in ("true", "1", "yes")
+
+# 3. Allow Cookies over HTTP/HTTPS
 SESSION_COOKIE_SECURE = False
 CSRF_COOKIE_SECURE = False
