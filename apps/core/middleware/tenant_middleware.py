@@ -59,13 +59,16 @@ class TenantMiddleware(MiddlewareMixin):
         # ------------------------------------------------------------------
         # STRATEGY 2: Subdomain Resolution (Fallback for Web/Public/Public APIs)
         # ------------------------------------------------------------------
+        RESERVED_SUBDOMAINS = {
+            'www', 'api', 'app', 'admin', 'portal', 'backend', 'fitverx', 'testserver'
+        }
         if not tenant:
-            host = request.get_host().split(':')[0]
+            host = request.get_host().split(':')[0].lower()
             subdomain = None
             
             if not (host.replace('.', '').isnumeric() or host == 'localhost'):
                 host_parts = host.split('.')
-                if len(host_parts) >= 2 and host_parts[0] != 'www':
+                if len(host_parts) >= 2 and host_parts[0] not in RESERVED_SUBDOMAINS:
                     subdomain = host_parts[0]
 
             if subdomain:
