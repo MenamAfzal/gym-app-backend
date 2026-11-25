@@ -47,6 +47,14 @@ services:
       - web
     restart: always
 
+  # Let's Encrypt SSL Certificate Manager (Certbot)
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - certbot_www:/var/www/certbot
+      - certbot_conf:/etc/letsencrypt
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+
   # Task Queue Broker (Redis)
   redis:
     image: redis:7-alpine
