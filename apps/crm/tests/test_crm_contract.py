@@ -557,3 +557,49 @@ class CRMContractTests(TestCase):
         expired_pkg.refresh_from_db()
         self.assertEqual(expired_pkg.status, "expired")
         self.assertTrue(mock_disp.called)
+
+    @patch("apps.crm.client.CRMClient.sync_branding")
+    @patch("apps.crm.tasks.deliver_crm_event_task.delay")
+    def test_tenant_branding_colors_and_logo_sync_and_embedding(self, mock_delay, mock_sync_branding):
+        """
+        Verify tenant branding colors and logo are:
+        1. Extracted accurately by serialize_tenant_branding (from Tenant.branding, Tenant.logo, and TenantCheckoutConfig).
+        2. Embedded in package sync payloads and outgoing CRM event envelopes.
+        3. Synced directly to POST /api/v1/external/branding/ on Tenant save and via sync_branding_to_crm.
+        """
+        mock_sync_branding.return_value = (200, {"status": "success"})
+
+        self.tenant.branding = {
+            "primary_color": "#2563EB",
+            "secondary_color": "#0F172A",
+            "accent_color": "#F59E0B",
+            "background_color": "#FFFFFF",
+            "text_color": "#1E293B",
+            "logo_url": "https://cdn.fitverx.com/logos/alpha-gym.png",
+        }
+        self.tenant.save()
+
+        # Saving Tenant with active CRM config should auto-trigger sync_branding
+        self.assertTrue(mock_sync_branding.called)
+
+        branding_payload = CRMIntegrationService.serialize_tenant_branding(self.tenant)
+        self.assertEqual(branding_payload["primary_color"], "#2563EB")
+        self.assertEqual(branding_payload["secondary_color"], "#0F172A")
+        self.assertEqual(branding_payload["accent_color"], "#F59E0B")
+        self.assertEqual(branding_payload["logo_url"], "https://cdn.fitverx.com/logos/alpha-gym.png")
+        self.assertEqual(branding_payload["colors"]["primary_color"], "#2563EB")
+
+        # Verify package serialization includes branding & logo_url
+        pkg_payload = CRMIntegrationService.serialize_package_type(self.package_type)
+        self.assertEqual(pkg_payload["logo_url"], "https://cdn.fitverx.com/logos/alpha-gym.png")
+        self.assertEqual(pkg_payload["branding"]["primary_color"], "#2563EB")
+        self.assertEqual(pkg_payload["metadata"]["logo_url"], "https://cdn.fitverx.com/logos/alpha-gym.png")
+        self.assertEqual(pkg_payload["metadata"]["branding"]["primary_color"], "#2563EB")
+
+        # Verify dispatched events include branding & logo_url
+        evt = CRMIntegrationService.dispatch_customer_updated_event(self.user)
+        self.assertIsNotNone(evt)
+        self.assertEqual(evt.payload["branding"]["primary_color"], "#2563EB")
+        self.assertEqual(evt.payload["branding"]["logo_url"], "https://cdn.fitverx.com/logos/alpha-gym.png")
+        self.assertEqual(evt.payload["data"]["logo_url"], "https://cdn.fitverx.com/logos/alpha-gym.png")
+        self.assertEqual(evt.payload["data"]["branding"]["secondary_color"], "#0F172A")

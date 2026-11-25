@@ -39,7 +39,137 @@ class CRMIntegrationService:
         )
 
     @staticmethod
-    def serialize_package_type(package_type) -> dict[str, Any]:
+    def serialize_tenant_branding(tenant: Tenant) -> dict[str, Any]:
+        """
+        Extracts and normalizes tenant branding colors and logo URL for CRM synchronization.
+        Pulls from Tenant.logo, Tenant.branding (JSONField), and TenantCheckoutConfig.
+        """
+        if not tenant:
+            return {}
+
+        raw_branding = getattr(tenant, "branding", None)
+        branding_dict = dict(raw_branding) if isinstance(raw_branding, dict) else {}
+
+        # Resolve logo URL
+        logo_url = None
+        logo_field = getattr(tenant, "logo", None)
+        if logo_field and getattr(logo_field, "name", None):
+            try:
+                raw_url = logo_field.url
+                base_host = (
+                    getattr(settings, "BACKEND_URL", "")
+                    or getattr(settings, "SITE_URL", "")
+                    or getattr(settings, "API_BASE_URL", "")
+                ).rstrip("/")
+                if base_host and raw_url.startswith("/"):
+                    logo_url = f"{base_host}{raw_url}"
+                else:
+                    logo_url = raw_url
+            except Exception:
+                logo_url = None
+
+        if not logo_url:
+            logo_url = (
+                branding_dict.get("logo_url")
+                or branding_dict.get("logoUrl")
+                or branding_dict.get("logo")
+                or None
+            )
+
+        # Resolve primary color (check Tenant.branding first, fallback to TenantCheckoutConfig.theme_primary_color)
+        checkout_config = None
+        try:
+            checkout_config = getattr(tenant, "checkout_config", None)
+        except Exception:
+            checkout_config = None
+
+        nested_colors = branding_dict.get("colors") if isinstance(branding_dict.get("colors"), dict) else {}
+
+        primary_color = (
+            branding_dict.get("primary_color")
+            or branding_dict.get("primaryColor")
+            or nested_colors.get("primary")
+            or nested_colors.get("primary_color")
+            or (getattr(checkout_config, "theme_primary_color", None) if checkout_config else None)
+            or None
+        )
+        secondary_color = (
+            branding_dict.get("secondary_color")
+            or branding_dict.get("secondaryColor")
+            or nested_colors.get("secondary")
+            or nested_colors.get("secondary_color")
+            or None
+        )
+        accent_color = (
+            branding_dict.get("accent_color")
+            or branding_dict.get("accentColor")
+            or nested_colors.get("accent")
+            or nested_colors.get("accent_color")
+            or None
+        )
+        background_color = (
+            branding_dict.get("background_color")
+            or branding_dict.get("backgroundColor")
+            or nested_colors.get("background")
+            or nested_colors.get("background_color")
+            or None
+        )
+        text_color = (
+            branding_dict.get("text_color")
+            or branding_dict.get("textColor")
+            or nested_colors.get("text")
+            or nested_colors.get("text_color")
+            or None
+        )
+
+        colors_map: dict[str, Any] = dict(nested_colors)
+        if primary_color:
+            colors_map["primary_color"] = primary_color
+        if secondary_color:
+            colors_map["secondary_color"] = secondary_color
+        if accent_color:
+            colors_map["accent_color"] = accent_color
+        if background_color:
+            colors_map["background_color"] = background_color
+        if text_color:
+            colors_map["text_color"] = text_color
+
+        return {
+            "tenant_id": str(tenant.id),
+            "tenant_name": tenant.name,
+            "subdomain": tenant.subdomain,
+            "logo_url": logo_url,
+            "primary_color": primary_color,
+            "secondary_color": secondary_color,
+            "accent_color": accent_color,
+            "background_color": background_color,
+            "text_color": text_color,
+            "colors": colors_map,
+            "branding": branding_dict,
+        }
+
+    @classmethod
+    def sync_branding_to_crm(cls, tenant: Tenant) -> tuple[bool, dict[str, Any]]:
+        """
+        Synchronizes tenant branding colors and logo to CRM via POST /api/v1/external/branding/.
+        """
+        client = cls.get_client_for_tenant(tenant)
+        if not client:
+            return False, {"detail": "CRM not configured for this tenant"}
+
+        payload = cls.serialize_tenant_branding(tenant)
+        try:
+            status_code, resp = client.sync_branding(payload)
+            success = status_code in (200, 201, 202)
+            if not success:
+                logger.warning("CRM branding sync failed for tenant %s: %s (status %s)", tenant.id, resp, status_code)
+            return success, resp
+        except Exception as exc:
+            logger.error("CRM branding sync failed for tenant %s: %s", tenant.id, exc)
+            return False, {"error": str(exc), "detail": "Failed to connect to external CRM service."}
+
+    @classmethod
+    def serialize_package_type(cls, package_type) -> dict[str, Any]:
         """
         Maps a Fitverx PackageType model instance to CRM's PackageSyncItemSerializer schema:
         - external_id: string (UUID of the PackageType)
@@ -85,6 +215,8 @@ class CRMIntegrationService:
         if getattr(package_type, 'feature_badge', None):
             features.append(str(package_type.feature_badge))
 
+        branding_info = cls.serialize_tenant_branding(tenant) if tenant else {}
+
         return {
             "external_id": str(package_type.id),
             "name": package_type.name,
@@ -95,11 +227,15 @@ class CRMIntegrationService:
             "status": "active" if getattr(package_type, 'is_active', True) else "archived",
             "external_url": external_url,
             "features": features,
+            "logo_url": branding_info.get("logo_url"),
+            "branding": branding_info,
             "metadata": {
                 "credit_count": package_type.credit_count,
                 "validity_days": package_type.validity_days,
                 "billing_cycle": cycle,
                 "is_featured": getattr(package_type, 'is_featured', False),
+                "logo_url": branding_info.get("logo_url"),
+                "branding": branding_info,
             },
         }
 
@@ -192,8 +328,9 @@ class CRMIntegrationService:
             return True, {"status": "success", "total": 0, "created": 0, "updated": 0, "packages": []}
 
         payloads = [cls.serialize_package_type(p) for p in packages]
+        branding_info = cls.serialize_tenant_branding(tenant)
         try:
-            status_code, resp = client.sync_bulk_packages(payloads)
+            status_code, resp = client.sync_bulk_packages(payloads, branding=branding_info)
             success = status_code == 200
             if not success:
                 logger.warning("CRM bulk package sync failed for tenant %s: %s (status %s)", tenant.id, resp, status_code)
@@ -226,12 +363,20 @@ class CRMIntegrationService:
         now = occurred_at or timezone.now()
         occurred_iso = now.isoformat() if hasattr(now, "isoformat") else str(now)
 
+        branding_info = cls.serialize_tenant_branding(tenant)
+        event_data = dict(data) if data else {}
+        if "branding" not in event_data:
+            event_data["branding"] = branding_info
+        if "logo_url" not in event_data:
+            event_data["logo_url"] = branding_info.get("logo_url")
+
         envelope: dict[str, Any] = {
             "event_id": clean_event_id,
             "type": event_type,
             "occurred_at": occurred_iso,
             "contact": contact_data,
-            "data": data or {},
+            "data": event_data,
+            "branding": branding_info,
         }
         if automation_directives:
             envelope["automation"] = automation_directives

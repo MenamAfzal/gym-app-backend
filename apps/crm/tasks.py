@@ -104,6 +104,20 @@ def sync_tenant_packages_to_crm_task(tenant_id: str):
     return {"status": "success" if success else "failed", "response": resp}
 
 
+@shared_task(name="crm.sync_tenant_branding_to_crm_task")
+def sync_tenant_branding_to_crm_task(tenant_id: str):
+    """
+    Background task to sync tenant branding colors and logo to CRM.
+    """
+    from apps.core.tenants.models import Tenant
+    tenant = Tenant.objects.filter(id=tenant_id).first()
+    if not tenant:
+        return {"status": "tenant_not_found"}
+
+    success, resp = CRMIntegrationService.sync_branding_to_crm(tenant)
+    return {"status": "success" if success else "failed", "response": resp}
+
+
 @shared_task(name="crm.retry_pending_crm_events_task")
 def retry_pending_crm_events_task():
     """

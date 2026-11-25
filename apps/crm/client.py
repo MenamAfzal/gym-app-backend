@@ -87,15 +87,35 @@ class CRMClient:
 
         return resp.status_code, resp_json
 
-    def sync_bulk_packages(self, packages: list[dict[str, Any]]) -> tuple[int, dict[str, Any]]:
+    def sync_bulk_packages(
+        self,
+        packages: list[dict[str, Any]],
+        branding: dict[str, Any] | None = None,
+    ) -> tuple[int, dict[str, Any]]:
         """
-        Bulk synchronize packages via POST /api/v1/external/packages/sync/
+        Bulk synchronize packages (and optional tenant branding) via POST /api/v1/external/packages/sync/
         Accepted response: 200 OK.
         """
+        payload: dict[str, Any] = {"packages": packages}
+        if branding:
+            payload["branding"] = branding
+            if branding.get("logo_url") is not None:
+                payload["logo_url"] = branding.get("logo_url")
         return self._request(
             method="POST",
             path="/api/v1/external/packages/sync/",
-            data={"packages": packages},
+            data=payload,
+        )
+
+    def sync_branding(self, branding_data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """
+        Synchronize tenant branding colors and logo via POST /api/v1/external/branding/
+        Accepted response: 200 OK or 201 Created.
+        """
+        return self._request(
+            method="POST",
+            path="/api/v1/external/branding/",
+            data=branding_data,
         )
 
     def sync_package(self, package_data: dict[str, Any]) -> tuple[int, dict[str, Any]]:
