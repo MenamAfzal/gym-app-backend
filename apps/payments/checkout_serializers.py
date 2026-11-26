@@ -37,6 +37,7 @@ class PublicGymInfoSerializer(serializers.ModelSerializer):
             'logo_url',
             'branding',
             'currency',
+            'is_available_for_scheduling',
             'available_payment_methods',
             'checkout_settings',
         ]

@@ -45,6 +45,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'address', 'city', 'country', 'postal_code',
             # Emergency Contact
             'emergency_contact_name', 'emergency_contact_phone',
+            'is_available_for_scheduling',
         ]
         read_only_fields = ['id', 'created_at']
 
@@ -127,6 +128,7 @@ class CreateUserSerializer(serializers.Serializer):
     # Emergency Contact (all optional)
     emergency_contact_name = serializers.CharField(required=False, allow_blank=True, max_length=100)
     emergency_contact_phone = serializers.CharField(required=False, allow_blank=True, max_length=20)
+    is_available_for_scheduling = serializers.BooleanField(required=False, default=False)
 
     # Referral Tracking
     referral_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -278,6 +280,12 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             data['user']['tenant_id'] = str(active_tenant.id)
             data['user']['tenant_name'] = active_tenant.name
             data['user']['tenant_subdomain'] = active_tenant.subdomain
+            data['user']['is_available_for_scheduling'] = bool(getattr(active_tenant, 'is_available_for_scheduling', False))
+        else:
+            data['user']['is_available_for_scheduling'] = bool(
+                getattr(self.user.profile, 'is_available_for_scheduling', False)
+                if hasattr(self.user, 'profile') and self.user.profile else False
+            )
 
         if target_tenant and target_tenant.id != getattr(self.user, 'tenant_id', None):
             refresh = self.get_token(self.user)
@@ -486,11 +494,29 @@ class UserSerializer(serializers.ModelSerializer):
         rep['weigthunit'] = prof.get('weight_unit', '') or ''
         rep['heightunit'] = prof.get('height_unit', '') or ''
         rep['dateunit'] = prof.get('date_unit', '') or ''
+        tenant = getattr(instance, 'tenant', None)
+        if tenant is not None:
+            rep['is_available_for_scheduling'] = bool(getattr(tenant, 'is_available_for_scheduling', False))
+        else:
+            rep['is_available_for_scheduling'] = bool(prof.get('is_available_for_scheduling', False))
         return rep
 
     def update(self, instance, validated_data):
         # Extract nested profile data
         profile_data = validated_data.pop('profile', {})
+        if 'is_available_for_scheduling' in profile_data and getattr(instance, 'tenant', None) and getattr(instance, 'role', None) in [UserRole.GYM_OWNER, UserRole.GYM_MANAGER, UserRole.PLATFORM_ADMIN]:
+            tenant = instance.tenant
+            sched_val = bool(profile_data['is_available_for_scheduling'])
+            tenant.is_available_for_scheduling = sched_val
+            tenant.save(update_fields=['is_available_for_scheduling'])
+            try:
+                from apps.scheduling.models import TenantBookingSettings
+                TenantBookingSettings.objects.update_or_create(
+                    tenant=tenant,
+                    defaults={'is_available_for_scheduling': sched_val}
+                )
+            except Exception:
+                pass
         
         # Delegate to Service Layer
         return UserService.update_user_profile(
@@ -968,6 +994,12 @@ class ClientDetailedNutritionSerializer(serializers.ModelSerializer):
         progress = getattr(obj, 'prefetched_progress', list(obj.daily_progress.all()))
         
         active_goal = next((g for g in goals if g.is_active), None)
+        if not active_goal:
+            try:
+                from apps.nutritionX.default_goals import ensure_default_nutritionx_goal
+                active_goal = ensure_default_nutritionx_goal(obj)
+            except Exception:
+                active_goal = None
         active_goal_data = {
             "water_intake_goal_ml": active_goal.water_intake_goal_ml if active_goal else None,
             "calories_goal_kcal": active_goal.calories_goal_kcal if active_goal else None,

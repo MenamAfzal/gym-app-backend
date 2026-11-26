@@ -230,6 +230,10 @@ class UserProfile(UUIDMixin, TimestampMixin):
         blank=True, 
         help_text="Emergency contact phone number"
     )
+    is_available_for_scheduling = models.BooleanField(
+        default=False,
+        help_text="Whether scheduling is available for this user/staff across apps"
+    )
 
     def __str__(self):
         return f"Profile for {self.user.email}"

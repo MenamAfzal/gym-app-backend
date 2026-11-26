@@ -1038,6 +1038,10 @@ class TenantBookingSettings(UUIDMixin, TimestampMixin):
         on_delete=models.CASCADE,
         related_name='booking_settings'
     )
+    is_available_for_scheduling = models.BooleanField(
+        default=False,
+        help_text="Whether scheduling is available across apps for this tenant"
+    )
     session_late_cancellation_hours = models.PositiveIntegerField(default=12, validators=[MinValueValidator(0)])
     session_booking_credits = models.PositiveIntegerField(default=1, validators=[MinValueValidator(1)])
     appointment_late_cancellation_hours = models.PositiveIntegerField(default=12, validators=[MinValueValidator(0)])
@@ -1053,13 +1057,30 @@ class TenantBookingSettings(UUIDMixin, TimestampMixin):
     @classmethod
     def get_or_create_for_tenant(cls, tenant):
         if not tenant:
-            return cls(session_late_cancellation_hours=12, session_booking_credits=1, appointment_late_cancellation_hours=12, appointment_booking_credits=1)
+            return cls(
+                is_available_for_scheduling=False,
+                session_late_cancellation_hours=12,
+                session_booking_credits=1,
+                appointment_late_cancellation_hours=12,
+                appointment_booking_credits=1
+            )
         if isinstance(tenant, (str, uuid.UUID)):
             from apps.core.tenants.models import Tenant
             tenant = Tenant.objects.filter(id=tenant).first()
             if not tenant:
-                return cls(session_late_cancellation_hours=12, session_booking_credits=1, appointment_late_cancellation_hours=12, appointment_booking_credits=1)
-        settings_obj, _ = cls.objects.get_or_create(tenant=tenant)
+                return cls(
+                    is_available_for_scheduling=False,
+                    session_late_cancellation_hours=12,
+                    session_booking_credits=1,
+                    appointment_late_cancellation_hours=12,
+                    appointment_booking_credits=1
+                )
+        settings_obj, created = cls.objects.get_or_create(
+            tenant=tenant,
+            defaults={
+                'is_available_for_scheduling': getattr(tenant, 'is_available_for_scheduling', False)
+            }
+        )
         return settings_obj
 
 

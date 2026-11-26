@@ -381,8 +381,11 @@ class WaterIntakeAPIView(APIView):
         
         target_user = resolve_target_user(request)
 
-        # Get active goal for target user
-        goal = NutritionGoal.objects.filter(user=target_user, is_active=True).first()
+        # Get active goal for target user (or auto-create gender-based default)
+        goal = NutritionGoal.all_objects.filter(user=target_user, is_active=True).first()
+        if not goal and target_user:
+            from .default_goals import ensure_default_nutritionx_goal
+            goal = ensure_default_nutritionx_goal(target_user)
         
         progress = None
         if is_historical_date:
@@ -505,8 +508,11 @@ class WaterIntakeAPIView(APIView):
         except ValueError:
             return Response({"error": "Invalid date or drink value"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Get active goal
-        goal = NutritionGoal.objects.filter(user=request.user, is_active=True).first()
+        # Get active goal (or auto-create gender-based default)
+        goal = NutritionGoal.all_objects.filter(user=request.user, is_active=True).first()
+        if not goal:
+            from .default_goals import ensure_default_nutritionx_goal
+            goal = ensure_default_nutritionx_goal(request.user)
         if not goal:
             return Response({"error": "Active nutrition goal not found."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -672,11 +678,22 @@ class NutritionGoalBulkCreateAPIView(APIView):
         history = request.query_params.get("history", "false").lower() == "true"
 
         if not user_id:
-            return Response({"error": "user_id is required"}, status=400)
+            target_user = request.user
+            user_id = target_user.id
+        else:
+            target_user = User.objects.filter(id=user_id).first()
 
-        qs = NutritionGoal.objects.filter(user_id=user_id)
+        qs = NutritionGoal.all_objects.filter(user_id=user_id)
         if not history:
             qs = qs.filter(is_active=True)
+            if not qs.exists() and target_user:
+                from .default_goals import ensure_default_nutritionx_goal
+                ensure_default_nutritionx_goal(target_user)
+                qs = NutritionGoal.all_objects.filter(user_id=user_id, is_active=True)
+        elif not qs.exists() and target_user:
+            from .default_goals import ensure_default_nutritionx_goal
+            ensure_default_nutritionx_goal(target_user)
+            qs = NutritionGoal.all_objects.filter(user_id=user_id)
 
         serializer = NutritionGoalSerializer(qs, many=True)
         return Response(serializer.data)
@@ -700,7 +717,10 @@ class DailyProgressAPIView(APIView):
         if not progress:
             return Response({"message": "No progress found for this date."}, status=404)
 
-        goal = NutritionGoal.objects.filter(user=user, created_at__date__lte=target_date).order_by("-created_at").first()
+        goal = NutritionGoal.all_objects.filter(user=user, created_at__date__lte=target_date).order_by("-created_at").first()
+        if not goal and user:
+            from .default_goals import ensure_default_nutritionx_goal
+            goal = ensure_default_nutritionx_goal(user)
 
         data = {
             "date": target_date,
@@ -882,15 +902,22 @@ class ClientNutritionGoalAPIView(APIView):
         user = resolve_target_user(request)
         history = request.query_params.get("history", "false").lower() == "true"
 
-        qs = NutritionGoal.objects.filter(user=user)
+        qs = NutritionGoal.all_objects.filter(user=user)
         if not history:
             active_goal = qs.filter(is_active=True).order_by("-created_at").first()
+            if not active_goal and user:
+                from .default_goals import ensure_default_nutritionx_goal
+                active_goal = ensure_default_nutritionx_goal(user)
             if not active_goal:
                 return Response({"message": "No active nutrition goal found."}, status=status.HTTP_404_NOT_FOUND)
             serializer = NutritionGoalSerializer(active_goal)
             return Response(serializer.data)
         
         # History
+        if not qs.exists() and user:
+            from .default_goals import ensure_default_nutritionx_goal
+            ensure_default_nutritionx_goal(user)
+            qs = NutritionGoal.all_objects.filter(user=user)
         qs = qs.order_by("-created_at")
         serializer = NutritionGoalSerializer(qs, many=True)
         return Response(serializer.data)
@@ -908,7 +935,7 @@ class ClientNutritionGoalAPIView(APIView):
                 user = get_object_or_404(User, id=target_id)
 
         # Deactivate current active goal(s) if any
-        NutritionGoal.objects.filter(user=user, is_active=True).update(is_active=False)
+        NutritionGoal.all_objects.filter(user=user, is_active=True).update(is_active=False)
 
         # Retrieve macro/water goals from payload
         calories_goal_kcal = request.data.get("calories_goal_kcal")
@@ -926,8 +953,10 @@ class ClientNutritionGoalAPIView(APIView):
             )
 
         # Create new goal
-        new_goal = NutritionGoal.objects.create(
+        tenant = getattr(user, 'tenant', None) or getattr(request, 'tenant', None) or getattr(request.user, 'tenant', None)
+        new_goal = NutritionGoal.all_objects.create(
             user=user,
+            tenant=tenant,
             calories_goal_kcal=str(calories_goal_kcal),
             protein_goal_g=str(protein_goal_g),
             carbs_goal_g=str(carbs_goal_g),
@@ -939,5 +968,25 @@ class ClientNutritionGoalAPIView(APIView):
 
         serializer = NutritionGoalSerializer(new_goal)
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class DefaultNutritionGoalsAPIView(APIView):
+    """
+    GET: Returns default nutrition goals for male and female users, plus the current user's resolved defaults.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from .default_goals import DEFAULT_NUTRITION_GOALS, get_default_nutrition_values_for_gender, get_user_gender_key
+        gender_param = request.query_params.get("gender")
+        user_gender = get_user_gender_key(request.user)
+        resolved = get_default_nutrition_values_for_gender(gender_param if gender_param else request.user)
+        return Response({
+            "male": DEFAULT_NUTRITION_GOALS["male"],
+            "female": DEFAULT_NUTRITION_GOALS["female"],
+            "user_gender": gender_param.strip().lower() if gender_param else user_gender,
+            "default_goal": resolved,
+        }, status=status.HTTP_200_OK)
+
 
     

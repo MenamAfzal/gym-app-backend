@@ -6,7 +6,7 @@ from .views import (
     GetAllFoodApiView, UserFavoriteStaffRecipeAPIView, AddFoodToMealView, LoggedMealDatesAPIView, UserMedicationViewSet,
     AnalyzeFoodAPIView
 )
-from apps.nutritionX.views import WaterIntakeAPIView, ClientMacroHistoryListView
+from apps.nutritionX.views import WaterIntakeAPIView, ClientMacroHistoryListView, DefaultNutritionGoalsAPIView
 
 router = DefaultRouter()
 router.register(r'medications', UserMedicationViewSet, basename='user-medication')
@@ -28,6 +28,7 @@ urlpatterns = [
     path('staff-recipes-items/', StaffRecipeItemListAPIView.as_view(), name='staff-recipe-items'),
     path('add-client-goals/', NutritionGoalBulkCreateAPIView.as_view(), name='add-goals'),
     path('goals/', NutritionGoalBulkCreateAPIView.as_view(), name='goals'),
+    path('goals/defaults/', DefaultNutritionGoalsAPIView.as_view(), name='food-default-goals'),
 
     # -------------------- client ------------------
     path('add-client-recipes/', UserRecipeItemListCreateAPIView.as_view(), name='staff-recipe-items'),

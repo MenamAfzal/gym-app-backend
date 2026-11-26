@@ -130,6 +130,9 @@ class ClientMacroHistorySerializer(serializers.ModelSerializer):
 
     def get_current_limits(self, obj):
         active_goal = next((goal for goal in getattr(obj, 'all_goals', []) if goal.is_active), None)
+        if not active_goal:
+            from .default_goals import ensure_default_nutritionx_goal
+            active_goal = ensure_default_nutritionx_goal(obj)
         if active_goal:
             return NutritionGoalSerializer(active_goal).data
         return None

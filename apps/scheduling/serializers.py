@@ -1541,12 +1541,25 @@ class TenantBookingSettingsSerializer(serializers.ModelSerializer):
         model = TenantBookingSettings
         fields = [
             'id', 'tenant',
+            'is_available_for_scheduling',
             'session_late_cancellation_hours', 'session_booking_credits',
             'appointment_late_cancellation_hours', 'appointment_booking_credits',
             'session_late_cancellation', 'appointment_late_cancellation',
             'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'tenant', 'created_at', 'updated_at']
+
+    def update(self, instance, validated_data):
+        updated = super().update(instance, validated_data)
+        if 'is_available_for_scheduling' in validated_data and updated.tenant_id:
+            try:
+                from apps.core.tenants.models import Tenant
+                Tenant.objects.filter(id=updated.tenant_id).update(
+                    is_available_for_scheduling=updated.is_available_for_scheduling
+                )
+            except Exception:
+                pass
+        return updated
 
     def to_internal_value(self, data):
         data = data.copy() if hasattr(data, 'copy') else dict(data)

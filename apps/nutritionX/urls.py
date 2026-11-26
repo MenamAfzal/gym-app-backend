@@ -3,7 +3,7 @@ from apps.nutritionX.views import (
     AddFoodToMealView, ClientMacroHistoryListView, CustomBeverageAPIView,
     DailyProgressAPIView, NutritionGoalBulkCreateAPIView, UserDailyMealsView,
     CustomFoodEntryAPIView, UserDrinkHistoryAPIView, WaterIntakeAPIView,
-    ClientNutritionGoalAPIView
+    ClientNutritionGoalAPIView, DefaultNutritionGoalsAPIView
 )
 from apps.food_logger.views import AnalyzeFoodAPIView
 
@@ -17,6 +17,7 @@ urlpatterns = [
 
     path("water-intake/", WaterIntakeAPIView.as_view(), name="water-intake"),
     path("goals/", NutritionGoalBulkCreateAPIView.as_view(), name="nutrition-goals"),
+    path("goals/defaults/", DefaultNutritionGoalsAPIView.as_view(), name="default-nutrition-goals"),
     path("goals/client/", ClientNutritionGoalAPIView.as_view(), name="client-nutrition-goals"),
     path("add-custom-beverage/", CustomBeverageAPIView.as_view(), name="add-custom-beverage"),
     path('custom-beverages/<int:pk>/', CustomBeverageAPIView.as_view(), name='custom-beverage-detail'),

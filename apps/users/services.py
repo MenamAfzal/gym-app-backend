@@ -117,7 +117,7 @@ class UserService:
         )
 
         # 3. Create Profile with all provided fields
-        # Define allowed profile fields for explicit handling
+        #Personal Information
         profile_fields = {
             'nickname': profile_data.get('nickname', ''),
             'bio': profile_data.get('bio', ''),
@@ -142,6 +142,7 @@ class UserService:
             # Emergency Contact
             'emergency_contact_name': profile_data.get('emergency_contact_name', ''),
             'emergency_contact_phone': profile_data.get('emergency_contact_phone', ''),
+            'is_available_for_scheduling': profile_data.get('is_available_for_scheduling', False),
         }
         
         # Filter out None values to avoid overwriting defaults
@@ -150,6 +151,14 @@ class UserService:
             profile_fields['primary_location'] = loc_objs[0]
 
         UserProfile.objects.create(user=user, **profile_fields)
+
+        # Ensure default Male/Female nutrition goals for newly created users
+        try:
+            from apps.nutritionX.default_goals import ensure_default_nutrition_goals_for_user
+            ensure_default_nutrition_goals_for_user(user)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to seed default nutrition goals for user {user.id}: {e}")
 
         # 4. Create StaffLocation mappings and Manager Policy
         if loc_objs:
@@ -212,6 +221,7 @@ class UserService:
         # 2. Update Profile fields
         if profile_data:
             profile, _ = UserProfile.objects.get_or_create(user=user)
+            old_gender = profile.gender
             
             # Special handling for images to prevent clearing if not provided in partial update
             profile_image = profile_data.pop('profile_image', None)
@@ -221,6 +231,14 @@ class UserService:
             for attr, value in profile_data.items():
                 setattr(profile, attr, value)
             profile.save()
+
+            if 'gender' in profile_data and profile.gender != old_gender:
+                try:
+                    user.profile = profile
+                    from apps.nutritionX.default_goals import ensure_default_nutrition_goals_for_user
+                    ensure_default_nutrition_goals_for_user(user, update_if_default=True)
+                except Exception:
+                    pass
         
         return user
 
@@ -513,6 +531,14 @@ class AuthService:
             profile.profile_image.save(pending.profile_image.name, pending.profile_image, save=False)
         
         profile.save()
+
+        # Ensure default Male/Female nutrition goals for newly verified users
+        try:
+            from apps.nutritionX.default_goals import ensure_default_nutrition_goals_for_user
+            ensure_default_nutrition_goals_for_user(user)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to seed default nutrition goals for verified user {user.id}: {e}")
 
         if user.role == UserRole.GYM_MANAGER and user.tenant:
             from apps.users.permission_service import PermissionService

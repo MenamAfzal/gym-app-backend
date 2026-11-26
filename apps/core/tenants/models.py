@@ -39,6 +39,10 @@ class Tenant(UUIDMixin, TimestampMixin):
         default=True,
         help_text="Whether this tenant is active"
     )
+    is_available_for_scheduling = models.BooleanField(
+        default=False,
+        help_text="Whether scheduling is available across apps for this gym/tenant"
+    )
     currency = models.CharField(
         max_length=3,
         default='usd',

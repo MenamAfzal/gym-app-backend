@@ -82,18 +82,30 @@ class NutritionGoalBulkCreateAPIView(APIView):
         user_id = request.query_params.get("user_id")
         date_str = request.query_params.get("date")
 
-        goals = UserNutritionGoal.objects.filter(user_id=user_id)
         if not user_id:
-            return Response({"error": "user_id query param is required"}, status=status.HTTP_400_BAD_REQUEST)
+            target_user = request.user
+            user_id = target_user.id
+        else:
+            target_user = User.objects.filter(id=user_id).first()
+
+        goals = UserNutritionGoal.objects.filter(user_id=user_id)
+        parsed_date = None
         if date_str:
             from django.utils.dateparse import parse_date, parse_datetime
-            date = parse_date(str(date_str))
-            if not date:
+            parsed_date = parse_date(str(date_str))
+            if not parsed_date:
                 parsed_dt = parse_datetime(str(date_str))
                 if parsed_dt:
-                    date = parsed_dt.date()
-            if date:
-                goals = goals.filter(date=date)
+                    parsed_date = parsed_dt.date()
+            if parsed_date:
+                goals = goals.filter(date=parsed_date)
+
+        if not goals.exists() and target_user:
+            from apps.nutritionX.default_goals import ensure_default_food_logger_goal
+            ensure_default_food_logger_goal(target_user, target_date=parsed_date)
+            goals = UserNutritionGoal.objects.filter(user_id=user_id)
+            if parsed_date:
+                goals = goals.filter(date=parsed_date)
 
         serializer = NutritionXGoalSerializer(goals, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -851,8 +863,9 @@ class LogFoodAPIView(APIView):
         logged_meal.total_fats = (logged_meal.total_fats or 0.0) + total_fats
         logged_meal.save()
 
-        # 9. Update nutrition goal safely
-        goal, _ = UserNutritionGoal.objects.get_or_create(user=user, date=today)
+        # 9. Update nutrition goal safely (seed gender-based default if none exists yet)
+        from apps.nutritionX.default_goals import ensure_default_food_logger_goal
+        goal = ensure_default_food_logger_goal(user, target_date=today)
         goal.daily_calories = (goal.daily_calories or 0.0) - total_calories
         goal.daily_protein = (goal.daily_protein or 0.0) - total_protein
         goal.daily_carbs = (goal.daily_carbs or 0.0) - total_carbs
@@ -955,7 +968,8 @@ class LogFoodAPIView(APIView):
         logged_meal.save()
 
         # Update user goal
-        goal, _ = UserNutritionGoal.objects.get_or_create(user=user, date=logged_meal.created_at)
+        from apps.nutritionX.default_goals import ensure_default_food_logger_goal
+        goal = ensure_default_food_logger_goal(user, target_date=logged_meal.created_at)
         goal.daily_calories = (goal.daily_calories or 0.0) + calories
         goal.daily_protein = (goal.daily_protein or 0.0) + protein
         goal.daily_carbs = (goal.daily_carbs or 0.0) + carbs

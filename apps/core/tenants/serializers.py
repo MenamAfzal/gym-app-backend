@@ -156,7 +156,7 @@ class TenantSerializer(serializers.ModelSerializer):
         model = Tenant
         fields = [
             'id', 'name', 'subdomain', 'logo', 'branding', 'currency',
-            'is_active', 'created_at', 
+            'is_active', 'is_available_for_scheduling', 'created_at', 
             'current_subscription', 'entitlements',
             'referred_by', 'affiliate_partner', 'referred_by_id'
         ]
@@ -182,7 +182,17 @@ class TenantSerializer(serializers.ModelSerializer):
                     TenantAdministrationService.ensure_referral_reward_record(referrer=resolved, referred_tenant=instance)
             else:
                 instance.referred_by = None
-        return super().update(instance, validated_data)
+        updated = super().update(instance, validated_data)
+        if 'is_available_for_scheduling' in validated_data:
+            try:
+                from apps.scheduling.models import TenantBookingSettings
+                TenantBookingSettings.objects.update_or_create(
+                    tenant=updated,
+                    defaults={'is_available_for_scheduling': updated.is_available_for_scheduling}
+                )
+            except Exception:
+                pass
+        return updated
 
     def get_referred_by(self, obj):
         if obj.referred_by_id:
