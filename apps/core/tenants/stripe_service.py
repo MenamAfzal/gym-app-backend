@@ -13,10 +13,17 @@ class StripeService:
     @staticmethod
     def create_customer(tenant: Tenant, email: str):
         """
-        Creates a Stripe Customer for the Tenant.
+        Creates (or validates existing) Stripe Customer for the Tenant.
         """
         if tenant.stripe_customer_id:
-            return tenant.stripe_customer_id
+            try:
+                existing_cust = stripe.Customer.retrieve(tenant.stripe_customer_id)
+                if not getattr(existing_cust, "deleted", False):
+                    return tenant.stripe_customer_id
+            except stripe.error.StripeError:
+                pass
+            tenant.stripe_customer_id = None
+            tenant.save(update_fields=["stripe_customer_id"])
         
         try:
             customer = stripe.Customer.create(
@@ -28,7 +35,7 @@ class StripeService:
                 }
             )
             tenant.stripe_customer_id = customer.id
-            tenant.save()
+            tenant.save(update_fields=["stripe_customer_id"])
             return customer.id
         except stripe.error.StripeError as e:
             # Log error here

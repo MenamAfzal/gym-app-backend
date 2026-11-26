@@ -141,6 +141,21 @@ class FeatureBillingService:
         }
 
         if tenant.stripe_customer_id:
+            try:
+                existing_cust = stripe.Customer.retrieve(tenant.stripe_customer_id)
+                if getattr(existing_cust, "deleted", False):
+                    tenant.stripe_customer_id = None
+                    tenant.save(update_fields=["stripe_customer_id"])
+            except stripe.error.StripeError:
+                logger.warning(
+                    "Stale or missing Stripe customer '%s' for tenant %s; clearing and falling back to customer_email.",
+                    tenant.stripe_customer_id,
+                    tenant.id,
+                )
+                tenant.stripe_customer_id = None
+                tenant.save(update_fields=["stripe_customer_id"])
+
+        if tenant.stripe_customer_id:
             checkout_kwargs["customer"] = tenant.stripe_customer_id
         elif customer_email:
             checkout_kwargs["customer_email"] = customer_email
@@ -148,12 +163,39 @@ class FeatureBillingService:
         try:
             session = stripe.checkout.Session.create(**checkout_kwargs)
         except stripe.error.StripeError as exc:
-            logger.error(
-                "Stripe checkout session creation failed for tenant %s: %s",
-                tenant.id,
-                str(exc),
-            )
-            raise
+            err_msg = str(exc)
+            if "No such customer" in err_msg and "customer" in checkout_kwargs:
+                logger.warning(
+                    "Stripe reported 'No such customer' for tenant %s (%s); clearing stripe_customer_id and retrying.",
+                    tenant.id,
+                    tenant.stripe_customer_id,
+                )
+                tenant.stripe_customer_id = None
+                tenant.save(update_fields=["stripe_customer_id"])
+                checkout_kwargs.pop("customer", None)
+                if customer_email:
+                    checkout_kwargs["customer_email"] = customer_email
+                session = stripe.checkout.Session.create(**checkout_kwargs)
+            elif "No such price" in err_msg:
+                logger.warning(
+                    "Stripe reported 'No such price' during billing checkout for tenant %s; re-syncing BillingFeatures to Stripe and retrying.",
+                    tenant.id,
+                )
+                for feat in selected_features:
+                    cls.sync_feature_to_stripe(feat, force_new_price=True)
+                    feat.save()
+                checkout_kwargs["line_items"] = [
+                    {"price": feat.stripe_price_id, "quantity": 1}
+                    for feat in selected_features
+                ]
+                session = stripe.checkout.Session.create(**checkout_kwargs)
+            else:
+                logger.error(
+                    "Stripe checkout session creation failed for tenant %s: %s",
+                    tenant.id,
+                    err_msg,
+                )
+                raise
 
         with transaction.atomic():
             TenantBillingSubscription.all_objects.filter(
@@ -477,12 +519,12 @@ class FeatureBillingService:
             )
 
     @classmethod
-    def sync_feature_to_stripe(cls, feature: BillingFeature, old_price=None, old_cycle=None) -> None:
+    def sync_feature_to_stripe(cls, feature: BillingFeature, old_price=None, old_cycle=None, force_new_price: bool = False) -> None:
         """
         Creates or updates the product & price on Stripe, and saves IDs to DB.
         """
         # 1. Product creation / update
-        if not feature.stripe_product_id:
+        if not feature.stripe_product_id or force_new_price:
             try:
                 product = stripe.Product.create(
                     name=feature.name,
@@ -504,6 +546,17 @@ class FeatureBillingService:
                 )
             except Exception as e:
                 logger.warning(f"Failed to modify Stripe product {feature.stripe_product_id}: {e}")
+                try:
+                    product = stripe.Product.create(
+                        name=feature.name,
+                        description=feature.description,
+                        active=feature.is_active,
+                        metadata={"code": feature.code, "type": "billing_feature"}
+                    )
+                    feature.stripe_product_id = product.id
+                except Exception as create_err:
+                    logger.error(f"Failed to recreate Stripe product for {feature.name}: {create_err}")
+                    raise
 
         # 2. Price creation / update
         # Stripe prices are immutable. If price value or billing cycle changes, or if stripe_price_id is missing, create a new one.
@@ -511,7 +564,7 @@ class FeatureBillingService:
         cycle_changed = old_cycle is not None and feature.billing_cycle != old_cycle
         
         should_create_price = False
-        if not feature.stripe_price_id or price_changed or cycle_changed:
+        if not feature.stripe_price_id or price_changed or cycle_changed or force_new_price:
             should_create_price = True
         else:
             try:
