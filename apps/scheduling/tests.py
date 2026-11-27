@@ -2280,6 +2280,68 @@ class ScheduleChangeNotificationTests(TestCase):
         missed_emails_job = [m for m in mail.outbox if self.client1.email in m.to and "missed you" in m.subject.lower()]
         self.assertEqual(len(missed_emails_job), 1)
 
+    def test_duplicate_and_overlapping_staff_availability_rejected(self):
+        """Verify creating duplicate or overlapping staff availability windows on the same day is rejected."""
+        payload = {
+            "staff": str(self.trainer1.id),
+            "weekday_or_date": "Monday",
+            "start_time": "08:00:00",
+            "end_time": "17:00:00",
+            "is_blackout": False,
+        }
+        res1 = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            payload,
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id)
+        )
+        self.assertEqual(res1.status_code, 201)
+        self.assertEqual(res1.data['weekday_or_date'], 'monday')
+
+        # 1. Exact duplicate (8 AM to 5 PM again) -> 400 Bad Request
+        res_dup = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            payload,
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id)
+        )
+        self.assertEqual(res_dup.status_code, 400)
+        self.assertIn("Duplicate availability", str(res_dup.data))
+
+        # 2. Overlapping time slot on the same day (10 AM to 2 PM) -> 400 Bad Request
+        overlap_payload = {
+            "staff": str(self.trainer1.id),
+            "weekday_or_date": "monday",
+            "start_time": "10:00:00",
+            "end_time": "14:00:00",
+            "is_blackout": False,
+        }
+        res_overlap = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            overlap_payload,
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id)
+        )
+        self.assertEqual(res_overlap.status_code, 400)
+        self.assertIn("Overlapping availability", str(res_overlap.data))
+
+        # 3. Non-overlapping time slot on the same day (5 PM to 8 PM) -> 201 Created
+        non_overlap_payload = {
+            "staff": str(self.trainer1.id),
+            "weekday_or_date": "monday",
+            "start_time": "17:00:00",
+            "end_time": "20:00:00",
+            "is_blackout": False,
+        }
+        res_non_overlap = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            non_overlap_payload,
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id)
+        )
+        self.assertEqual(res_non_overlap.status_code, 201)
+
+
 
 
 

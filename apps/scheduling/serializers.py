@@ -180,6 +180,68 @@ class StaffAvailabilitySerializer(serializers.ModelSerializer):
         fields = ['id', 'staff', 'staff_name', 'weekday_or_date', 'start_time', 'end_time', 'is_blackout', 'created_at']
         read_only_fields = ['id', 'staff_name', 'created_at']
 
+    def validate_weekday_or_date(self, value):
+        if value is None:
+            return value
+        cleaned = str(value).strip()
+        if cleaned.lower() in {'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'}:
+            return cleaned.lower()
+        return cleaned
+
+    def validate(self, attrs):
+        start_time = attrs.get('start_time', getattr(self.instance, 'start_time', None))
+        end_time = attrs.get('end_time', getattr(self.instance, 'end_time', None))
+        if start_time and end_time and start_time >= end_time:
+            raise serializers.ValidationError({
+                "end_time": "End time must be after start time."
+            })
+
+        request = self.context.get('request')
+        request_user = getattr(request, 'user', None) if request else None
+        target_staff = (
+            attrs.get('staff')
+            or getattr(self.instance, 'staff', None)
+            or request_user
+        )
+        weekday_or_date = attrs.get('weekday_or_date', getattr(self.instance, 'weekday_or_date', None))
+        is_blackout = attrs.get('is_blackout', getattr(self.instance, 'is_blackout', False))
+
+        if target_staff and weekday_or_date and start_time and end_time:
+            existing_qs = StaffAvailability.all_objects.filter(
+                staff=target_staff,
+                weekday_or_date__iexact=str(weekday_or_date).strip(),
+                is_blackout=is_blackout,
+            )
+            if self.instance and getattr(self.instance, 'pk', None):
+                existing_qs = existing_qs.exclude(pk=self.instance.pk)
+
+            # 1. Exact duplicate check
+            if existing_qs.filter(start_time=start_time, end_time=end_time).exists():
+                slot_type = "blackout" if is_blackout else "availability"
+                raise serializers.ValidationError({
+                    "detail": (
+                        f"Duplicate {slot_type}: This staff member already has a schedule from "
+                        f"{start_time.strftime('%I:%M %p')} to {end_time.strftime('%I:%M %p')} on {weekday_or_date}."
+                    )
+                })
+
+            # 2. Overlapping time window check
+            overlapping = existing_qs.filter(
+                start_time__lt=end_time,
+                end_time__gt=start_time,
+            ).first()
+            if overlapping:
+                slot_type = "blackout" if is_blackout else "availability"
+                raise serializers.ValidationError({
+                    "detail": (
+                        f"Overlapping {slot_type}: This staff member already has a schedule from "
+                        f"{overlapping.start_time.strftime('%I:%M %p')} to {overlapping.end_time.strftime('%I:%M %p')} "
+                        f"on {weekday_or_date} which overlaps with {start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}."
+                    )
+                })
+
+        return attrs
+
 
 class ClassTemplateSerializer(serializers.ModelSerializer):
     location_name = serializers.CharField(source='location.name', read_only=True)

@@ -317,7 +317,43 @@ def check_staff_availability_conflict(
     if action == 'delete' and current_instance and current_instance.is_blackout:
         return
 
-    # 2. If creating normal availability (non-blackout), that only adds availability — always allowed.
+    # 2. Prevent duplicate or overlapping availability/blackout slots for the same staff & weekday/date
+    if action in ('create', 'update') and weekday_or_date and start_time and end_time:
+        if start_time >= end_time:
+            raise DRFValidationError({"end_time": "End time must be after start time."})
+
+        existing_qs = StaffAvailability.all_objects.filter(
+            staff=staff,
+            weekday_or_date__iexact=str(weekday_or_date).strip(),
+            is_blackout=is_blackout,
+        )
+        if current_instance and getattr(current_instance, 'pk', None):
+            existing_qs = existing_qs.exclude(pk=current_instance.pk)
+
+        if existing_qs.filter(start_time=start_time, end_time=end_time).exists():
+            slot_type = "blackout" if is_blackout else "availability"
+            raise DRFValidationError({
+                "detail": (
+                    f"Duplicate {slot_type}: This staff member already has a schedule from "
+                    f"{start_time.strftime('%I:%M %p')} to {end_time.strftime('%I:%M %p')} on {weekday_or_date}."
+                )
+            })
+
+        overlapping = existing_qs.filter(
+            start_time__lt=end_time,
+            end_time__gt=start_time,
+        ).first()
+        if overlapping:
+            slot_type = "blackout" if is_blackout else "availability"
+            raise DRFValidationError({
+                "detail": (
+                    f"Overlapping {slot_type}: This staff member already has a schedule from "
+                    f"{overlapping.start_time.strftime('%I:%M %p')} to {overlapping.end_time.strftime('%I:%M %p')} "
+                    f"on {weekday_or_date} which overlaps with {start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}."
+                )
+            })
+
+    # 3. If creating normal availability (non-blackout), that only adds availability — no appointment conflict.
     if action == 'create' and not is_blackout:
         return
 
