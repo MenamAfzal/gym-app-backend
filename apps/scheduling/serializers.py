@@ -174,11 +174,24 @@ class StaffLocationSerializer(serializers.ModelSerializer):
 
 class StaffAvailabilitySerializer(serializers.ModelSerializer):
     staff_name = serializers.CharField(source='staff.profile.nickname', read_only=True)
+    location_name = serializers.CharField(source='location.name', read_only=True)
 
     class Meta:
         model = StaffAvailability
-        fields = ['id', 'staff', 'staff_name', 'weekday_or_date', 'start_time', 'end_time', 'is_blackout', 'created_at']
-        read_only_fields = ['id', 'staff_name', 'created_at']
+        fields = [
+            'id', 'staff', 'staff_name', 'location', 'location_name',
+            'weekday_or_date', 'start_time', 'end_time', 'is_blackout', 'created_at'
+        ]
+        read_only_fields = ['id', 'staff_name', 'location_name', 'created_at']
+        extra_kwargs = {
+            'location': {'required': False, 'allow_null': True}
+        }
+
+    def to_internal_value(self, data):
+        data_copy = data.copy() if hasattr(data, 'copy') else dict(data)
+        if 'location_id' in data_copy and 'location' not in data_copy:
+            data_copy['location'] = data_copy.get('location_id')
+        return super().to_internal_value(data_copy)
 
     def validate_weekday_or_date(self, value):
         if value is None:
@@ -191,9 +204,9 @@ class StaffAvailabilitySerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         start_time = attrs.get('start_time', getattr(self.instance, 'start_time', None))
         end_time = attrs.get('end_time', getattr(self.instance, 'end_time', None))
-        if start_time and end_time and start_time >= end_time:
+        if start_time is not None and end_time is not None and start_time == end_time:
             raise serializers.ValidationError({
-                "end_time": "End time must be after start time."
+                "end_time": "Start time and end time cannot be equal."
             })
 
         request = self.context.get('request')
@@ -205,18 +218,32 @@ class StaffAvailabilitySerializer(serializers.ModelSerializer):
         )
         weekday_or_date = attrs.get('weekday_or_date', getattr(self.instance, 'weekday_or_date', None))
         is_blackout = attrs.get('is_blackout', getattr(self.instance, 'is_blackout', False))
+        location = attrs.get('location', getattr(self.instance, 'location', None))
 
-        if target_staff and weekday_or_date and start_time and end_time:
+        if target_staff and weekday_or_date and start_time is not None and end_time is not None:
+            from .services import availability_records_overlap
+
             existing_qs = StaffAvailability.all_objects.filter(
                 staff=target_staff,
-                weekday_or_date__iexact=str(weekday_or_date).strip(),
                 is_blackout=is_blackout,
             )
+            if location is not None:
+                loc_id = getattr(location, 'id', location)
+                existing_qs = existing_qs.filter(location_id=loc_id)
+            else:
+                existing_qs = existing_qs.filter(location__isnull=True)
+
             if self.instance and getattr(self.instance, 'pk', None):
                 existing_qs = existing_qs.exclude(pk=self.instance.pk)
 
+            cleaned_day = str(weekday_or_date).strip()
+
             # 1. Exact duplicate check
-            if existing_qs.filter(start_time=start_time, end_time=end_time).exists():
+            if existing_qs.filter(
+                weekday_or_date__iexact=cleaned_day,
+                start_time=start_time,
+                end_time=end_time,
+            ).exists():
                 slot_type = "blackout" if is_blackout else "availability"
                 raise serializers.ValidationError({
                     "detail": (
@@ -225,20 +252,21 @@ class StaffAvailabilitySerializer(serializers.ModelSerializer):
                     )
                 })
 
-            # 2. Overlapping time window check
-            overlapping = existing_qs.filter(
-                start_time__lt=end_time,
-                end_time__gt=start_time,
-            ).first()
-            if overlapping:
-                slot_type = "blackout" if is_blackout else "availability"
-                raise serializers.ValidationError({
-                    "detail": (
-                        f"Overlapping {slot_type}: This staff member already has a schedule from "
-                        f"{overlapping.start_time.strftime('%I:%M %p')} to {overlapping.end_time.strftime('%I:%M %p')} "
-                        f"on {weekday_or_date} which overlaps with {start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}."
-                    )
-                })
+            # 2. Cross-midnight & same-day overlapping time window check
+            for existing in existing_qs:
+                if availability_records_overlap(
+                    cleaned_day, start_time, end_time,
+                    existing.weekday_or_date, existing.start_time, existing.end_time,
+                ):
+                    slot_type = "blackout" if is_blackout else "availability"
+                    raise serializers.ValidationError({
+                        "detail": (
+                            f"Overlapping {slot_type}: This staff member already has a schedule from "
+                            f"{existing.start_time.strftime('%I:%M %p')} to {existing.end_time.strftime('%I:%M %p')} "
+                            f"on {existing.weekday_or_date} which overlaps with "
+                            f"{start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')} on {weekday_or_date}."
+                        )
+                    })
 
         return attrs
 

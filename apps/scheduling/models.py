@@ -167,8 +167,18 @@ class StaffLocation(UUIDMixin, TimestampMixin, TenantMixin):
 class StaffAvailability(UUIDMixin, TimestampMixin, TenantMixin):
     """
     Defines bookable windows or blackouts for 1-on-1 appointments and eligibility.
+    Supports cross-midnight UTC intervals where end_time < start_time (ending on the next calendar day)
+    and optional location scoping.
     """
     staff = models.ForeignKey(User, on_delete=models.CASCADE, related_name='availabilities')
+    location = models.ForeignKey(
+        Location,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='staff_availabilities',
+        help_text="Optional location this availability applies to"
+    )
     weekday_or_date = models.CharField(max_length=50, help_text="Day of week (e.g. 'monday') or YYYY-MM-DD string")
     start_time = models.TimeField()
     end_time = models.TimeField()
@@ -176,7 +186,8 @@ class StaffAvailability(UUIDMixin, TimestampMixin, TenantMixin):
 
     def __str__(self):
         type_str = "Blackout" if self.is_blackout else "Available"
-        return f"{self.staff.email} - {self.weekday_or_date} ({self.start_time}-{self.end_time}) [{type_str}]"
+        loc_str = f" @ {self.location.name}" if self.location_id else ""
+        return f"{self.staff.email}{loc_str} - {self.weekday_or_date} ({self.start_time}-{self.end_time}) [{type_str}]"
 
 
 class ClassTemplate(UUIDMixin, TimestampMixin, TenantMixin):

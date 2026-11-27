@@ -263,26 +263,135 @@ def change_booking_spot(*, booking, new_spot_id):
     return booking
 
 
-def _matches_date_or_weekday(val_str: str, target_dt) -> bool:
-    if not val_str or not target_dt:
-        return False
+WEEKDAY_NAMES = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+# Reference Monday (2024-01-01 was a Monday) for anchored 7-day cycle UTC datetime interval comparisons
+_REF_MONDAY = timezone.datetime(2024, 1, 1).date()
+
+
+def build_utc_interval_for_start_date(start_date, start_time, end_time):
+    """
+    Constructs a continuous UTC-aware (start_dt, end_dt) interval starting on `start_date` at `start_time`.
+    When `end_time < start_time`, `end_dt` belongs to `start_date + timedelta(days=1)`.
+    """
+    from datetime import datetime as dt_cls, timedelta, timezone as dt_timezone
+    start_dt = dt_cls.combine(start_date, start_time, tzinfo=dt_timezone.utc)
+    end_date = start_date + timedelta(days=1) if end_time < start_time else start_date
+    end_dt = dt_cls.combine(end_date, end_time, tzinfo=dt_timezone.utc)
+    return start_dt, end_dt
+
+
+def _parse_weekday_or_date(val_str: str):
+    """
+    Returns ('weekday', int_0_to_6) if `val_str` is a weekday name,
+    or ('date', datetime.date) if `val_str` is a YYYY-MM-DD string,
+    or (None, None) if invalid.
+    """
+    if not val_str:
+        return None, None
     cleaned = str(val_str).strip().lower()
-    if cleaned in ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']:
-        return target_dt.strftime('%A').lower() == cleaned
+    if cleaned in WEEKDAY_NAMES:
+        return 'weekday', WEEKDAY_NAMES.index(cleaned)
     try:
         from datetime import datetime as dt_cls
-        parsed_date = dt_cls.strptime(cleaned, '%Y-%m-%d').date()
-        return target_dt.date() == parsed_date
+        return 'date', dt_cls.strptime(cleaned, '%Y-%m-%d').date()
     except (ValueError, TypeError):
+        return None, None
+
+
+def get_candidate_intervals_for_target_date(weekday_or_date: str, start_time, end_time, target_date):
+    """
+    Given an availability record `(weekday_or_date, start_time, end_time)` and a `target_date` (UTC date),
+    returns all UTC `(start_dt, end_dt)` intervals created by that rule that could cover or overlap `target_date`.
+    Checks both `target_date` (for intervals starting on `target_date`) and `target_date - 1 day`
+    (for cross-midnight intervals starting the previous evening and extending into `target_date`).
+    """
+    from datetime import timedelta
+    kind, val = _parse_weekday_or_date(weekday_or_date)
+    if not kind:
+        return []
+
+    intervals = []
+    for candidate_start_date in (target_date - timedelta(days=1), target_date):
+        if kind == 'weekday' and candidate_start_date.weekday() == val:
+            intervals.append(build_utc_interval_for_start_date(candidate_start_date, start_time, end_time))
+        elif kind == 'date' and candidate_start_date == val:
+            intervals.append(build_utc_interval_for_start_date(candidate_start_date, start_time, end_time))
+    return intervals
+
+
+def availability_records_overlap(
+    weekday_or_date_1: str, start_time_1, end_time_1,
+    weekday_or_date_2: str, start_time_2, end_time_2,
+) -> bool:
+    """
+    Determines whether two availability/blackout specifications overlap in UTC time,
+    properly accounting for cross-midnight intervals (`end_time < start_time`) that spill into the next day.
+    """
+    from datetime import timedelta
+    kind1, val1 = _parse_weekday_or_date(weekday_or_date_1)
+    kind2, val2 = _parse_weekday_or_date(weekday_or_date_2)
+    if not kind1 or not kind2:
         return False
 
+    if kind1 == 'date' and kind2 == 'date':
+        s1, e1 = build_utc_interval_for_start_date(val1, start_time_1, end_time_1)
+        s2, e2 = build_utc_interval_for_start_date(val2, start_time_2, end_time_2)
+        return s1 < e2 and e1 > s2
 
-def _times_overlap(start1, end1, start2, end2) -> bool:
+    if kind1 == 'weekday' and kind2 == 'weekday':
+        # Map both onto a 2-week reference cycle so Sunday->Monday wrap-around is also caught
+        d1 = _REF_MONDAY + timedelta(days=val1)
+        s1, e1 = build_utc_interval_for_start_date(d1, start_time_1, end_time_1)
+        for week_offset in (-7, 0, 7):
+            d2 = _REF_MONDAY + timedelta(days=val2 + week_offset)
+            s2, e2 = build_utc_interval_for_start_date(d2, start_time_2, end_time_2)
+            if s1 < e2 and e1 > s2:
+                return True
+        return False
+
+    # One is 'date' and one is 'weekday' — only compare when both are explicit same-kind in duplicate/overlap check,
+    # or check if the weekday instance around the specific date overlaps.
+    return False
+
+
+def _locations_match(avail_location_id, target_location_id) -> bool:
+    """
+    Returns True if an availability record applies to the target location:
+    - If either has no location set (None), they apply globally / match.
+    - If both have a location set, their IDs must match.
+    """
+    if avail_location_id is None or target_location_id is None:
+        return True
+    return str(avail_location_id) == str(target_location_id)
+
+
+def _interval_overlaps(start1, end1, start2, end2) -> bool:
     return start1 < end2 and end1 > start2
 
 
-def _slot_covers_time(slot_start, slot_end, target_start, target_end) -> bool:
+def _interval_covers(slot_start, slot_end, target_start, target_end) -> bool:
     return slot_start <= target_start and slot_end >= target_end
+
+
+def _intervals_cover_target(intervals, target_start, target_end) -> bool:
+    """
+    Checks whether `target_start..target_end` is covered by one interval or a contiguous union of intervals.
+    """
+    relevant = sorted(
+        [(s, e) for (s, e) in intervals if s < target_end and e > target_start],
+        key=lambda x: x[0]
+    )
+    if not relevant:
+        return False
+    cur_start, cur_end = relevant[0]
+    if cur_start > target_start:
+        return False
+    for s, e in relevant[1:]:
+        if s <= cur_end:
+            cur_end = max(cur_end, e)
+        else:
+            break
+    return cur_end >= target_end
 
 
 def check_staff_availability_conflict(
@@ -292,15 +401,16 @@ def check_staff_availability_conflict(
     start_time,
     end_time,
     is_blackout: bool = False,
+    location=None,
     action: str = 'create',
     current_instance=None,
 ):
     """
-    Validates whether changing or deleting a staff availability window conflicts
-    with any upcoming active 1-on-1 appointments or class sessions for the staff.
-
-    Option 1: Prevents staff from removing availability or setting blackouts
-    over times where clients have already booked appointments.
+    Validates whether creating, updating, or deleting a staff availability window:
+    1. Has equal start_time and end_time (rejected).
+    2. Duplicates or overlaps an existing availability/blackout window for the same staff and location.
+    3. Conflicts with any upcoming active 1-on-1 appointments or class sessions for the staff
+       (including appointments/classes falling on the following-day portion of a cross-midnight interval).
 
     Raises rest_framework.exceptions.ValidationError if a conflict is detected.
     """
@@ -312,25 +422,41 @@ def check_staff_availability_conflict(
     from .models import Appointment, ClassSession, StaffAvailability
 
     now = timezone.now()
+    location_id = getattr(location, 'id', location) if location is not None else (
+        getattr(current_instance, 'location_id', None) if current_instance else None
+    )
 
     # 1. If deleting an existing blackout, that only expands availability — always allowed.
     if action == 'delete' and current_instance and current_instance.is_blackout:
         return
 
-    # 2. Prevent duplicate or overlapping availability/blackout slots for the same staff & weekday/date
-    if action in ('create', 'update') and weekday_or_date and start_time and end_time:
-        if start_time >= end_time:
-            raise DRFValidationError({"end_time": "End time must be after start time."})
+    # 2. Validate start_time != end_time and check duplicate / overlapping windows
+    if action in ('create', 'update') and weekday_or_date and start_time is not None and end_time is not None:
+        if start_time == end_time:
+            raise DRFValidationError({
+                "end_time": "Start time and end time cannot be equal."
+            })
 
         existing_qs = StaffAvailability.all_objects.filter(
             staff=staff,
-            weekday_or_date__iexact=str(weekday_or_date).strip(),
             is_blackout=is_blackout,
         )
+        if location_id is not None:
+            existing_qs = existing_qs.filter(location_id=location_id)
+        else:
+            existing_qs = existing_qs.filter(location__isnull=True)
+
         if current_instance and getattr(current_instance, 'pk', None):
             existing_qs = existing_qs.exclude(pk=current_instance.pk)
 
-        if existing_qs.filter(start_time=start_time, end_time=end_time).exists():
+        cleaned_day = str(weekday_or_date).strip()
+
+        # Exact duplicate check
+        if existing_qs.filter(
+            weekday_or_date__iexact=cleaned_day,
+            start_time=start_time,
+            end_time=end_time,
+        ).exists():
             slot_type = "blackout" if is_blackout else "availability"
             raise DRFValidationError({
                 "detail": (
@@ -339,40 +465,44 @@ def check_staff_availability_conflict(
                 )
             })
 
-        overlapping = existing_qs.filter(
-            start_time__lt=end_time,
-            end_time__gt=start_time,
-        ).first()
-        if overlapping:
-            slot_type = "blackout" if is_blackout else "availability"
-            raise DRFValidationError({
-                "detail": (
-                    f"Overlapping {slot_type}: This staff member already has a schedule from "
-                    f"{overlapping.start_time.strftime('%I:%M %p')} to {overlapping.end_time.strftime('%I:%M %p')} "
-                    f"on {weekday_or_date} which overlaps with {start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}."
-                )
-            })
+        # Cross-midnight & same-day interval overlap check across existing records of the same kind (weekday or date)
+        for existing in existing_qs:
+            if availability_records_overlap(
+                cleaned_day, start_time, end_time,
+                existing.weekday_or_date, existing.start_time, existing.end_time,
+            ):
+                slot_type = "blackout" if is_blackout else "availability"
+                raise DRFValidationError({
+                    "detail": (
+                        f"Overlapping {slot_type}: This staff member already has a schedule from "
+                        f"{existing.start_time.strftime('%I:%M %p')} to {existing.end_time.strftime('%I:%M %p')} "
+                        f"on {existing.weekday_or_date} which overlaps with "
+                        f"{start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')} on {weekday_or_date}."
+                    )
+                })
 
     # 3. If creating normal availability (non-blackout), that only adds availability — no appointment conflict.
     if action == 'create' and not is_blackout:
         return
 
     # Fetch active upcoming appointments and class sessions for this staff member
-    appointments = list(
-        Appointment.all_objects.filter(
-            provider=staff,
-            status='scheduled',
-            start_at__gte=now,
-        ).select_related('client', 'client__profile')
-    )
+    appts_qs = Appointment.all_objects.filter(
+        provider=staff,
+        status='scheduled',
+        start_at__gte=now,
+    ).select_related('client', 'client__profile', 'location')
+    if location_id is not None:
+        appts_qs = appts_qs.filter(location_id=location_id)
+    appointments = list(appts_qs)
 
-    class_sessions = list(
-        ClassSession.all_objects.filter(
-            staff=staff,
-            status='scheduled',
-            start_at__gte=now,
-        ).select_related('template')
-    )
+    sessions_qs = ClassSession.all_objects.filter(
+        staff=staff,
+        status='scheduled',
+        start_at__gte=now,
+    ).select_related('template', 'template__location')
+    if location_id is not None:
+        sessions_qs = sessions_qs.filter(template__location_id=location_id)
+    class_sessions = list(sessions_qs)
 
     if not appointments and not class_sessions:
         return
@@ -391,9 +521,12 @@ def check_staff_availability_conflict(
     # Case A: Creating a new blackout OR updating an existing slot to a blackout
     if is_blackout:
         for appt in appointments:
-            appt_end = appt.end_at.time() if appt.end_at else (appt.start_at + timedelta(hours=1)).time()
-            appt_start = appt.start_at.time()
-            if _matches_date_or_weekday(weekday_or_date, appt.start_at) and _times_overlap(appt_start, appt_end, start_time, end_time):
+            appt_start_dt = appt.start_at
+            appt_end_dt = appt.end_at if appt.end_at else (appt.start_at + timedelta(hours=1))
+            candidate_intervals = get_candidate_intervals_for_target_date(
+                weekday_or_date, start_time, end_time, appt_start_dt.date()
+            )
+            if any(_interval_overlaps(appt_start_dt, appt_end_dt, s_dt, e_dt) for s_dt, e_dt in candidate_intervals):
                 client_name = _get_client_name(appt.client)
                 time_str = _format_time(appt.start_at)
                 raise DRFValidationError({
@@ -401,9 +534,12 @@ def check_staff_availability_conflict(
                 })
 
         for session in class_sessions:
-            sess_end = session.end_at.time() if session.end_at else (session.start_at + timedelta(hours=1)).time()
-            sess_start = session.start_at.time()
-            if _matches_date_or_weekday(weekday_or_date, session.start_at) and _times_overlap(sess_start, sess_end, start_time, end_time):
+            sess_start_dt = session.start_at
+            sess_end_dt = session.end_at if session.end_at else (session.start_at + timedelta(hours=1))
+            candidate_intervals = get_candidate_intervals_for_target_date(
+                weekday_or_date, start_time, end_time, sess_start_dt.date()
+            )
+            if any(_interval_overlaps(sess_start_dt, sess_end_dt, s_dt, e_dt) for s_dt, e_dt in candidate_intervals):
                 class_name = session.template.name if session.template else "Class"
                 time_str = _format_time(session.start_at)
                 raise DRFValidationError({
@@ -413,24 +549,29 @@ def check_staff_availability_conflict(
 
     # Case B: Deleting an existing availability slot (which was non-blackout)
     if action == 'delete' and current_instance:
-        other_slots = list(
-            StaffAvailability.objects.filter(
-                staff=staff,
-                is_blackout=False,
-            ).exclude(id=current_instance.id)
-        )
+        other_slots_qs = StaffAvailability.all_objects.filter(
+            staff=staff,
+            is_blackout=False,
+        ).exclude(id=current_instance.id)
+        other_slots = [
+            s for s in other_slots_qs
+            if _locations_match(s.location_id, location_id)
+        ]
 
         for appt in appointments:
-            appt_end = appt.end_at.time() if appt.end_at else (appt.start_at + timedelta(hours=1)).time()
-            appt_start = appt.start_at.time()
-            # Did this slot cover the appointment?
-            if _matches_date_or_weekday(current_instance.weekday_or_date, appt.start_at) and _times_overlap(appt_start, appt_end, current_instance.start_time, current_instance.end_time):
-                # Is it covered by any other remaining availability slot?
-                covered = any(
-                    _matches_date_or_weekday(s.weekday_or_date, appt.start_at) and _slot_covers_time(s.start_time, s.end_time, appt_start, appt_end)
-                    for s in other_slots
-                )
-                if not covered:
+            appt_start_dt = appt.start_at
+            appt_end_dt = appt.end_at if appt.end_at else (appt.start_at + timedelta(hours=1))
+            current_intervals = get_candidate_intervals_for_target_date(
+                current_instance.weekday_or_date, current_instance.start_time, current_instance.end_time, appt_start_dt.date()
+            )
+            if any(_interval_overlaps(appt_start_dt, appt_end_dt, s_dt, e_dt) for s_dt, e_dt in current_intervals):
+                other_intervals = []
+                for s in other_slots:
+                    if _locations_match(s.location_id, appt.location_id):
+                        other_intervals.extend(
+                            get_candidate_intervals_for_target_date(s.weekday_or_date, s.start_time, s.end_time, appt_start_dt.date())
+                        )
+                if not _intervals_cover_target(other_intervals, appt_start_dt, appt_end_dt):
                     client_name = _get_client_name(appt.client)
                     time_str = _format_time(appt.start_at)
                     raise DRFValidationError({
@@ -438,14 +579,20 @@ def check_staff_availability_conflict(
                     })
 
         for session in class_sessions:
-            sess_end = session.end_at.time() if session.end_at else (session.start_at + timedelta(hours=1)).time()
-            sess_start = session.start_at.time()
-            if _matches_date_or_weekday(current_instance.weekday_or_date, session.start_at) and _times_overlap(sess_start, sess_end, current_instance.start_time, current_instance.end_time):
-                covered = any(
-                    _matches_date_or_weekday(s.weekday_or_date, session.start_at) and _slot_covers_time(s.start_time, s.end_time, sess_start, sess_end)
-                    for s in other_slots
-                )
-                if not covered:
+            sess_start_dt = session.start_at
+            sess_end_dt = session.end_at if session.end_at else (session.start_at + timedelta(hours=1))
+            current_intervals = get_candidate_intervals_for_target_date(
+                current_instance.weekday_or_date, current_instance.start_time, current_instance.end_time, sess_start_dt.date()
+            )
+            if any(_interval_overlaps(sess_start_dt, sess_end_dt, s_dt, e_dt) for s_dt, e_dt in current_intervals):
+                sess_loc_id = session.template.location_id if session.template else None
+                other_intervals = []
+                for s in other_slots:
+                    if _locations_match(s.location_id, sess_loc_id):
+                        other_intervals.extend(
+                            get_candidate_intervals_for_target_date(s.weekday_or_date, s.start_time, s.end_time, sess_start_dt.date())
+                        )
+                if not _intervals_cover_target(other_intervals, sess_start_dt, sess_end_dt):
                     class_name = session.template.name if session.template else "Class"
                     time_str = _format_time(session.start_at)
                     raise DRFValidationError({
@@ -455,30 +602,33 @@ def check_staff_availability_conflict(
 
     # Case C: Updating an existing availability slot (modifying times, weekday, etc.)
     if action == 'update' and current_instance:
-        other_slots = list(
-            StaffAvailability.objects.filter(
-                staff=staff,
-                is_blackout=False,
-            ).exclude(id=current_instance.id)
-        )
+        other_slots_qs = StaffAvailability.all_objects.filter(
+            staff=staff,
+            is_blackout=False,
+        ).exclude(id=current_instance.id)
+        other_slots = [
+            s for s in other_slots_qs
+            if _locations_match(s.location_id, location_id)
+        ]
 
         for appt in appointments:
-            appt_end = appt.end_at.time() if appt.end_at else (appt.start_at + timedelta(hours=1)).time()
-            appt_start = appt.start_at.time()
-            # Was it covered or overlapped by the old slot?
-            if _matches_date_or_weekday(current_instance.weekday_or_date, appt.start_at) and _times_overlap(appt_start, appt_end, current_instance.start_time, current_instance.end_time):
-                # Is it covered by the new updated slot?
-                covered_by_new = (
-                    not is_blackout and
-                    _matches_date_or_weekday(weekday_or_date, appt.start_at) and
-                    _slot_covers_time(start_time, end_time, appt_start, appt_end)
-                )
-                # Or covered by any other existing slot?
-                covered_by_other = any(
-                    _matches_date_or_weekday(s.weekday_or_date, appt.start_at) and _slot_covers_time(s.start_time, s.end_time, appt_start, appt_end)
-                    for s in other_slots
-                )
-                if not covered_by_new and not covered_by_other:
+            appt_start_dt = appt.start_at
+            appt_end_dt = appt.end_at if appt.end_at else (appt.start_at + timedelta(hours=1))
+            old_intervals = get_candidate_intervals_for_target_date(
+                current_instance.weekday_or_date, current_instance.start_time, current_instance.end_time, appt_start_dt.date()
+            )
+            if any(_interval_overlaps(appt_start_dt, appt_end_dt, s_dt, e_dt) for s_dt, e_dt in old_intervals):
+                combined_intervals = []
+                if not is_blackout and _locations_match(location_id, appt.location_id):
+                    combined_intervals.extend(
+                        get_candidate_intervals_for_target_date(weekday_or_date, start_time, end_time, appt_start_dt.date())
+                    )
+                for s in other_slots:
+                    if _locations_match(s.location_id, appt.location_id):
+                        combined_intervals.extend(
+                            get_candidate_intervals_for_target_date(s.weekday_or_date, s.start_time, s.end_time, appt_start_dt.date())
+                        )
+                if not _intervals_cover_target(combined_intervals, appt_start_dt, appt_end_dt):
                     client_name = _get_client_name(appt.client)
                     time_str = _format_time(appt.start_at)
                     raise DRFValidationError({
@@ -486,19 +636,24 @@ def check_staff_availability_conflict(
                     })
 
         for session in class_sessions:
-            sess_end = session.end_at.time() if session.end_at else (session.start_at + timedelta(hours=1)).time()
-            sess_start = session.start_at.time()
-            if _matches_date_or_weekday(current_instance.weekday_or_date, session.start_at) and _times_overlap(sess_start, sess_end, current_instance.start_time, current_instance.end_time):
-                covered_by_new = (
-                    not is_blackout and
-                    _matches_date_or_weekday(weekday_or_date, session.start_at) and
-                    _slot_covers_time(start_time, end_time, sess_start, sess_end)
-                )
-                covered_by_other = any(
-                    _matches_date_or_weekday(s.weekday_or_date, session.start_at) and _slot_covers_time(s.start_time, s.end_time, sess_start, sess_end)
-                    for s in other_slots
-                )
-                if not covered_by_new and not covered_by_other:
+            sess_start_dt = session.start_at
+            sess_end_dt = session.end_at if session.end_at else (session.start_at + timedelta(hours=1))
+            old_intervals = get_candidate_intervals_for_target_date(
+                current_instance.weekday_or_date, current_instance.start_time, current_instance.end_time, sess_start_dt.date()
+            )
+            if any(_interval_overlaps(sess_start_dt, sess_end_dt, s_dt, e_dt) for s_dt, e_dt in old_intervals):
+                sess_loc_id = session.template.location_id if session.template else None
+                combined_intervals = []
+                if not is_blackout and _locations_match(location_id, sess_loc_id):
+                    combined_intervals.extend(
+                        get_candidate_intervals_for_target_date(weekday_or_date, start_time, end_time, sess_start_dt.date())
+                    )
+                for s in other_slots:
+                    if _locations_match(s.location_id, sess_loc_id):
+                        combined_intervals.extend(
+                            get_candidate_intervals_for_target_date(s.weekday_or_date, s.start_time, s.end_time, sess_start_dt.date())
+                        )
+                if not _intervals_cover_target(combined_intervals, sess_start_dt, sess_end_dt):
                     class_name = session.template.name if session.template else "Class"
                     time_str = _format_time(session.start_at)
                     raise DRFValidationError({

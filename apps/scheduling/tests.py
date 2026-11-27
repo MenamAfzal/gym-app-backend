@@ -2366,6 +2366,436 @@ class ScheduleChangeNotificationTests(TestCase):
         self.assertTrue(any(slot.get('duration_min') == 30 for slot in avail_res.data['availability']))
 
 
+class CrossMidnightStaffAvailabilityTests(TestCase):
+    def setUp(self):
+        from rest_framework.test import APIClient
+        self.client = APIClient()
+
+        self.tenant = Tenant.objects.create(name="Boston Gym", subdomain="boston-gym")
+        self.tenant_token = set_current_tenant(self.tenant)
+
+        self.owner = User.objects.create_user(
+            email="owner@bostongym.com", password="password123", role=UserRole.GYM_OWNER, tenant=self.tenant
+        )
+        self.trainer1 = User.objects.create_user(
+            email="trainer1@bostongym.com", password="password123", role=UserRole.TRAINER, tenant=self.tenant
+        )
+        self.trainer2 = User.objects.create_user(
+            email="trainer2@bostongym.com", password="password123", role=UserRole.TRAINER, tenant=self.tenant
+        )
+        self.client1 = User.objects.create_user(
+            email="client1@bostongym.com", password="password123", role=UserRole.CLIENT, tenant=self.tenant
+        )
+
+        self.loc_boston = Location.objects.create(
+            tenant=self.tenant, name="Boston Downtown", address="100 Boylston St", timezone="America/New_York"
+        )
+        self.loc_cambridge = Location.objects.create(
+            tenant=self.tenant, name="Cambridge Studio", address="200 Mass Ave", timezone="America/New_York"
+        )
+        self.room = Room.objects.create(
+            tenant=self.tenant, location=self.loc_boston, name="Studio 1", capacity=10
+        )
+
+        self.client.force_authenticate(user=self.owner)
+
+    def _get_next_weekday_date(self, target_weekday_index: int):
+        """Returns the next date within the 7-day lookahead window matching target_weekday_index (0=Monday)."""
+        today = timezone.now().date()
+        for i in range(7):
+            d = today + timedelta(days=i)
+            if d.weekday() == target_weekday_index:
+                return d
+        return today
+
+    def test_cross_midnight_monday_21_to_tuesday_03_creation_and_slot_generation(self):
+        """
+        Verify Monday 21:00:00 to 03:00:00 (6 hours across midnight into Tuesday)
+        is accepted and generates 6 hourly UTC appointment slots from Monday 21:00 UTC to Tuesday 03:00 UTC.
+        """
+        payload = {
+            "staff": str(self.trainer1.id),
+            "location": str(self.loc_boston.id),
+            "weekday_or_date": "Monday",
+            "start_time": "21:00:00",
+            "end_time": "03:00:00",
+            "is_blackout": False,
+        }
+        res = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            payload,
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(res.data['weekday_or_date'], 'monday')
+        self.assertEqual(res.data['start_time'], '21:00:00')
+        self.assertEqual(res.data['end_time'], '03:00:00')
+        self.assertEqual(str(res.data['location']), str(self.loc_boston.id))
+
+        # Check appointment availability slot generation
+        avail_res = self.client.get(
+            f'/api/v1/scheduling/appointments/availability/?provider={self.trainer1.id}&location={self.loc_boston.id}',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(avail_res.status_code, 200)
+        slots = avail_res.data['availability']
+        self.assertEqual(len(slots), 6)
+
+        from datetime import timezone as dt_timezone
+        next_monday = self._get_next_weekday_date(0)
+        next_tuesday = next_monday + timedelta(days=1)
+        expected_first_start = timezone.make_aware(datetime.combine(next_monday, time(21, 0)), dt_timezone.utc)
+        expected_last_end = timezone.make_aware(datetime.combine(next_tuesday, time(3, 0)), dt_timezone.utc)
+
+        self.assertEqual(slots[0]['start_at'], expected_first_start)
+        self.assertEqual(slots[-1]['end_at'], expected_last_end)
+
+        # Verify staff utilization report calculates +6.0 hours (not negative)
+        from apps.scheduling.models import StaffLocation
+        StaffLocation.objects.get_or_create(tenant=self.tenant, staff=self.trainer1, location=self.loc_boston)
+        report_res = self.client.get(
+            f'/api/v1/scheduling/reports/?type=staff-utilization&location={self.loc_boston.id}',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(report_res.status_code, 200)
+        trainer_report = next(r for r in report_res.data if str(r['instructor_id']) == str(self.trainer1.id))
+        self.assertEqual(trainer_report['weekly_available_hours'], 6.0)
+
+    def test_normal_same_day_monday_09_to_17_preserved(self):
+        """Verify normal same-day Monday 09:00 to 17:00 schedule works and generates 8 hourly slots."""
+        payload = {
+            "staff": str(self.trainer1.id),
+            "location": str(self.loc_boston.id),
+            "weekday_or_date": "Monday",
+            "start_time": "09:00:00",
+            "end_time": "17:00:00",
+            "is_blackout": False,
+        }
+        res = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            payload,
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res.status_code, 201)
+
+        avail_res = self.client.get(
+            f'/api/v1/scheduling/appointments/availability/?provider={self.trainer1.id}&location={self.loc_boston.id}',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(avail_res.status_code, 200)
+        self.assertEqual(len(avail_res.data['availability']), 8)
+
+    def test_cross_midnight_monday_23_to_tuesday_01(self):
+        """Verify Monday 23:00 to Tuesday 01:00 (2 hours across midnight) works and generates 2 hourly slots."""
+        payload = {
+            "staff": str(self.trainer1.id),
+            "location": str(self.loc_boston.id),
+            "weekday_or_date": "Monday",
+            "start_time": "23:00:00",
+            "end_time": "01:00:00",
+            "is_blackout": False,
+        }
+        res = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            payload,
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res.status_code, 201)
+
+        avail_res = self.client.get(
+            f'/api/v1/scheduling/appointments/availability/?provider={self.trainer1.id}&location={self.loc_boston.id}',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(avail_res.status_code, 200)
+        self.assertEqual(len(avail_res.data['availability']), 2)
+
+    def test_equal_start_and_end_time_rejected(self):
+        """Verify start_time == end_time is explicitly rejected with 400 Bad Request."""
+        payload = {
+            "staff": str(self.trainer1.id),
+            "location": str(self.loc_boston.id),
+            "weekday_or_date": "Monday",
+            "start_time": "09:00:00",
+            "end_time": "09:00:00",
+            "is_blackout": False,
+        }
+        res = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            payload,
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("Start time and end time cannot be equal", str(res.data))
+
+    def test_overlapping_cross_midnight_availability_rejected(self):
+        """
+        Verify overlapping cross-midnight schedules are rejected:
+        - Monday 21:00 -> Tuesday 03:00 exists.
+        - Monday 23:00 -> Tuesday 01:00 overlaps (same start weekday, crossing midnight).
+        - Tuesday 01:00 -> Tuesday 05:00 overlaps the Tuesday 00:00-03:00 portion of Monday's shift!
+        """
+        base_payload = {
+            "staff": str(self.trainer1.id),
+            "location": str(self.loc_boston.id),
+            "weekday_or_date": "Monday",
+            "start_time": "21:00:00",
+            "end_time": "03:00:00",
+            "is_blackout": False,
+        }
+        res1 = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            base_payload,
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res1.status_code, 201)
+
+        # Overlap 1: Monday 23:00 to Tuesday 01:00
+        overlap1 = {
+            "staff": str(self.trainer1.id),
+            "location": str(self.loc_boston.id),
+            "weekday_or_date": "Monday",
+            "start_time": "23:00:00",
+            "end_time": "01:00:00",
+            "is_blackout": False,
+        }
+        res_ov1 = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            overlap1,
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_ov1.status_code, 400)
+        self.assertIn("Overlapping availability", str(res_ov1.data))
+
+        # Overlap 2: Tuesday 01:00 to Tuesday 05:00 (overlaps the Tuesday 00:00-03:00 tail of Monday's shift)
+        overlap2 = {
+            "staff": str(self.trainer1.id),
+            "location": str(self.loc_boston.id),
+            "weekday_or_date": "Tuesday",
+            "start_time": "01:00:00",
+            "end_time": "05:00:00",
+            "is_blackout": False,
+        }
+        res_ov2 = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            overlap2,
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_ov2.status_code, 400)
+        self.assertIn("Overlapping availability", str(res_ov2.data))
+
+        # Non-overlapping on Tuesday: Tuesday 03:00 to Tuesday 09:00 -> 201 Created
+        non_overlap_tue = {
+            "staff": str(self.trainer1.id),
+            "location": str(self.loc_boston.id),
+            "weekday_or_date": "Tuesday",
+            "start_time": "03:00:00",
+            "end_time": "09:00:00",
+            "is_blackout": False,
+        }
+        res_ok = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            non_overlap_tue,
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_ok.status_code, 201)
+
+    def test_appointment_overlapping_following_day_portion_blocks_delete_and_blackout(self):
+        """
+        Verify an active appointment on Tuesday 01:00-02:00 UTC (the following-day portion
+        of a Monday 21:00 - Tuesday 03:00 availability):
+        1. Excludes the 01:00-02:00 slot from provider_availability.
+        2. Blocks deleting the Monday 21:00 - 03:00 availability.
+        3. Blocks creating a Monday 23:00 - Tuesday 02:00 blackout over that appointment.
+        """
+        # Pick a future Monday (at least 1 day ahead so Monday 21:00 is in the future)
+        today = timezone.now().date()
+        days_until_monday = (0 - today.weekday()) % 7
+        if days_until_monday == 0:
+            days_until_monday = 7
+        future_monday = today + timedelta(days=days_until_monday)
+        future_tuesday = future_monday + timedelta(days=1)
+
+        avail = StaffAvailability.objects.create(
+            tenant=self.tenant,
+            staff=self.trainer1,
+            location=self.loc_boston,
+            weekday_or_date="monday",
+            start_time=time(21, 0),
+            end_time=time(3, 0),
+            is_blackout=False,
+        )
+
+        # Create appointment on Tuesday 01:00 - 02:00 UTC
+        from datetime import timezone as dt_timezone
+        appt_start = timezone.make_aware(datetime.combine(future_tuesday, time(1, 0)), dt_timezone.utc)
+        appt_end = timezone.make_aware(datetime.combine(future_tuesday, time(2, 0)), dt_timezone.utc)
+        Appointment.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            provider=self.trainer1,
+            location=self.loc_boston,
+            room=self.room,
+            start_at=appt_start,
+            end_at=appt_end,
+            status='scheduled',
+        )
+
+        # 1. Attempting to delete the Monday 21:00-03:00 availability should fail because it covers Tuesday 01:00-02:00
+        del_res = self.client.delete(
+            f'/api/v1/scheduling/staff-availability/{avail.id}/',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(del_res.status_code, 400)
+        self.assertIn("Cannot delete availability", str(del_res.data))
+
+        # 2. Attempting to shorten Monday 21:00-03:00 to Monday 21:00-23:59 should fail
+        patch_res = self.client.patch(
+            f'/api/v1/scheduling/staff-availability/{avail.id}/',
+            {"end_time": "23:59:00"},
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(patch_res.status_code, 400)
+        self.assertIn("Cannot update availability", str(patch_res.data))
+
+        # 3. Attempting to add a cross-midnight blackout Monday 23:00 - Tuesday 02:00 over the Tuesday 01:00 appointment should fail
+        blackout_res = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            {
+                "staff": str(self.trainer1.id),
+                "location": str(self.loc_boston.id),
+                "weekday_or_date": "monday",
+                "start_time": "23:00:00",
+                "end_time": "02:00:00",
+                "is_blackout": True,
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(blackout_res.status_code, 400)
+        self.assertIn("Cannot add blackout", str(blackout_res.data))
+
+    def test_blackout_overlapping_only_part_of_cross_midnight_interval(self):
+        """
+        Verify a partial blackout (e.g. Monday 23:00 to Tuesday 01:00, 2 hours) inside a
+        Monday 21:00 to Tuesday 03:00 (6 hours) availability only removes the 2 blacked-out slots
+        and leaves the remaining 4 slots bookable.
+        """
+        # Create 6-hour cross-midnight availability: Monday 21:00 -> Tuesday 03:00
+        self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            {
+                "staff": str(self.trainer1.id),
+                "location": str(self.loc_boston.id),
+                "weekday_or_date": "monday",
+                "start_time": "21:00:00",
+                "end_time": "03:00:00",
+                "is_blackout": False,
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        # Create 2-hour cross-midnight blackout: Monday 23:00 -> Tuesday 01:00
+        b_res = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            {
+                "staff": str(self.trainer1.id),
+                "location": str(self.loc_boston.id),
+                "weekday_or_date": "monday",
+                "start_time": "23:00:00",
+                "end_time": "01:00:00",
+                "is_blackout": True,
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(b_res.status_code, 201)
+
+        avail_res = self.client.get(
+            f'/api/v1/scheduling/appointments/availability/?provider={self.trainer1.id}&location={self.loc_boston.id}',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(avail_res.status_code, 200)
+        slots = avail_res.data['availability']
+        # 6 total hours - 2 blacked-out hours = 4 available slots (21-22, 22-23, 01-02, 02-03)
+        self.assertEqual(len(slots), 4)
+        start_hours = [s['start_at'].hour for s in slots]
+        self.assertEqual(start_hours, [21, 22, 1, 2])
+
+    def test_different_staff_and_locations_have_independent_schedules(self):
+        """
+        Verify:
+        1. The same staff member can have separate availability schedules at different locations.
+        2. Different staff members at the same location can have identical availability schedules without conflict.
+        """
+        # Trainer 1 at Boston Location: Monday 21:00 -> 03:00
+        res_t1_loc1 = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            {
+                "staff": str(self.trainer1.id),
+                "location": str(self.loc_boston.id),
+                "weekday_or_date": "Monday",
+                "start_time": "21:00:00",
+                "end_time": "03:00:00",
+                "is_blackout": False,
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_t1_loc1.status_code, 201)
+
+        # Trainer 1 at Cambridge Location: Monday 21:00 -> 03:00 (separate location -> allowed!)
+        res_t1_loc2 = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            {
+                "staff": str(self.trainer1.id),
+                "location": str(self.loc_cambridge.id),
+                "weekday_or_date": "Monday",
+                "start_time": "21:00:00",
+                "end_time": "03:00:00",
+                "is_blackout": False,
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_t1_loc2.status_code, 201)
+
+        # Trainer 2 at Boston Location: Monday 21:00 -> 03:00 (different staff -> allowed!)
+        res_t2_loc1 = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            {
+                "staff": str(self.trainer2.id),
+                "location": str(self.loc_boston.id),
+                "weekday_or_date": "Monday",
+                "start_time": "21:00:00",
+                "end_time": "03:00:00",
+                "is_blackout": False,
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_t2_loc1.status_code, 201)
+
+        # Filtering GET /api/v1/scheduling/staff-availability/ by staff and location returns only matching record
+        list_boston = self.client.get(
+            f'/api/v1/scheduling/staff-availability/?staff={self.trainer1.id}&location={self.loc_boston.id}',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(list_boston.status_code, 200)
+        results = list_boston.data['results'] if isinstance(list_boston.data, dict) else list_boston.data
+        self.assertEqual(len(results), 1)
+        self.assertEqual(str(results[0]['location']), str(self.loc_boston.id))
+
+
+
 
 
 

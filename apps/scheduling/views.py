@@ -445,32 +445,38 @@ class StaffAvailabilityViewSet(viewsets.ModelViewSet):
         return [IsAuthenticated()]
 
     def get_queryset(self):
-        qs = StaffAvailability.objects.select_related('staff', 'staff__profile')
+        qs = StaffAvailability.objects.select_related('staff', 'staff__profile', 'location')
         user = getattr(self.request, 'user', None)
         if getattr(user, 'role', None) == UserRole.GYM_MANAGER:
             manager_loc_ids = PermissionService.get_manager_location_ids(user)
             if manager_loc_ids is not None:
                 qs = qs.filter(
                     Q(staff=user) |
+                    Q(location_id__in=manager_loc_ids) |
                     Q(staff__staff_locations__location_id__in=manager_loc_ids) |
                     Q(staff__profile__primary_location_id__in=manager_loc_ids)
                 ).distinct()
 
-        staff_id = self.request.query_params.get('staff')
+        staff_id = self.request.query_params.get('staff') or self.request.query_params.get('staff_id')
         if staff_id:
             qs = qs.filter(staff_id=staff_id)
+        location_id = self.request.query_params.get('location') or self.request.query_params.get('location_id')
+        if location_id:
+            qs = qs.filter(location_id=location_id)
         return qs
 
     def perform_create(self, serializer):
         user = self.request.user
         tenant = getattr(self.request, 'tenant', None) or getattr(user, 'tenant', None)
         target_staff = serializer.validated_data.get('staff') or user
+        location = serializer.validated_data.get('location')
         check_staff_availability_conflict(
             staff=target_staff,
             weekday_or_date=serializer.validated_data.get('weekday_or_date', ''),
             start_time=serializer.validated_data.get('start_time'),
             end_time=serializer.validated_data.get('end_time'),
             is_blackout=serializer.validated_data.get('is_blackout', False),
+            location=location,
             action='create',
         )
         if getattr(user, 'role', None) == UserRole.TRAINER and not serializer.validated_data.get('staff'):
@@ -485,6 +491,7 @@ class StaffAvailabilityViewSet(viewsets.ModelViewSet):
         start_time = serializer.validated_data.get('start_time', instance.start_time)
         end_time = serializer.validated_data.get('end_time', instance.end_time)
         is_blackout = serializer.validated_data.get('is_blackout', instance.is_blackout)
+        location = serializer.validated_data.get('location', instance.location)
 
         check_staff_availability_conflict(
             staff=target_staff,
@@ -492,6 +499,7 @@ class StaffAvailabilityViewSet(viewsets.ModelViewSet):
             start_time=start_time,
             end_time=end_time,
             is_blackout=is_blackout,
+            location=location,
             action='update',
             current_instance=instance,
         )
@@ -505,6 +513,7 @@ class StaffAvailabilityViewSet(viewsets.ModelViewSet):
             start_time=instance.start_time,
             end_time=instance.end_time,
             is_blackout=instance.is_blackout,
+            location=instance.location,
             action='delete',
             current_instance=instance,
         )
@@ -1776,6 +1785,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             return Response({"detail": "provider query param required."}, status=400)
         
         provider = get_object_or_404(User, id=provider_id, role__in=['trainer', 'gym_owner', 'gym_manager'])
+        location_id = request.query_params.get('location') or request.query_params.get('location_id')
 
         raw_duration = (
             request.query_params.get('duration_min')
@@ -1793,61 +1803,84 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         today = timezone.now().date()
         slots = []
 
-        availabilities = StaffAvailability.objects.filter(staff=provider, is_blackout=False)
-        blackouts = StaffAvailability.objects.filter(staff=provider, is_blackout=True)
+        availabilities_qs = StaffAvailability.objects.filter(staff=provider, is_blackout=False)
+        blackouts_qs = StaffAvailability.objects.filter(staff=provider, is_blackout=True)
+        if location_id:
+            availabilities_qs = availabilities_qs.filter(Q(location_id=location_id) | Q(location__isnull=True))
+            blackouts_qs = blackouts_qs.filter(Q(location_id=location_id) | Q(location__isnull=True))
+
+        all_blackouts = list(blackouts_qs)
+        from .services import build_utc_interval_for_start_date, get_candidate_intervals_for_target_date
 
         for i in range(7):
             current_date = today + timedelta(days=i)
             weekday_name = current_date.strftime('%A').lower()
 
-            # Find matching availabilities
-            day_avails = availabilities.filter(weekday_or_date__in=[weekday_name, str(current_date)])
-            day_blackouts = blackouts.filter(weekday_or_date__in=[weekday_name, str(current_date)])
+            # Find matching availabilities starting on current_date
+            day_avails = [
+                a for a in availabilities_qs
+                if a.weekday_or_date.strip().lower() in (weekday_name, str(current_date))
+            ]
 
-            if not day_avails.exists() or day_blackouts.exists():
+            if not day_avails:
                 continue
 
-            for avail in day_avails:
-                start_time = avail.start_time
-                end_time = avail.end_time
+            # Build all blackout UTC intervals that could overlap slots starting on current_date
+            # (or extending into current_date + 1 day for cross-midnight availability windows)
+            active_blackout_intervals = []
+            for b in all_blackouts:
+                active_blackout_intervals.extend(
+                    get_candidate_intervals_for_target_date(b.weekday_or_date, b.start_time, b.end_time, current_date)
+                )
+                active_blackout_intervals.extend(
+                    get_candidate_intervals_for_target_date(b.weekday_or_date, b.start_time, b.end_time, current_date + timedelta(days=1))
+                )
 
-                current_time = datetime.combine(current_date, start_time)
-                limit_time = datetime.combine(current_date, end_time)
-                window_delta = limit_time - current_time
+            for avail in day_avails:
+                slot_window_start, slot_window_end = build_utc_interval_for_start_date(
+                    current_date, avail.start_time, avail.end_time
+                )
+                window_delta = slot_window_end - slot_window_start
                 if window_delta.total_seconds() <= 0:
                     continue
 
-                # If the availability window itself is shorter than slot_minutes (e.g. a 30-min or 45-min slot),
-                # use the window's actual duration so sub-hour slots are still returned!
                 step_delta = timedelta(minutes=slot_minutes)
                 if window_delta < step_delta:
                     step_delta = window_delta
 
-                while current_time + step_delta <= limit_time:
-                    slot_start = timezone.make_aware(current_time, datetime_timezone.utc)
-                    slot_end = timezone.make_aware(current_time + step_delta, datetime_timezone.utc)
+                slot_start = slot_window_start
+                while slot_start + step_delta <= slot_window_end:
+                    slot_end = slot_start + step_delta
 
-                    # Check conflict with existing appointments or class sessions
-                    overlap_appt = Appointment.objects.filter(
-                        provider=provider,
-                        start_at__lt=slot_end,
-                        end_at__gt=slot_start,
-                    ).exclude(status='cancelled').exists()
+                    # Check partial or full overlap with blackout intervals
+                    overlap_blackout = any(
+                        slot_start < b_end and slot_end > b_start
+                        for b_start, b_end in active_blackout_intervals
+                    )
 
-                    overlap_session = ClassSession.objects.filter(
-                        staff=provider,
-                        start_at__lt=slot_end,
-                        end_at__gt=slot_start,
-                    ).exclude(status='cancelled').exists()
+                    if not overlap_blackout:
+                        # Check conflict with existing appointments or class sessions
+                        overlap_appt = Appointment.objects.filter(
+                            provider=provider,
+                            start_at__lt=slot_end,
+                            end_at__gt=slot_start,
+                        ).exclude(status='cancelled').exists()
 
-                    if not overlap_appt and not overlap_session:
-                        slots.append({
-                            "start_at": slot_start,
-                            "end_at": slot_end,
-                            "duration_min": int(step_delta.total_seconds() // 60),
-                        })
+                        overlap_session = ClassSession.objects.filter(
+                            staff=provider,
+                            start_at__lt=slot_end,
+                            end_at__gt=slot_start,
+                        ).exclude(status='cancelled').exists()
 
-                    current_time += step_delta
+                        if not overlap_appt and not overlap_session:
+                            slots.append({
+                                "start_at": slot_start,
+                                "end_at": slot_end,
+                                "duration_min": int(step_delta.total_seconds() // 60),
+                                "location": str(avail.location_id) if avail.location_id else None,
+                            })
+
+                    slot_start += step_delta
 
         return Response({"availability": slots})
 
@@ -2386,12 +2419,15 @@ class ReportsView(APIView):
             for inst in instructors:
                 # Find available hours from StaffAvailability
                 avails = StaffAvailability.objects.filter(staff=inst, is_blackout=False)
-                # For MVP: simple calculation of avail hours (summing up avail windows)
+                if location_id:
+                    avails = avails.filter(Q(location_id=location_id) | Q(location__isnull=True))
+                # Sum available hours, supporting cross-midnight windows where end_time < start_time
                 total_avail_hours = 0
+                from .services import build_utc_interval_for_start_date
+                ref_date = timezone.now().date()
                 for a in avails:
-                    dummy_start = datetime.combine(timezone.now().date(), a.start_time)
-                    dummy_end = datetime.combine(timezone.now().date(), a.end_time)
-                    total_avail_hours += (dummy_end - dummy_start).total_seconds() / 3600.0
+                    s_dt, e_dt = build_utc_interval_for_start_date(ref_date, a.start_time, a.end_time)
+                    total_avail_hours += (e_dt - s_dt).total_seconds() / 3600.0
 
                 # Booked hours from class sessions
                 sessions = ClassSession.objects.filter(

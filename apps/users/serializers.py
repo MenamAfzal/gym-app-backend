@@ -900,6 +900,8 @@ class StaffDetailedSchedulingSerializer(serializers.ModelSerializer):
         all_availabilities = getattr(obj, 'prefetched_availabilities', list(obj.availabilities.all()))
         return [{
             "id": str(a.id),
+            "location": str(a.location_id) if getattr(a, 'location_id', None) else None,
+            "location_name": a.location.name if getattr(a, 'location', None) else None,
             "weekday_or_date": a.weekday_or_date,
             "start_time": a.start_time.isoformat() if hasattr(a.start_time, 'isoformat') else str(a.start_time),
             "end_time": a.end_time.isoformat() if hasattr(a.end_time, 'isoformat') else str(a.end_time),

@@ -449,7 +449,7 @@ class UserViewSet(viewsets.ModelViewSet):
                 staff_locs_map.setdefault(sl.staff_id, []).append(sl)
                 
             # Fetch availabilities
-            avails = StaffAvailability.objects.filter(staff_id__in=user_ids)
+            avails = StaffAvailability.objects.filter(staff_id__in=user_ids).select_related('location')
             avails_map = {}
             for a in avails:
                 avails_map.setdefault(a.staff_id, []).append(a)
@@ -532,7 +532,7 @@ class UserViewSet(viewsets.ModelViewSet):
             serializer = ClientDetailedSchedulingSerializer(user)
         else:
             user.prefetched_staff_locations = list(StaffLocation.objects.filter(staff=user).select_related('location'))
-            user.prefetched_availabilities = list(StaffAvailability.objects.filter(staff=user))
+            user.prefetched_availabilities = list(StaffAvailability.objects.filter(staff=user).select_related('location'))
             user.prefetched_sessions = list(ClassSession.objects.filter(staff=user).select_related('template', 'template__location', 'room'))
             user.prefetched_provider_appointments = list(Appointment.objects.filter(provider=user).select_related('client', 'client__profile', 'location', 'room'))
             user.prefetched_assigned_clients = list(StaffClientAssignment.objects.filter(staff=user).select_related('client', 'client__profile'))
