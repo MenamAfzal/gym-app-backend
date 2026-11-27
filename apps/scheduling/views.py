@@ -1776,6 +1776,18 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             return Response({"detail": "provider query param required."}, status=400)
         
         provider = get_object_or_404(User, id=provider_id, role__in=['trainer', 'gym_owner', 'gym_manager'])
+
+        raw_duration = (
+            request.query_params.get('duration_min')
+            or request.query_params.get('slot_minutes')
+            or request.query_params.get('duration')
+        )
+        try:
+            slot_minutes = int(raw_duration) if raw_duration else 60
+            if slot_minutes <= 0:
+                slot_minutes = 60
+        except (ValueError, TypeError):
+            slot_minutes = 60
         
         # Calculate availability for the next 7 days
         today = timezone.now().date()
@@ -1796,16 +1808,24 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 continue
 
             for avail in day_avails:
-                # Divide day into 1-hour slots
                 start_time = avail.start_time
                 end_time = avail.end_time
 
                 current_time = datetime.combine(current_date, start_time)
                 limit_time = datetime.combine(current_date, end_time)
+                window_delta = limit_time - current_time
+                if window_delta.total_seconds() <= 0:
+                    continue
 
-                while current_time + timedelta(hours=1) <= limit_time:
+                # If the availability window itself is shorter than slot_minutes (e.g. a 30-min or 45-min slot),
+                # use the window's actual duration so sub-hour slots are still returned!
+                step_delta = timedelta(minutes=slot_minutes)
+                if window_delta < step_delta:
+                    step_delta = window_delta
+
+                while current_time + step_delta <= limit_time:
                     slot_start = timezone.make_aware(current_time, datetime_timezone.utc)
-                    slot_end = timezone.make_aware(current_time + timedelta(hours=1), datetime_timezone.utc)
+                    slot_end = timezone.make_aware(current_time + step_delta, datetime_timezone.utc)
 
                     # Check conflict with existing appointments or class sessions
                     overlap_appt = Appointment.objects.filter(
@@ -1823,10 +1843,11 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                     if not overlap_appt and not overlap_session:
                         slots.append({
                             "start_at": slot_start,
-                            "end_at": slot_end
+                            "end_at": slot_end,
+                            "duration_min": int(step_delta.total_seconds() // 60),
                         })
 
-                    current_time += timedelta(hours=1)
+                    current_time += step_delta
 
         return Response({"availability": slots})
 

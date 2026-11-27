@@ -2341,6 +2341,31 @@ class ScheduleChangeNotificationTests(TestCase):
         )
         self.assertEqual(res_non_overlap.status_code, 201)
 
+        # 4. Sub-hour slot (e.g. 30 minutes: 08:00 to 08:30 on Tuesday) -> 201 Created & returned by availability endpoint
+        today_str = str(timezone.now().date())
+        sub_hour_payload = {
+            "staff": str(self.trainer1.id),
+            "weekday_or_date": today_str,
+            "start_time": "08:00:00",
+            "end_time": "08:30:00",
+            "is_blackout": False,
+        }
+        res_sub_hour = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            sub_hour_payload,
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id)
+        )
+        self.assertEqual(res_sub_hour.status_code, 201)
+
+        avail_res = self.client.get(
+            f'/api/v1/scheduling/appointments/availability/?provider={self.trainer1.id}',
+            HTTP_X_TENANT_ID=str(self.tenant.id)
+        )
+        self.assertEqual(avail_res.status_code, 200)
+        self.assertTrue(any(slot.get('duration_min') == 30 for slot in avail_res.data['availability']))
+
+
 
 
 
