@@ -2794,6 +2794,377 @@ class CrossMidnightStaffAvailabilityTests(TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(str(results[0]['location']), str(self.loc_boston.id))
 
+    def test_block_assigning_or_substituting_trainer_with_active_blackout_and_filter_by_is_blackout_and_date(self):
+        """
+        Verify:
+        1. Cannot create a ClassSession or assign/substitute a trainer who has an active blackout (`is_blackout=True`) during the session.
+        2. Cannot accept a SubstituteRequest for a trainer who has an active blackout during the session.
+        3. GET /api/v1/scheduling/staff-availability/?is_blackout=true&date=YYYY-MM-DD filters blackouts for that date.
+        """
+        from datetime import timezone as dt_timezone
+        target_date = (timezone.now() + timedelta(days=3)).date()
+        template = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.loc_boston,
+            name="Power HIIT",
+            duration_min=60,
+            default_capacity=10,
+        )
+
+        # Trainer 2 marks themselves unavailable (blackout) on target_date from 13:00 to 16:00 UTC
+        b_res = self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            {
+                "staff": str(self.trainer2.id),
+                "location": str(self.loc_boston.id),
+                "weekday_or_date": str(target_date),
+                "start_time": "13:00:00",
+                "end_time": "16:00:00",
+                "is_blackout": True,
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(b_res.status_code, 201)
+
+        # Also add a regular availability for trainer1 on target_date so we can test ?is_blackout=true filtering
+        self.client.post(
+            '/api/v1/scheduling/staff-availability/',
+            {
+                "staff": str(self.trainer1.id),
+                "location": str(self.loc_boston.id),
+                "weekday_or_date": str(target_date),
+                "start_time": "08:00:00",
+                "end_time": "18:00:00",
+                "is_blackout": False,
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+
+        # 1. Test ?is_blackout=true&date=<target_date> filter
+        filter_res = self.client.get(
+            f'/api/v1/scheduling/staff-availability/?is_blackout=true&date={target_date}',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(filter_res.status_code, 200)
+        filter_items = filter_res.data['results'] if isinstance(filter_res.data, dict) else filter_res.data
+        self.assertEqual(len(filter_items), 1)
+        self.assertEqual(str(filter_items[0]['staff']), str(self.trainer2.id))
+        self.assertTrue(filter_items[0]['is_blackout'])
+
+        # 2. Attempt to create a session at 14:00 - 15:00 UTC assigned directly to trainer2 (who is on blackout)
+        sess_start = timezone.make_aware(datetime.combine(target_date, time(14, 0)), dt_timezone.utc)
+        sess_end = timezone.make_aware(datetime.combine(target_date, time(15, 0)), dt_timezone.utc)
+        create_sess_res = self.client.post(
+            '/api/v1/scheduling/sessions/',
+            {
+                "template": str(template.id),
+                "room": str(self.room.id),
+                "staff": str(self.trainer2.id),
+                "start_at": sess_start.isoformat(),
+                "end_at": sess_end.isoformat(),
+                "capacity": 10,
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(create_sess_res.status_code, 400)
+        self.assertIn("unavailable", str(create_sess_res.data).lower())
+
+        # 3. Create the session with trainer1 (available) -> 201 Created
+        valid_sess_res = self.client.post(
+            '/api/v1/scheduling/sessions/',
+            {
+                "template": str(template.id),
+                "room": str(self.room.id),
+                "staff": str(self.trainer1.id),
+                "start_at": sess_start.isoformat(),
+                "end_at": sess_end.isoformat(),
+                "capacity": 10,
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(valid_sess_res.status_code, 201)
+        session_id = valid_sess_res.data['id']
+
+        # 4. Attempt to substitute trainer1 -> trainer2 via PATCH /api/v1/scheduling/sessions/{id}/ -> 400 Bad Request
+        patch_sub_res = self.client.patch(
+            f'/api/v1/scheduling/sessions/{session_id}/',
+            {"staff": str(self.trainer2.id)},
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(patch_sub_res.status_code, 400)
+        self.assertIn("unavailable", str(patch_sub_res.data).lower())
+
+        # 5. Attempt to substitute trainer1 -> trainer2 via SubstituteRequestViewSet.accept -> 400 Bad Request
+        sub_req = SubstituteRequest.objects.create(
+            tenant=self.tenant,
+            session_id=session_id,
+            requested_by_staff=self.trainer1,
+            status='open',
+        )
+        accept_res = self.client.post(
+            f'/api/v1/scheduling/substitute-requests/{sub_req.id}/accept/',
+            {"trainer": str(self.trainer2.id)},
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(accept_res.status_code, 400)
+        self.assertIn("unavailable", str(accept_res.data).lower())
+
+    def test_configurable_staff_cooldown_minutes_between_sessions_and_appointments(self):
+        """
+        Verify configurable `staff_cooldown_minutes` (default 10 min) is enforced across:
+        1. Appointment -> Session (e.g. Appointment 09:00-10:00 blocks Session at 10:00 or 10:05, allows 10:10).
+        2. Session -> Session (Session 10:10-11:10 blocks Session at 11:15, allows 11:20).
+        3. Session -> Appointment (Session 10:10-11:10 blocks Appointment at 11:15, allows 11:20).
+        4. Configurable via PATCH /api/v1/scheduling/booking-settings/ (e.g. changing to 15 min).
+        """
+        from datetime import timezone as dt_timezone
+        target_date = (timezone.now() + timedelta(days=4)).date()
+        template = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.loc_boston,
+            name="Strength Circuit",
+            duration_min=60,
+            default_capacity=10,
+        )
+        pkg_type = PackageType.objects.create(
+            tenant=self.tenant,
+            location=self.loc_boston,
+            name="10 Pack",
+            credit_count=10,
+            price=100.00,
+            validity_days=30,
+        )
+        Package.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            package_type=pkg_type,
+            status='active',
+            credits_remaining=10,
+            expires_at=timezone.now() + timedelta(days=30),
+        )
+
+        # Verify default staff_cooldown_minutes is 10 in booking-settings
+        settings_res = self.client.get(
+            '/api/v1/scheduling/booking-settings/',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(settings_res.status_code, 200)
+        self.assertEqual(settings_res.data['staff_cooldown_minutes'], 10)
+
+        # Create an initial Appointment for trainer1 from 09:00 to 10:00 UTC
+        appt_start = timezone.make_aware(datetime.combine(target_date, time(9, 0)), dt_timezone.utc)
+        appt_end = timezone.make_aware(datetime.combine(target_date, time(10, 0)), dt_timezone.utc)
+        Appointment.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            provider=self.trainer1,
+            location=self.loc_boston,
+            room=self.room,
+            start_at=appt_start,
+            end_at=appt_end,
+            status='scheduled',
+        )
+
+        # 1. Appointment -> Session: Try scheduling a session starting at 10:00 (0 min gap) or 10:05 (5 min gap) -> 400 Cooldown conflict
+        sess_1005_start = timezone.make_aware(datetime.combine(target_date, time(10, 5)), dt_timezone.utc)
+        sess_1005_end = timezone.make_aware(datetime.combine(target_date, time(11, 5)), dt_timezone.utc)
+        res_cooldown_fail = self.client.post(
+            '/api/v1/scheduling/sessions/',
+            {
+                "template": str(template.id),
+                "room": str(self.room.id),
+                "staff": str(self.trainer1.id),
+                "start_at": sess_1005_start.isoformat(),
+                "end_at": sess_1005_end.isoformat(),
+                "capacity": 10,
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_cooldown_fail.status_code, 400)
+        self.assertIn("cooldown", str(res_cooldown_fail.data).lower())
+
+        # 2. Appointment -> Session: Schedule session starting at 10:10 (exact 10-min cooldown elapsed) -> 201 Created
+        sess_1010_start = timezone.make_aware(datetime.combine(target_date, time(10, 10)), dt_timezone.utc)
+        sess_1010_end = timezone.make_aware(datetime.combine(target_date, time(11, 10)), dt_timezone.utc)
+        res_cooldown_ok = self.client.post(
+            '/api/v1/scheduling/sessions/',
+            {
+                "template": str(template.id),
+                "room": str(self.room.id),
+                "staff": str(self.trainer1.id),
+                "start_at": sess_1010_start.isoformat(),
+                "end_at": sess_1010_end.isoformat(),
+                "capacity": 10,
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_cooldown_ok.status_code, 201, res_cooldown_ok.data)
+
+        # 3. Session -> Appointment: Try booking an appointment at 11:15 (only 5 min after session ends at 11:10) -> 400 Cooldown conflict
+        appt_1115_start = timezone.make_aware(datetime.combine(target_date, time(11, 15)), dt_timezone.utc)
+        appt_1115_end = timezone.make_aware(datetime.combine(target_date, time(12, 15)), dt_timezone.utc)
+        res_appt_fail = self.client.post(
+            '/api/v1/scheduling/appointments/',
+            {
+                "client": str(self.client1.id),
+                "provider": str(self.trainer1.id),
+                "location": str(self.loc_boston.id),
+                "room": str(self.room.id),
+                "start_at": appt_1115_start.isoformat(),
+                "end_at": appt_1115_end.isoformat(),
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_appt_fail.status_code, 400)
+        self.assertIn("cooldown", str(res_appt_fail.data).lower())
+
+        # 4. Session -> Appointment: Book appointment at 11:20 (10-min cooldown elapsed after 11:10) -> 201 Created
+        appt_1120_start = timezone.make_aware(datetime.combine(target_date, time(11, 20)), dt_timezone.utc)
+        appt_1120_end = timezone.make_aware(datetime.combine(target_date, time(12, 20)), dt_timezone.utc)
+        res_appt_ok = self.client.post(
+            '/api/v1/scheduling/appointments/',
+            {
+                "client": str(self.client1.id),
+                "provider": str(self.trainer1.id),
+                "location": str(self.loc_boston.id),
+                "room": str(self.room.id),
+                "start_at": appt_1120_start.isoformat(),
+                "end_at": appt_1120_end.isoformat(),
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_appt_ok.status_code, 201, res_appt_ok.data)
+
+    def test_block_class_session_create_and_update_when_staff_has_overlapping_appointment_or_session(self):
+        """
+        Verify:
+        1. Creating a ClassSession (with or without explicit end_at/capacity) is blocked when the assigned staff
+           member has an overlapping Appointment (e.g. 15:00-15:50) or an overlapping ClassSession.
+        2. Updating a ClassSession (changing time or reassigning staff) is blocked when the target staff member
+           has an overlapping Appointment or ClassSession.
+        3. Creating an Appointment is blocked when the staff member has an overlapping ClassSession.
+        """
+        from datetime import timezone as dt_timezone
+        target_date = (timezone.now() + timedelta(days=5)).date()
+        template_50 = ClassTemplate.objects.create(
+            tenant=self.tenant,
+            location=self.loc_boston,
+            name="50-Min Pilates",
+            duration_min=50,
+            default_capacity=12,
+        )
+
+        # Staff member (trainer1) has an appointment from 15:00 to 15:50 UTC
+        appt_start = timezone.make_aware(datetime.combine(target_date, time(15, 0)), dt_timezone.utc)
+        appt_end = timezone.make_aware(datetime.combine(target_date, time(15, 50)), dt_timezone.utc)
+        Appointment.objects.create(
+            tenant=self.tenant,
+            client=self.client1,
+            provider=self.trainer1,
+            location=self.loc_boston,
+            room=self.room,
+            start_at=appt_start,
+            end_at=appt_end,
+            status='scheduled',
+        )
+
+        # 1. Admin attempts to create a ClassSession for trainer1 at 15:00 (omitting end_at & capacity, just like frontend modal) -> 400 Bad Request
+        res_sess_vs_appt = self.client.post(
+            '/api/v1/scheduling/sessions/',
+            {
+                "template": str(template_50.id),
+                "staff": str(self.trainer1.id),
+                "start_at": appt_start.isoformat(),
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_sess_vs_appt.status_code, 400)
+        self.assertIn(
+            "This staff member already has an appointment scheduled during the selected time",
+            str(res_sess_vs_appt.data.get("detail", "")),
+        )
+
+        # 2. Create a valid ClassSession for trainer1 at 17:00 - 17:50 UTC -> 201 Created
+        sess_1700_start = timezone.make_aware(datetime.combine(target_date, time(17, 0)), dt_timezone.utc)
+        res_valid_sess = self.client.post(
+            '/api/v1/scheduling/sessions/',
+            {
+                "template": str(template_50.id),
+                "staff": str(self.trainer1.id),
+                "start_at": sess_1700_start.isoformat(),
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_valid_sess.status_code, 201, res_valid_sess.data)
+        valid_sess_id = res_valid_sess.data["id"]
+
+        # 3. Attempt to create a second overlapping ClassSession for trainer1 at 17:15 UTC -> 400 Bad Request
+        sess_1715_start = timezone.make_aware(datetime.combine(target_date, time(17, 15)), dt_timezone.utc)
+        res_sess_vs_sess = self.client.post(
+            '/api/v1/scheduling/sessions/',
+            {
+                "template": str(template_50.id),
+                "staff": str(self.trainer1.id),
+                "start_at": sess_1715_start.isoformat(),
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_sess_vs_sess.status_code, 400)
+        self.assertIn(
+            "This staff member is already assigned to another session",
+            str(res_sess_vs_sess.data.get("detail", "")),
+        )
+
+        # 4. Attempt to update (reschedule) the 17:00 session onto the 15:00 appointment slot -> 400 Bad Request
+        res_patch_to_appt = self.client.patch(
+            f'/api/v1/scheduling/sessions/{valid_sess_id}/',
+            {
+                "start_at": appt_start.isoformat(),
+                "end_at": appt_end.isoformat(),
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_patch_to_appt.status_code, 400)
+        self.assertIn(
+            "This staff member already has an appointment scheduled during the selected time",
+            str(res_patch_to_appt.data.get("detail", "")),
+        )
+
+        # 5. Attempt to book an Appointment for trainer1 overlapping the 17:00 - 17:50 session -> 400 Bad Request
+        res_appt_vs_sess = self.client.post(
+            '/api/v1/scheduling/appointments/',
+            {
+                "client": str(self.client1.id),
+                "provider": str(self.trainer1.id),
+                "location": str(self.loc_boston.id),
+                "start_at": sess_1715_start.isoformat(),
+                "end_at": (sess_1715_start + timedelta(minutes=50)).isoformat(),
+            },
+            format='json',
+            HTTP_X_TENANT_ID=str(self.tenant.id),
+        )
+        self.assertEqual(res_appt_vs_sess.status_code, 400)
+        self.assertIn(
+            "This staff member is already assigned to another session",
+            str(res_appt_vs_sess.data.get("detail", "")),
+        )
+
+
+
 
 
 

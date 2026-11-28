@@ -394,6 +394,173 @@ def _intervals_cover_target(intervals, target_start, target_end) -> bool:
     return cur_end >= target_end
 
 
+def get_tenant_staff_cooldown_delta(tenant=None, staff=None):
+    """
+    Returns a `datetime.timedelta` representing the tenant's configured `staff_cooldown_minutes`
+    (defaults to 10 minutes).
+    """
+    from datetime import timedelta
+    from .models import TenantBookingSettings
+    from apps.core.tenants.context import get_current_tenant
+
+    resolved_tenant = tenant or getattr(staff, 'tenant', None) or get_current_tenant()
+    settings_obj = TenantBookingSettings.get_or_create_for_tenant(resolved_tenant)
+    minutes = getattr(settings_obj, 'staff_cooldown_minutes', 10)
+    if minutes is None or minutes < 0:
+        minutes = 10
+    return timedelta(minutes=int(minutes)), int(minutes)
+
+
+def find_staff_blackout_overlap(staff, start_at, end_at, location=None):
+    """
+    Checks if `staff` has any active blackout (`StaffAvailability` with `is_blackout=True`)
+    overlapping the UTC datetime window `[start_at, end_at)`.
+    Returns the conflicting `(StaffAvailability, blackout_start_dt, blackout_end_dt)` tuple if found, else None.
+    """
+    if not staff or not start_at or not end_at:
+        return None
+    from datetime import timedelta
+    from .models import StaffAvailability
+
+    location_id = getattr(location, 'id', location) if location is not None else None
+    blackouts = list(StaffAvailability.all_objects.filter(staff=staff, is_blackout=True))
+    if not blackouts:
+        return None
+
+    # Check all calendar dates spanned by [start_at, end_at]
+    check_dates = set()
+    cur_date = start_at.date()
+    end_date = end_at.date()
+    while cur_date <= end_date:
+        check_dates.add(cur_date)
+        cur_date += timedelta(days=1)
+
+    for b in blackouts:
+        if not _locations_match(b.location_id, location_id):
+            continue
+        for target_d in sorted(check_dates):
+            for b_start, b_end in get_candidate_intervals_for_target_date(b.weekday_or_date, b.start_time, b.end_time, target_d):
+                if _interval_overlaps(start_at, end_at, b_start, b_end):
+                    return b, b_start, b_end
+    return None
+
+
+def check_staff_schedule_and_cooldown_conflict(
+    *,
+    staff,
+    start_at,
+    end_at,
+    tenant=None,
+    location=None,
+    exclude_session_id=None,
+    exclude_appointment_id=None,
+    check_blackout: bool = True,
+):
+    """
+    Checks whether assigning `staff` to a booking from `start_at` to `end_at` violates:
+    1. An active staff blackout / unavailability (`is_blackout=True`).
+    2. Direct overlap with an existing `ClassSession` or `Appointment`.
+    3. The tenant's configurable `staff_cooldown_minutes` buffer between consecutive
+       sessions and appointments (Session->Session, Session->Appointment,
+       Appointment->Session, Appointment->Appointment).
+
+    Returns a dictionary `{"type": ..., "detail": ...}` if a conflict exists, or `None` if valid.
+    """
+    if not staff or not start_at or not end_at:
+        return None
+
+    from .models import Appointment, ClassSession
+
+    # 1. Check staff blackout / unavailability
+    if check_blackout:
+        blackout_hit = find_staff_blackout_overlap(staff, start_at, end_at, location=location)
+        if blackout_hit:
+            b_obj, b_start, b_end = blackout_hit
+            return {
+                "type": "blackout",
+                "detail": (
+                    f"This staff member is marked unavailable (blackout from "
+                    f"{b_start.strftime('%H:%M')} to {b_end.strftime('%H:%M')} UTC) during the selected time slot."
+                ),
+            }
+
+    cooldown_delta, cooldown_minutes = get_tenant_staff_cooldown_delta(tenant=tenant, staff=staff)
+
+    # 2. Direct overlap check first (exact collision without cooldown across all locations)
+    sess_overlap_qs = ClassSession.all_objects.filter(
+        staff=staff,
+        start_at__lt=end_at,
+        end_at__gt=start_at,
+    ).exclude(status='cancelled')
+    if exclude_session_id:
+        sess_overlap_qs = sess_overlap_qs.exclude(id=exclude_session_id)
+    if sess_overlap_qs.exists():
+        return {
+            "type": "session_overlap",
+            "detail": (
+                "This staff member is already assigned to another session during the selected time. "
+                "Please select another time slot or assign a different staff member."
+            ),
+        }
+
+    appt_overlap_qs = Appointment.all_objects.filter(
+        provider=staff,
+        start_at__lt=end_at,
+        end_at__gt=start_at,
+    ).exclude(status='cancelled')
+    if exclude_appointment_id:
+        appt_overlap_qs = appt_overlap_qs.exclude(id=exclude_appointment_id)
+    if appt_overlap_qs.exists():
+        return {
+            "type": "appointment_overlap",
+            "detail": (
+                "This staff member already has an appointment scheduled during the selected time. "
+                "Please select another time slot or assign a different staff member."
+            ),
+        }
+
+    # 3. Cooldown buffer check: [start_at - cooldown_delta, end_at + cooldown_delta]
+    if cooldown_minutes > 0:
+        buffered_start = start_at - cooldown_delta
+        buffered_end = end_at + cooldown_delta
+
+        sess_cooldown_qs = ClassSession.all_objects.filter(
+            staff=staff,
+            start_at__lt=buffered_end,
+            end_at__gt=buffered_start,
+        ).exclude(status='cancelled')
+        if exclude_session_id:
+            sess_cooldown_qs = sess_cooldown_qs.exclude(id=exclude_session_id)
+        cooldown_sess = sess_cooldown_qs.order_by('start_at').first()
+        if cooldown_sess:
+            return {
+                "type": "cooldown_session",
+                "detail": (
+                    f"Cooldown conflict: A {cooldown_minutes}-minute cooldown period is required between consecutive bookings. "
+                    f"This staff member has a session ({cooldown_sess.start_at.strftime('%H:%M')} - {cooldown_sess.end_at.strftime('%H:%M')} UTC)."
+                ),
+            }
+
+        appt_cooldown_qs = Appointment.all_objects.filter(
+            provider=staff,
+            start_at__lt=buffered_end,
+            end_at__gt=buffered_start,
+        ).exclude(status='cancelled')
+        if exclude_appointment_id:
+            appt_cooldown_qs = appt_cooldown_qs.exclude(id=exclude_appointment_id)
+        cooldown_appt = appt_cooldown_qs.order_by('start_at').first()
+        if cooldown_appt:
+            return {
+                "type": "cooldown_appointment",
+                "detail": (
+                    f"Cooldown conflict: A {cooldown_minutes}-minute cooldown period is required between consecutive bookings. "
+                    f"This staff member has an appointment ({cooldown_appt.start_at.strftime('%H:%M')} - {cooldown_appt.end_at.strftime('%H:%M')} UTC)."
+                ),
+            }
+
+    return None
+
+
 def check_staff_availability_conflict(
     *,
     staff,

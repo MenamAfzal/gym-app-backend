@@ -332,6 +332,10 @@ class ClassSessionSerializer(serializers.ModelSerializer):
     bookings = serializers.SerializerMethodField()
     user_booking_status = serializers.SerializerMethodField()
 
+    blocked_spots = serializers.JSONField(required=False, default=list)
+    end_at = serializers.DateTimeField(required=False, allow_null=True)
+    capacity = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+
     class Meta:
         model = ClassSession
         fields = [
@@ -458,13 +462,19 @@ class ClassSessionSerializer(serializers.ModelSerializer):
     def validate(self, data):
         start = data.get('start_at', self.instance.start_at if self.instance else None)
         end = data.get('end_at', self.instance.end_at if self.instance else None)
+        template = data.get('template', self.instance.template if self.instance else None)
+        if not end and template and start:
+            duration = template.duration_min or 60
+            end = start + timedelta(minutes=duration)
+            data['end_at'] = end
         if start and end and start >= end:
             raise serializers.ValidationError("End time must be after start time.")
 
         # Capacity validation against layout bookable spots
         capacity = data.get('capacity', self.instance.capacity if self.instance else None)
-        if not capacity and data.get('template'):
-            capacity = data['template'].default_capacity
+        if not capacity and template:
+            capacity = template.default_capacity
+            data['capacity'] = capacity
         layout = data.get('layout') or (self.instance.layout if self.instance else None)
         if capacity and layout:
             from .services import validate_event_capacity
@@ -496,31 +506,31 @@ class ClassSessionSerializer(serializers.ModelSerializer):
             session_status = 'scheduled'
 
         if staff and start and end and session_status != 'cancelled':
-            staff_conflict_qs = ClassSession.objects.filter(
+            from .services import check_staff_schedule_and_cooldown_conflict
+            request = self.context.get('request')
+            tenant = (
+                getattr(request, 'tenant', None)
+                or (getattr(self.instance, 'tenant', None) if self.instance else None)
+                or getattr(staff, 'tenant', None)
+            )
+            loc = getattr(template, 'location', None) if template else None
+            conflict = check_staff_schedule_and_cooldown_conflict(
                 staff=staff,
-                start_at__lt=end,
-                end_at__gt=start,
-            ).exclude(status='cancelled')
-            if self.instance:
-                staff_conflict_qs = staff_conflict_qs.exclude(id=self.instance.id)
-
-            if staff_conflict_qs.exists():
+                start_at=start,
+                end_at=end,
+                tenant=tenant,
+                location=loc,
+                exclude_session_id=self.instance.id if self.instance else None,
+                check_blackout=True,
+            )
+            if conflict:
                 raise serializers.ValidationError({
-                    "staff": "This staff member is already assigned to another session at the same time slot."
-                })
-
-            appointment_conflict_qs = Appointment.objects.filter(
-                provider=staff,
-                start_at__lt=end,
-                end_at__gt=start,
-            ).exclude(status='cancelled')
-            if appointment_conflict_qs.exists():
-                raise serializers.ValidationError({
-                    "staff": "This staff member has a conflicting private appointment at the same time slot."
+                    "detail": conflict["detail"],
+                    "staff": conflict["detail"],
                 })
 
         if room and start and end and session_status != 'cancelled':
-            room_conflict_qs = ClassSession.objects.filter(
+            room_conflict_qs = ClassSession.all_objects.filter(
                 room=room,
                 start_at__lt=end,
                 end_at__gt=start,
@@ -530,7 +540,8 @@ class ClassSessionSerializer(serializers.ModelSerializer):
 
             if room_conflict_qs.exists():
                 raise serializers.ValidationError({
-                    "room": "This room is already reserved for another session at the same time slot."
+                    "detail": "This room is already reserved for another session at the same time slot.",
+                    "room": "This room is already reserved for another session at the same time slot.",
                 })
 
         return data
@@ -1626,6 +1637,7 @@ class EventRosterSerializer(serializers.ModelSerializer):
 class TenantBookingSettingsSerializer(serializers.ModelSerializer):
     session_late_cancellation = serializers.IntegerField(source='session_late_cancellation_hours', required=False, min_value=0)
     appointment_late_cancellation = serializers.IntegerField(source='appointment_late_cancellation_hours', required=False, min_value=0)
+    cooldown_minutes = serializers.IntegerField(source='staff_cooldown_minutes', required=False, min_value=0)
 
     class Meta:
         model = TenantBookingSettings
@@ -1634,6 +1646,7 @@ class TenantBookingSettingsSerializer(serializers.ModelSerializer):
             'is_available_for_scheduling',
             'session_late_cancellation_hours', 'session_booking_credits',
             'appointment_late_cancellation_hours', 'appointment_booking_credits',
+            'staff_cooldown_minutes', 'cooldown_minutes',
             'session_late_cancellation', 'appointment_late_cancellation',
             'created_at', 'updated_at'
         ]
@@ -1661,7 +1674,14 @@ class TenantBookingSettingsSerializer(serializers.ModelSerializer):
             data['session_booking_credits'] = data['session_credits']
         if 'appointment_credits' in data and 'appointment_booking_credits' not in data:
             data['appointment_booking_credits'] = data['appointment_credits']
+        if 'cooldown_minutes' in data and 'staff_cooldown_minutes' not in data:
+            data['staff_cooldown_minutes'] = data['cooldown_minutes']
         return super().to_internal_value(data)
+
+    def validate_staff_cooldown_minutes(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Staff cooldown minutes cannot be negative.")
+        return value
 
     def validate_session_booking_credits(self, value):
         if value < 1:

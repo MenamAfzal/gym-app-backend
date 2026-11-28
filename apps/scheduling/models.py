@@ -1057,6 +1057,11 @@ class TenantBookingSettings(UUIDMixin, TimestampMixin):
     session_booking_credits = models.PositiveIntegerField(default=1, validators=[MinValueValidator(1)])
     appointment_late_cancellation_hours = models.PositiveIntegerField(default=12, validators=[MinValueValidator(0)])
     appointment_booking_credits = models.PositiveIntegerField(default=1, validators=[MinValueValidator(1)])
+    staff_cooldown_minutes = models.PositiveIntegerField(
+        default=10,
+        validators=[MinValueValidator(0)],
+        help_text="Minimum cooldown buffer (in minutes) required between consecutive sessions/appointments for the same staff member"
+    )
 
     class Meta:
         verbose_name = 'Tenant Booking Settings'
@@ -1073,7 +1078,8 @@ class TenantBookingSettings(UUIDMixin, TimestampMixin):
                 session_late_cancellation_hours=12,
                 session_booking_credits=1,
                 appointment_late_cancellation_hours=12,
-                appointment_booking_credits=1
+                appointment_booking_credits=1,
+                staff_cooldown_minutes=10
             )
         if isinstance(tenant, (str, uuid.UUID)):
             from apps.core.tenants.models import Tenant
@@ -1084,12 +1090,14 @@ class TenantBookingSettings(UUIDMixin, TimestampMixin):
                     session_late_cancellation_hours=12,
                     session_booking_credits=1,
                     appointment_late_cancellation_hours=12,
-                    appointment_booking_credits=1
+                    appointment_booking_credits=1,
+                    staff_cooldown_minutes=10
                 )
         settings_obj, created = cls.objects.get_or_create(
             tenant=tenant,
             defaults={
-                'is_available_for_scheduling': getattr(tenant, 'is_available_for_scheduling', False)
+                'is_available_for_scheduling': getattr(tenant, 'is_available_for_scheduling', False),
+                'staff_cooldown_minutes': 10,
             }
         )
         return settings_obj

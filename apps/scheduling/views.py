@@ -463,6 +463,38 @@ class StaffAvailabilityViewSet(viewsets.ModelViewSet):
         location_id = self.request.query_params.get('location') or self.request.query_params.get('location_id')
         if location_id:
             qs = qs.filter(location_id=location_id)
+
+        is_blackout_param = self.request.query_params.get('is_blackout')
+        if is_blackout_param is not None and str(is_blackout_param).strip() != '':
+            val_lower = str(is_blackout_param).strip().lower()
+            if val_lower in ('true', '1', 'yes'):
+                qs = qs.filter(is_blackout=True)
+            elif val_lower in ('false', '0', 'no'):
+                qs = qs.filter(is_blackout=False)
+
+        weekday_param = self.request.query_params.get('weekday') or self.request.query_params.get('weekday_or_date')
+        if weekday_param:
+            qs = qs.filter(weekday_or_date__iexact=str(weekday_param).strip())
+
+        date_param = self.request.query_params.get('date')
+        if date_param:
+            parsed_d = parse_date(str(date_param).strip())
+            if parsed_d:
+                from .services import get_candidate_intervals_for_target_date, _interval_overlaps
+                from datetime import time as time_cls
+                day_start = timezone.make_aware(datetime.combine(parsed_d, time_cls(0, 0, 0)), datetime_timezone.utc)
+                day_end = timezone.make_aware(datetime.combine(parsed_d + timedelta(days=1), time_cls(0, 0, 0)), datetime_timezone.utc)
+                matching_ids = []
+                for item in qs:
+                    intervals = get_candidate_intervals_for_target_date(
+                        item.weekday_or_date, item.start_time, item.end_time, parsed_d
+                    )
+                    if any(_interval_overlaps(day_start, day_end, s_dt, e_dt) for s_dt, e_dt in intervals):
+                        matching_ids.append(item.id)
+                qs = qs.filter(id__in=matching_ids)
+            else:
+                qs = qs.filter(weekday_or_date__iexact=str(date_param).strip())
+
         return qs
 
     def perform_create(self, serializer):
@@ -604,15 +636,21 @@ class RecurrenceRuleViewSet(viewsets.ModelViewSet):
                     if room_conflict:
                         raise ValidationError(f"Room conflict detected for {rule.room} on {current_date} at {rule.start_time}")
 
-                # Staff Conflict check
+                # Staff Conflict check (sessions, appointments, blackouts, and cooldown buffer)
                 if rule.staff:
-                    staff_conflict = ClassSession.objects.filter(
+                    from .services import check_staff_schedule_and_cooldown_conflict
+                    conflict = check_staff_schedule_and_cooldown_conflict(
                         staff=rule.staff,
-                        start_at__lt=end_at,
-                        end_at__gt=start_at,
-                    ).exclude(status='cancelled').exists()
-                    if staff_conflict:
-                        raise ValidationError(f"Staff conflict detected for {rule.staff.email} on {current_date} at {rule.start_time}")
+                        start_at=start_at,
+                        end_at=end_at,
+                        tenant=rule.tenant,
+                        location=rule.template.location if rule.template else None,
+                        check_blackout=True,
+                    )
+                    if conflict:
+                        raise ValidationError(
+                            f"Staff conflict detected for {rule.staff.email} on {current_date} at {rule.start_time}: {conflict['detail']}"
+                        )
 
                 sessions_to_create.append(
                     ClassSession(
@@ -1810,7 +1848,15 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             blackouts_qs = blackouts_qs.filter(Q(location_id=location_id) | Q(location__isnull=True))
 
         all_blackouts = list(blackouts_qs)
-        from .services import build_utc_interval_for_start_date, get_candidate_intervals_for_target_date
+        from .services import (
+            build_utc_interval_for_start_date,
+            get_candidate_intervals_for_target_date,
+            get_tenant_staff_cooldown_delta,
+        )
+        cooldown_delta, _ = get_tenant_staff_cooldown_delta(
+            tenant=getattr(request, 'tenant', None) or getattr(provider, 'tenant', None),
+            staff=provider,
+        )
 
         for i in range(7):
             current_date = today + timedelta(days=i)
@@ -1859,17 +1905,20 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                     )
 
                     if not overlap_blackout:
-                        # Check conflict with existing appointments or class sessions
+                        # Check conflict with existing appointments or class sessions (including cooldown buffer)
+                        buffered_start = slot_start - cooldown_delta
+                        buffered_end = slot_end + cooldown_delta
+
                         overlap_appt = Appointment.objects.filter(
                             provider=provider,
-                            start_at__lt=slot_end,
-                            end_at__gt=slot_start,
+                            start_at__lt=buffered_end,
+                            end_at__gt=buffered_start,
                         ).exclude(status='cancelled').exists()
 
                         overlap_session = ClassSession.objects.filter(
                             staff=provider,
-                            start_at__lt=slot_end,
-                            end_at__gt=slot_start,
+                            start_at__lt=buffered_end,
+                            end_at__gt=buffered_start,
                         ).exclude(status='cancelled').exists()
 
                         if not overlap_appt and not overlap_session:
@@ -1911,21 +1960,24 @@ class AppointmentViewSet(viewsets.ModelViewSet):
             if data.get('client') and data['client'] != request.user:
                 return Response({"detail": "You cannot book appointments on behalf of other clients."}, status=status.HTTP_403_FORBIDDEN)
 
-        # Conflict check
-        overlap_appt = Appointment.objects.filter(
-            provider=provider,
-            start_at__lt=end_at,
-            end_at__gt=start_at,
-        ).exclude(status='cancelled').exists()
-
-        overlap_session = ClassSession.objects.filter(
+        # Conflict check (blackout, direct overlap, and staff cooldown buffer)
+        from .services import check_staff_schedule_and_cooldown_conflict
+        provider_conflict = check_staff_schedule_and_cooldown_conflict(
             staff=provider,
-            start_at__lt=end_at,
-            end_at__gt=start_at,
-        ).exclude(status='cancelled').exists()
-
-        if overlap_appt or overlap_session:
-            return Response({"detail": "Provider is not available during this time slot."}, status=status.HTTP_400_BAD_REQUEST)
+            start_at=start_at,
+            end_at=end_at,
+            tenant=getattr(request, 'tenant', None) or getattr(provider, 'tenant', None),
+            location=data.get('location'),
+            check_blackout=True,
+        )
+        if provider_conflict:
+            return Response(
+                {
+                    "detail": provider_conflict["detail"],
+                    "provider": provider_conflict["detail"],
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # Check client conflict
         client_appt_conflict = Appointment.objects.filter(
@@ -2054,6 +2106,30 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         old_end_at = serializer.instance.end_at
         old_provider = serializer.instance.provider
 
+        new_status = serializer.validated_data.get('status', old_status)
+        new_start_at = serializer.validated_data.get('start_at', old_start_at)
+        new_end_at = serializer.validated_data.get('end_at', old_end_at)
+        new_provider = serializer.validated_data.get('provider', old_provider)
+        new_location = serializer.validated_data.get('location', serializer.instance.location)
+
+        if new_status != 'cancelled' and (
+            new_start_at != old_start_at
+            or new_end_at != old_end_at
+            or new_provider != old_provider
+        ):
+            from .services import check_staff_schedule_and_cooldown_conflict
+            conflict = check_staff_schedule_and_cooldown_conflict(
+                staff=new_provider,
+                start_at=new_start_at,
+                end_at=new_end_at,
+                tenant=serializer.instance.tenant,
+                location=new_location,
+                exclude_appointment_id=serializer.instance.id,
+                check_blackout=True,
+            )
+            if conflict:
+                raise serializers.ValidationError({"detail": conflict["detail"]})
+
         appointment = serializer.save()
 
         if appointment.status == 'cancelled' and old_status != 'cancelled':
@@ -2164,23 +2240,21 @@ class SubstituteRequestViewSet(viewsets.ModelViewSet):
             if request.data.get('trainer') and str(request.data.get('trainer')) != str(request.user.id):
                 return Response({"detail": "You cannot accept substitution requests on behalf of other trainers."}, status=status.HTTP_403_FORBIDDEN)
 
-        # Check staff conflict for target_trainer
+        # Check staff conflict for target_trainer (sessions, appointments, blackouts, and cooldown buffer)
         session = sub_req.session
-        staff_conflict = ClassSession.objects.filter(
+        from .services import check_staff_schedule_and_cooldown_conflict
+        conflict = check_staff_schedule_and_cooldown_conflict(
             staff=target_trainer,
-            start_at__lt=session.end_at,
-            end_at__gt=session.start_at,
-        ).exclude(status='cancelled').exclude(id=session.id).exists()
-
-        appointment_conflict = Appointment.objects.filter(
-            provider=target_trainer,
-            start_at__lt=session.end_at,
-            end_at__gt=session.start_at,
-        ).exclude(status='cancelled').exists()
-
-        if staff_conflict or appointment_conflict:
+            start_at=session.start_at,
+            end_at=session.end_at,
+            tenant=session.tenant,
+            location=session.template.location if session.template else None,
+            exclude_session_id=session.id,
+            check_blackout=True,
+        )
+        if conflict:
             return Response(
-                {"detail": "This staff member is already assigned to another session at the same time slot."},
+                {"detail": conflict["detail"]},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
